@@ -1,0 +1,16 @@
+{
+  "name": "interviewai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --cwd server dev & bun run --cwd client dev",
+    "dev:server": "bun run --cwd server dev",
+    "dev:client": "bun run --cwd client dev",
+    "install:all": "bun install && bun install --cwd server && bun install --cwd client",
+    "build": "bun run --cwd client build",
+    "start": "bun run --cwd server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,165 @@
+import asyncio
+from types import SimpleNamespace
+
+from config import Settings
+from interview.turns import (
+    MAX_BACKEND_EVENTS,
+    REPEAT_DIRECTIVE,
+    TurnWatchdog,
+    apply_language_profile,
+    build_turn_handling,
+    detector_covers,
+    endpointing_options,
+    summarize,
+)
+
+
+def _settings(**overrides) -> Settings:
+    return Settings(_env_file=None, **overrides)
+
+
+def test_detector_covers_only_hindi_and_english():
+    assert detector_covers("hi-IN") and detector_covers("en-IN")
+    for lang in ("mr-IN", "ta-IN", "te-IN", "kn-IN", "ml-IN"):
+        assert not detector_covers(lang)
+
+
+def test_uncovered_languages_get_a_higher_silence_floor():
+    s = _settings()
+    assert endpointing_options("hi-IN", s)["min_delay"] == s.endpointing_min_delay
+    assert endpointing_options("mr-IN", s)["min_delay"] == s.endpointing_min_delay_uncovered
+    assert s.endpointing_min_delay_uncovered > s.endpointing_min_delay
+
+
+def test_without_the_detector_every_language_uses_the_safe_floor():
+    s = _settings(turn_detector_enabled=False)
+    assert endpointing_options("hi-IN", s)["min_delay"] == s.endpointing_min_delay_uncovered
+
+
+def test_max_delay_never_below_min_delay():
+    s = _settings(endpointing_max_delay=0.2, endpointing_min_delay_uncovered=0.8)
+    opts = endpointing_options("mr-IN", s)
+    assert opts["max_delay"] >= opts["min_delay"]
+
+
+def test_turn_handling_uses_detector_adaptive_interruptions_and_no_preemptive_by_default():
+    detector = object()
+    handling = build_turn_handling("hi-IN", _settings(), has_vad=True, detector=detector)
+    assert handling["turn_detection"] is detector
+    assert handling["interruption"]["mode"] == "adaptive"
+    assert handling["preemptive_generation"] == {"enabled": False}
+    assert handling["endpointing"]["mode"] == "dynamic"
+
+
+def test_turn_handling_falls_back_to_vad_then_stt():
+    assert build_turn_handling("hi-IN", _settings(), has_vad=True)["turn_detection"] == "vad"
+    no_vad = build_turn_handling("hi-IN", _settings(), has_vad=False)
+    assert no_vad["turn_detection"] == "stt"
+    assert no_vad["interruption"]["mode"] == "vad"
+
+
+def test_apply_language_profile_updates_the_session_and_survives_errors():
+    calls = []
+
+    class Session:
+        def update_options(self, **kw):
+            calls.append(kw)
+
+    s = _settings()
+    apply_language_profile(Session(), "mr-IN", s)
+    assert calls[0]["endpointing_opts"]["min_delay"] == s.endpointing_min_delay_uncovered
+
+    class Broken:
+        def update_options(self, **kw):
+            raise RuntimeError("boom")
+
+    apply_language_profile(Broken(), "hi-IN", s)  # must not raise
+
+
+def test_summarize():
+    out = summarize([0.4, 0.8, 1.2], {"transcription_timeouts": 1})
+    assert out["turns"] == 3 and out["eou_delay_median_s"] == 0.8 and out["eou_delay_max_s"] == 1.2
+    assert out["transcription_timeouts"] == 1
+    assert summarize([], {})["turns"] == 0
+
+
+class _FakeSession:
+    def __init__(self, agent_state="listening"):
+        self.agent_state = agent_state
+        self.handlers = {}
+        self.replies = []
+
+    def on(self, name, cb):
+        self.handlers[name] = cb
+
+    def generate_reply(self, **kw):
+        self.replies.append(kw)
+
+
+class _FakeBackend:
+    def __init__(self):
+        self.events = []
+
+    async def post_event(self, interview_id, event_type, data=None):
+        self.events.append((event_type, data))
+
+
+def _watchdog(session, backend, **settings):
+    wd = TurnWatchdog(session=session, backend=backend, interview_id="i1", settings=_settings(**settings))
+    wd.attach()
+    return wd
+
+
+def test_missing_transcript_asks_the_candidate_to_repeat_with_a_cap():
+    async def run():
+        session, backend = _FakeSession(), _FakeBackend()
+        wd = _watchdog(session, backend, max_repeat_prompts=2)
+        ev = SimpleNamespace(speech_duration=8.0)
+        for _ in range(4):
+            session.handlers["user_transcription_timeout"](ev)
+        await asyncio.sleep(0)
+        assert [r["instructions"] for r in session.replies] == [REPEAT_DIRECTIVE] * 2
+        assert wd.summary()["transcription_timeouts"] == 4
+        assert wd.summary()["repeat_prompts"] == 2
+
+    asyncio.run(run())
+
+
+def test_does_not_talk_over_the_agent():
+    async def run():
+        session = _FakeSession(agent_state="speaking")
+        _watchdog(session, _FakeBackend())
+        session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=5.0))
+        assert session.replies == []
+
+    asyncio.run(run())
+
+
+def test_records_eou_delays_ignores_other_metrics_and_posts_summary():
+    async def run():
+        session, backend = _FakeSession(), _FakeBackend()
+        wd = _watchdog(session, backend)
+        eou = SimpleNamespace(
+            type="eou_metrics", end_of_utterance_delay=0.6, transcription_delay=0.2, on_user_turn_completed_delay=0.05
+        )
+        session.handlers["metrics_collected"](SimpleNamespace(metrics=eou))
+        session.handlers["metrics_collected"](SimpleNamespace(metrics=SimpleNamespace(type="llm_metrics")))
+        session.handlers["agent_false_interruption"](SimpleNamespace(resumed=True))
+        await wd.post_summary()
+        event_type, data = backend.events[-1]
+        assert event_type == "turn.summary"
+        assert data["turns"] == 1 and data["false_interruptions"] == 1
+
+    asyncio.run(run())
+
+
+def test_backend_events_are_capped():
+    async def run():
+        session, backend = _FakeSession(), _FakeBackend()
+        _watchdog(session, backend, max_repeat_prompts=0)
+        for _ in range(MAX_BACKEND_EVENTS + 10):
+            session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=1.0))
+        await asyncio.sleep(0.05)
+        assert len(backend.events) == MAX_BACKEND_EVENTS
+
+    asyncio.run(run())

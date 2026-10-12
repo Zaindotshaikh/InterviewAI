@@ -1,0 +1,11 @@
+{
+  "go_no_go": {
+    "e2e_latency_p50_ms": 1400,
+    "e2e_latency_p95_ms": 2500,
+    "false_interruption_rate_max": 0.05,
+    "stt_wer_indic_max": 0.25,
+    "meaning_survival_min": 0.8
+  },
+  "languages_required": ["ta-IN", "te-IN", "kn-IN", "ml-IN", "hi-IN", "en-IN"],
+  "noise_conditions": ["quiet", "ward"]
+}

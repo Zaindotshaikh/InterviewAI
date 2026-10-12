@@ -1,0 +1,6 @@
+hi-IN -> नमस्ते! आपका स्वागत है। मैं Aven हूँ, Kreeda Labs से। तो, अपने बारे में थोड़ा बताइए?
+hi-IN -> अच्छा, तो... अगर ICU में कोई emergency जैसे code blue होती है, तो आप उसे कैसे handle करते हैं?
+mr-IN -> नमस्कार! मी Aven बोलतोय Kreeda Labs कडून. तुमचं नाव काय आहे आणि तुमच्याबद्दल थोडं सांगा ना?
+mr-IN -> बरं, emergency situations जसं code blue आल्यावर तुम्ही कसं handle करता?
+ta-IN -> வணக்கம், உங்க பெயர் என்ன? நா Aven from Kreeda Labs. உங்களைப் பத்தி கொஞ்சம் சொல்லுங்க?
+ta-IN -> அப்படியா... ICUல code blue மாதிரியான emergencies எப்படிச் handle பண்ணுறீங்க?

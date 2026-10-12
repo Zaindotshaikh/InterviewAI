@@ -1,0 +1,182 @@
+@import "tailwindcss";
+
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
+@theme {
+  --font-sans: "Century Gothic", CenturyGothic, AppleGothic, "URW Gothic", "Avant Garde", Futura, "Trebuchet MS", sans-serif;
+  --font-display: "Century Gothic", CenturyGothic, AppleGothic, "URW Gothic", "Avant Garde", Futura, "Trebuchet MS", sans-serif;
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  /* Charcoal canvas + Kreeda lime. Matches kreedalabs.com */
+  --color-ink: #0b0c0d;
+  --color-panel: #141616;
+  --color-panel-deep: #101211;
+  --color-fg: #f4f6f3;
+  --color-muted: #8b9388;
+  --color-line: #2a2e2a;
+  --color-accent: #6bb82f;
+  --color-on-accent: #ffffff;
+  --color-accent-dim: #1c2e10;
+  --color-brand: #6bb82f;
+  --color-warn: #f0b429;
+  --color-danger: #ef6b6b;
+  --color-hover: rgba(244, 246, 243, 0.06);
+  --color-overlay: rgba(8, 10, 9, 0.72);
+  --color-input: rgba(8, 10, 9, 0.55);
+  --color-caption: #d5ddd0;
+  --color-warn-surface: #2a2208;
+  --color-danger-surface: #2a1010;
+  --color-on-warn: #1a1400;
+  --color-on-danger: #1a0505;
+  --color-avatar-from: #243616;
+  --color-avatar-via: #161a14;
+  --color-avatar-to: #0b0c0d;
+  --color-orb-core: #121412;
+  --color-well: rgba(0, 0, 0, 0.28);
+  --bg-glow-1: rgba(107, 184, 47, 0.22);
+  --bg-glow-2: rgba(107, 184, 47, 0.1);
+  --shadow-panel: 0 24px 48px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 0 0 transparent;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  /* Off-white canvas + deeper lime for contrast on white */
+  --color-ink: #f4f6f2;
+  --color-panel: #ffffff;
+  --color-panel-deep: #eef1ea;
+  --color-fg: #121412;
+  --color-muted: #5a6158;
+  --color-line: #d8ddd3;
+  --color-accent: #4f961c;
+  --color-on-accent: #ffffff;
+  --color-accent-dim: #e7f5d4;
+  --color-brand: #4f961c;
+  --color-warn: #b45309;
+  --color-danger: #c2413b;
+  --color-hover: rgba(18, 20, 18, 0.05);
+  --color-overlay: rgba(18, 20, 18, 0.48);
+  --color-input: #f6f8f4;
+  --color-caption: #1e241c;
+  --color-warn-surface: #fff8eb;
+  --color-danger-surface: #fef2f2;
+  --color-on-warn: #1a1400;
+  --color-on-danger: #1a0505;
+  --color-avatar-from: #d4efb0;
+  --color-avatar-via: #e8f5d4;
+  --color-avatar-to: #eef1ea;
+  --color-orb-core: #e8ebe4;
+  --color-well: rgba(18, 20, 18, 0.04);
+  --bg-glow-1: rgba(107, 184, 47, 0.12);
+  --bg-glow-2: rgba(107, 184, 47, 0.07);
+  --shadow-panel: 0 1px 2px rgba(18, 20, 18, 0.04), 0 16px 40px rgba(18, 20, 18, 0.08);
+  --shadow-card: 0 1px 2px rgba(18, 20, 18, 0.04), 0 8px 24px rgba(18, 20, 18, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(ellipse 80% 45% at 50% -15%, var(--bg-glow-1) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, var(--bg-glow-2) 0%, transparent 50%),
+    var(--color-ink);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+
+  input,
+  textarea,
+  select {
+    color: var(--color-fg);
+    font-family: inherit;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-muted);
+    opacity: 0.85;
+  }
+}
+
+@keyframes orbiting-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orbiting-loader-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.12);
+  }
+}
+
+.orbiting-loader__core {
+  animation: orbiting-loader-pulse 1.8s ease-in-out infinite;
+}
+
+.orbiting-loader__orbit {
+  animation-name: orbiting-loader-spin;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes hud-scan {
+  0% {
+    transform: translateY(-120%);
+  }
+  100% {
+    transform: translateY(220%);
+  }
+}
+
+@keyframes hud-rec {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.hud-scan {
+  animation: hud-scan 7s linear infinite;
+}
+
+.hud-rec {
+  animation: hud-rec 1.6s ease-in-out infinite;
+}
+
+.hud-grid {
+  background-image:
+    linear-gradient(rgba(107, 184, 47, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(107, 184, 47, 0.06) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, black 20%, transparent 75%);
+}

@@ -1,0 +1,120 @@
+{
+  "interviewer": {
+    "name": "Aven",
+    "title": "Senior Interview Partner"
+  },
+  "industries": [
+    {
+      "id": "healthcare",
+      "label": "Nursing",
+      "blurb": "Ward, ICU and home-care nursing interviews.",
+      "roles": [
+        {
+          "id": "demo-hc-senior",
+          "seniority": "senior",
+          "title": "ICU / Critical Care Nurse",
+          "summary": "Care for critically ill and ventilated patients. Own monitoring, emergency response, infection control and tight teamwork with doctors.",
+          "responsibilities": [
+            "Set nursing standards and own clinical quality metrics for the service line",
+            "Build staffing models that protect safety without burning out the team",
+            "Partner with physicians and hospital admin on escalation and capacity",
+            "Coach nurse managers and own hiring, retention, and culture"
+          ],
+          "requirements": [
+            "10+ years in nursing with 5+ years of leadership",
+            "Registered nurse; postgraduate qualification preferred",
+            "Track record improving quality, staffing, or patient-experience scores"
+          ],
+          "questions": [
+            "How do you decide when a staffing gap is a risk you can absorb versus a risk you must escalate?",
+            "Tell me about a quality indicator you owned that was off-track. What did you change?",
+            "Describe a conflict between a physician group and your nursing team. How did you handle it?",
+            "How do you retain experienced nurses when the market is hiring aggressively?"
+          ],
+          "criteria": [
+            "Clinical and operational judgment",
+            "Quality ownership",
+            "Stakeholder and physician partnership",
+            "People leadership and retention"
+          ],
+          "sampleResume": {
+            "label": "Sample: 14 yrs, Apollo",
+            "yearsOfExperience": "14",
+            "currentCompany": "Apollo Hospitals",
+            "text": "DR. ANITA MENON, RN\nDirector of Nursing | 14 years\nApollo Hospitals, Chennai\n\nSUMMARY\nNursing leader for a 180-bed medical-surgical and HDU cluster. Own nurse staffing, falls, pressure-injury, and HCAHPS-equivalent patient-experience scores. Calm in capacity crunches.\n\nEXPERIENCE\nDirector of Nursing, Apollo Hospitals (2019–present)\n- Reduced inpatient falls 32% over 12 months with intentional rounding and night-shift huddles.\n- Cut agency spend 18% by redesigning the float pool and weekend rostering.\n- Built a charge-nurse development path; 6 of 9 current managers were promoted internally.\n\nNurse Manager, ICU, Apollo (2014–2019)\n- Led 42 ICU nurses; introduced a sepsis bundle checklist that improved door-to-antibiotic time.\n\nStaff Nurse then Charge Nurse, Fortis (2012–2014)\n\nEDUCATION\nB.Sc Nursing, CMC Vellore; M.Sc Nursing Administration\nRegistered Nurse, Tamil Nadu Nurses and Midwives Council\n\nSKILLS\nStaffing models, clinical quality, physician partnership, JCI audit readiness, coaching."
+          }
+        },
+        {
+          "id": "demo-hc-mid",
+          "seniority": "mid",
+          "title": "Staff Nurse",
+          "summary": "Deliver bedside care on a medical-surgical or specialty ward. Prioritize a full assignment, escalate deterioration early, and document with accuracy.",
+          "responsibilities": [
+            "Own a patient assignment: assessments, meds, education, and handoff",
+            "Recognize and escalate deterioration using the unit's early-warning process",
+            "Coordinate with physicians, pharmacy, and allied health",
+            "Keep documentation timely and audit-ready"
+          ],
+          "requirements": [
+            "2–6 years as a registered nurse, preferably inpatient",
+            "Valid RN license; BLS required, ACLS preferred depending on unit",
+            "Clear communicator under time pressure"
+          ],
+          "questions": [
+            "Walk me through how you prioritize when you have six patients and two of them spike a fever at once.",
+            "Tell me about a time you escalated a deteriorating patient. What did you notice first?",
+            "How do you handle a family who is angry about wait times while you are mid-medication round?",
+            "Describe a medication or protocol near-miss you caught. What did you change afterward?"
+          ],
+          "criteria": [
+            "Clinical prioritization",
+            "Escalation judgment",
+            "Communication under pressure",
+            "Safety and documentation discipline"
+          ],
+          "sampleResume": {
+            "label": "Sample: 4 yrs, Manipal",
+            "yearsOfExperience": "4",
+            "currentCompany": "Manipal Hospitals",
+            "text": "ROHAN PATEL, RN\nRegistered Nurse | 4 years\nManipal Hospitals, Bengaluru, Medical-Surgical\n\nSUMMARY\nBedside RN for a 36-bed med-surg ward. Comfortable with a 5–6 patient assignment, early-warning scores, and tight handoffs. Known for catching deterioration before it becomes a code.\n\nEXPERIENCE\nStaff Nurse, Manipal Hospitals (2022–present)\n- Average assignment of 5 patients; charge-nurse backup on nights twice a month.\n- Escalated a post-op patient with rising NEWS2; rapid response avoided ICU transfer delay.\n- Precepted 4 new graduates on meds, documentation, and family communication.\n\nStaff Nurse, Narayana Health (2022, 10 months)\n- Ortho-trauma ward; learned high-volume admissions and drain/wound protocols.\n\nEDUCATION\nB.Sc Nursing, Manipal College of Nursing\nRN, Karnataka State Nursing Council; BLS, ACLS\n\nSKILLS\nNEWS2, IV therapy, patient education, SBAR handoff, EMR (Cerner-equivalent)."
+          }
+        },
+        {
+          "id": "demo-hc-junior",
+          "seniority": "junior",
+          "title": "Home Care Nurse",
+          "summary": "Deliver nursing care in the patient's home. Work independently, keep families informed, and handle hygiene, medication and early signs of deterioration.",
+          "responsibilities": [
+            "Complete home visits: assessment, meds, personal care, and documentation",
+            "Help with bathing, toileting, diaper care and safe moving of bedridden patients",
+            "Explain the care plan to family and escalate if the patient is worse than last visit",
+            "Keep visit notes so the next nurse can continue care safely"
+          ],
+          "requirements": [
+            "GNM / B.Sc Nursing with 0–3 years, including internship or home-care exposure",
+            "Comfortable with essential personal-care duties, including incontinence care",
+            "Calm communicator with patients and families in a home setting"
+          ],
+          "questions": [
+            "Walk me through a typical home visit from arrival to leaving the house.",
+            "How do you keep a patient safe when you are the only nurse in the home?",
+            "Tell me about helping with bathing, diaper care or toileting in a home setting.",
+            "What would you do if you found the patient worse than the last visit?"
+          ],
+          "criteria": [
+            "Independent judgement in a home setting",
+            "Hands-on personal care including hygiene and incontinence care",
+            "Patient and family communication",
+            "Early recognition of deterioration"
+          ],
+          "sampleResume": {
+            "label": "Sample: 2 yrs, Portea",
+            "yearsOfExperience": "2",
+            "currentCompany": "Portea Medical",
+            "text": "SANA SHEIKH, GNM\nHome Care Nurse | 2 years\nPortea Medical, Mumbai\n\nSUMMARY\nHome-care nurse for elderly and post-op patients. Comfortable with vitals, meds, bathing, diaper care and family teaching. Known for staying calm when a visit does not go as planned.\n\nEXPERIENCE\nHome Care Nurse, Portea (2024–present)\n- 4–6 visits a day: vitals, wound care, injections, and personal hygiene including incontinence care.\n- Escalated a post-op patient with rising fever and low BP; doctor visit the same evening avoided an emergency admission.\n- Teach family turning and feeding so care continues between visits.\n\nStaff Nurse intern, municipal hospital (2023–2024)\n- Ward posting: meds, bed making, vital charts.\n\nEDUCATION\nGNM; Maharashtra Nursing Council; BLS\n\nSKILLS\nHome visits, vitals, IM/IV as trained, personal care, family education, visit notes."
+          }
+        }
+      ]
+    }
+  ]
+}

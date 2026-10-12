@@ -1,0 +1,939 @@
+"""Goal-driven interview flow.
+
+Code owns structure and guarantees: what must be learned, the persuasion limit on essential duties, how many times a
+topic may be probed, when to move on, when to stop. The LLM owns the conversation: it only phrases the directive in
+the candidate's language. Every decision here is a pure function of (state, analysis), so it is unit-testable.
+
+Stages: opening -> screening -> clinical -> closing -> ended.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from interview.analysis import (
+    ClinicalGrade,
+    TurnAnalysis,
+    build_user_payload,
+)
+from interview.blueprint import AreaSpec, Blueprint, FieldSpec
+from interview.flow_state import AreaProgress, FlowState
+from interview.normalize import normalize_field, spoken_groups
+from interview.plan import InterviewPlan
+
+NEGATIVE_STANCES = ("hesitant", "refuses")
+LOW_CONFIDENCE = 0.6
+MAX_CARE_ASKS = 2
+SAFETY_BASICS = ("medication_safety", "emergency_response", "infection_control")
+
+_TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "icu": ("icu", "nicu", "picu", "critical", "ccu", "ventilator", "iccu"),
+    "homecare": ("home", "private duty", "caregiver", "care giver", "elderly", "attendant", "domiciliary"),
+    "ward": ("ward", "general", "opd", "ot ", "operation", "clinic", "hospital", "nursing home"),
+}
+
+STYLE_FOOTER = (
+    "Reply in 1-2 short spoken sentences. Ask only ONE question. Do not say whether their answer was right or wrong."
+)
+
+
+@dataclass
+class Move:
+    kind: str
+    directive: str
+    completed: bool = False
+    end_session: bool = False
+    events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+
+class InterviewFlow:
+    def __init__(
+        self,
+        plan: InterviewPlan,
+        blueprint: Blueprint,
+        state: FlowState | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.plan = plan
+        self.bp = blueprint
+        self.state = state or FlowState(language=plan.language)
+        self._clock = clock
+        self._t0 = clock()
+        self._base_elapsed = self.state.elapsed_s
+        self._invalid: dict[str, str] = {}
+
+    # ------------------------------------------------------------------------------------------------ helpers
+
+    @property
+    def stage(self) -> str:
+        return self.state.stage
+
+    @property
+    def done(self) -> bool:
+        return self.state.stage == "ended"
+
+    def elapsed_s(self) -> float:
+        return self._base_elapsed + (self._clock() - self._t0)
+
+    def facts(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for fid, slot in self.state.slots.items():
+            if slot.status in ("captured", "confirmed"):
+                out[fid] = slot.value
+        for iid, care in self.state.care.items():
+            if care.stance != "unknown":
+                out[f"care:{iid}"] = care.stance
+        if self.state.experience_level != "unknown":
+            out["experience_level"] = self.state.experience_level
+        return out
+
+    def _facts_line(self) -> str:
+        facts = self.facts()
+        if not facts:
+            return ""
+        shown = ", ".join(f"{k}={v}" for k, v in facts.items() if k != "phone")
+        return f"\nWhat you already know about the candidate (do not ask again): {shown}."
+
+    def _wrap(self, move: Move, nervous: bool) -> Move:
+        if nervous:
+            self.state.nervous_events += 1
+            move.directive = (
+                "The candidate sounds nervous. First give one short, warm reassurance (no rush, no trick "
+                "questions, any answer is okay), then: " + move.directive
+            )
+        return move
+
+    def _move(self, kind: str, directive: str, **kw: Any) -> Move:
+        return Move(kind=kind, directive=f"{directive}{self._facts_line()}\n{STYLE_FOOTER}", **kw)
+
+    def _set_focus(self, type_: str, **kw: Any) -> None:
+        self.state.focus = {"type": type_, **kw}
+
+    # ----------------------------------------------------------------------------------------- analyst context
+
+    def pending_confirmation(self) -> tuple[str, str] | None:
+        f = self.state.focus
+        if f.get("type") == "confirm":
+            slot = self.state.slots.get(f.get("field", ""))
+            if slot and slot.value is not None:
+                return f["field"], str(slot.value)
+        return None
+
+    def analysis_payload(self, utterance: str, last_agent_text: str, recent_turns: list[dict[str, str]]) -> str:
+        st = self.state
+        fields_needed: list[dict[str, str]] = []
+        care_focus: list[dict[str, str]] = []
+        clinical_ctx: dict[str, Any] | None = None
+
+        if st.stage == "screening":
+            for spec in self.bp.fields:
+                slot = st.slots.get(spec.id)
+                if slot is None or slot.status == "empty":
+                    fields_needed.append({"id": spec.id, "label": spec.label, "kind": spec.kind})
+            if st.focus.get("type") == "care":
+                ids = set(st.focus.get("items") or ())
+                care_focus = [{"id": c.id, "label": c.label} for c in self.bp.care_items if c.id in ids]
+        elif st.stage == "clinical" and st.current_area:
+            area = self.bp.area(st.current_area)
+            if area:
+                prog = st.area_progress(area.id)
+                lv = area.level_spec(prog.level)
+                clinical_ctx = {
+                    "area_id": area.id,
+                    "title": area.title,
+                    "level": lv.level,
+                    "question_seed": st.focus.get("question") or lv.seed,
+                    "key_points": [{"id": k.id, "text": k.text} for k in lv.key_points],
+                    "red_flags": list(lv.red_flags),
+                }
+
+        pending = self.pending_confirmation()
+        return build_user_payload(
+            stage=st.stage,
+            utterance=utterance,
+            last_agent_text=last_agent_text or st.last_question,
+            recent_turns=recent_turns,
+            fields_needed=fields_needed,
+            care_focus=care_focus,
+            pending_confirmation={"field": pending[0], "value": pending[1]} if pending else None,
+            clinical_context=clinical_ctx,
+            known_facts=self.facts(),
+            known_claims=st.claims,
+            resume_summary=getattr(self.plan, "resume_text", "") or "",
+            language=st.language,
+        )
+
+    @property
+    def wants_clinical_model(self) -> bool:
+        return self.state.stage == "clinical"
+
+    # ------------------------------------------------------------------------------------------------ opening
+
+    def opening(self) -> Move:
+        st = self.state
+        if st.stage != "opening":
+            return self.resume()
+        name = self.plan.candidate_name or "the candidate"
+        st.screening_started_s = self.elapsed_s()
+        st.stage = "screening"
+        first = self._screening_next([])
+        ask = first.directive.removesuffix(f"\n{STYLE_FOOTER}")
+        greeting = (
+            f"Start with the greeting itself as your first spoken word (नमस्ते / नमस्कार / Hello). "
+            f"Greet {name} by name and introduce yourself as {self.plan.interviewer_name} from "
+            f"{self.plan.company_name}. In one short breath say this is a friendly two-part chat: first a few quick "
+            "details about them, then some nursing questions. Tell them they can speak in whatever language is "
+            "comfortable, mixing is fine, and there are no trick questions. This opening may be up to three short "
+            f"sentences, then ask only this first question: {ask}"
+        )
+        return Move("opening", greeting, events=[("flow.started", {"stage": "screening"})] + first.events)
+
+    def resume(self) -> Move:
+        st = self.state
+        st.interruptions += 1
+        last = f" Your last question was: {st.last_question}" if st.last_question else ""
+        if st.stage in ("closing", "ended"):
+            return self._move(
+                "resume_closing",
+                "The call dropped and came back while you were wrapping up. Welcome them back in a few words and "
+                "say a warm goodbye. Do not ask anything new.",
+                completed=True,
+                end_session=True,
+            )
+        return self._move(
+            "resume",
+            "The call was briefly interrupted and the candidate is back. In one short sentence say sorry for the "
+            f"break and welcome them back, then continue exactly where you were by repeating your last question "
+            f"in simple words.{last}",
+            events=[("flow.resumed", {"stage": st.stage})],
+        )
+
+    # ------------------------------------------------------------------------------------------ non-analysis
+
+    def noise_move(self) -> Move:
+        """Nothing usable was heard (empty transcript or noise marker)."""
+        return self._unclear()
+
+    def _unclear(self) -> Move:
+        st = self.state
+        st.unclear_streak += 1
+        st.unclear_total += 1
+        if st.unclear_streak >= self.bp.limits.max_unclear_streak:
+            st.unclear_streak = 0
+            return self._move(
+                "noise_help",
+                "Say kindly that you are having trouble hearing them. Suggest moving somewhere quieter, closer to the "
+                "phone, or using earphones. Then ask your last question again, simply.",
+                events=[("audio.noise_help", {"stage": st.stage, "total": st.unclear_total})],
+            )
+        return self._move(
+            "ask_repeat",
+            "You could not hear that clearly. Say sorry, name the part you missed if you know it (for example 'I "
+            "didn't catch your answer'), and ask them to say it once more. Do not guess what they said.",
+            events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
+        )
+
+    def silence(self, level: int) -> Move:
+        st = self.state
+        st.silence_level = level
+        if st.stage in ("closing", "ended"):
+            return self._move("goodbye", "Say a short goodbye.", completed=True, end_session=True)
+        if level <= 1:
+            return self._move(
+                "silence_nudge",
+                "The candidate has been quiet for a while. Gently say there is no hurry and offer to repeat the "
+                "question if they would like. Do not ask a new question.",
+            )
+        if level == 2:
+            return self._move(
+                "silence_rephrase",
+                "Still quiet. Check that they can hear you, then offer to ask the same thing in simpler words, or to "
+                "move on to the next question if they prefer.",
+            )
+        if level == 3:
+            return self._move(
+                "silence_check",
+                "Still no reply. Ask warmly if they are still there and say you will wait a little longer.",
+            )
+        return self._close(
+            "incomplete_silence",
+            "There has been no response for a long time. Say kindly that you will pause here, that they can rejoin "
+            "using the same link when they are ready, and thank them. Keep it to two short sentences.",
+            "silence_end",
+        )
+
+    def force_complete(self, reason: str = "time") -> Move:
+        return self._close(
+            reason,
+            "Time is up for this interview. Thank the candidate warmly by name, say the team will review the "
+            "conversation and be in touch, and say goodbye. Do not ask any new question.",
+            "time_limit",
+        )
+
+    # ------------------------------------------------------------------------------------------------- apply
+
+    def apply(self, a: TurnAnalysis) -> Move:
+        st = self.state
+        st.turns += 1
+        st.silence_level = 0
+        st.elapsed_s = self.elapsed_s()
+        self._invalid = {}
+
+        if st.stage == "ended":
+            return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
+        if st.elapsed_s >= self.bp.limits.hard_cap_minutes * 60:
+            return self.force_complete("time")
+
+        if a.intelligibility == "unclear" or a.intent == "filler_only":
+            return self._unclear()
+        st.unclear_streak = 0
+
+        if a.experience_level != "unknown" and st.experience_level == "unknown":
+            st.experience_level = a.experience_level
+        self._absorb_claims(a)
+
+        deferred, deferred_dk = None, False
+        if st.focus.get("type") == "contradiction":
+            deferred = st.focus.get("deferred_grade")
+            deferred_dk = bool(st.focus.get("deferred_dont_know"))
+            self._resolve_contradiction(a)
+
+        # Intents that never advance the interview
+        if a.intent == "repeat_request":
+            st.repeat_requests += 1
+            return self._wrap(self._repeat(), a.nervous)
+        if a.intent == "rephrase_request":
+            st.repeat_requests += 1
+            return self._wrap(self._rephrase(), a.nervous)
+        if a.intent == "candidate_question" and st.stage != "closing":
+            return self._wrap(self._answer_question(), a.nervous)
+        if a.intent == "wants_to_stop":
+            return self._wrap(self._handle_stop(), a.nervous)
+        if a.intent == "off_topic":
+            return self._wrap(self._redirect(), a.nervous)
+
+        if st.stage == "screening":
+            move = self._screening(a)
+        elif st.stage == "clinical":
+            move = self._clinical(a, deferred, deferred_dk)
+        elif st.stage == "closing":
+            move = self._closing(a)
+        else:
+            move = self._screening(a)
+        return self._wrap(move, a.nervous)
+
+    # ------------------------------------------------------------------------------------- generic behaviours
+
+    def _repeat(self) -> Move:
+        last = f" The question was: {self.state.last_question}" if self.state.last_question else ""
+        return self._move(
+            "repeat",
+            "The candidate asked you to repeat. Say it again once, a little slower and in plain words, without adding "
+            f"new content.{last}",
+        )
+
+    def _rephrase(self) -> Move:
+        return self._move(
+            "rephrase",
+            "The candidate did not understand your question. Ask the same thing again in simpler, everyday words and, "
+            "if it helps, a small relatable example. Do not give away the answer.",
+        )
+
+    def _redirect(self) -> Move:
+        return self._move(
+            "redirect",
+            "They went off topic. Acknowledge in a few words, then gently bring them back by asking your last "
+            "question again in other words.",
+        )
+
+    def _answer_question(self) -> Move:
+        faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
+        return self._move(
+            "answer_question",
+            "The candidate asked you a question. Answer ONLY from this information: "
+            f"{faq}. If it is not covered, say honestly that the recruitment team will share it. Never invent details "
+            "and never discuss their score or result. Then return to your last question.",
+        )
+
+    def _handle_stop(self) -> Move:
+        st = self.state
+        st.stop_requests += 1
+        if st.stop_requests >= 2:
+            return self._close(
+                "withdrew",
+                "The candidate wants to stop. Accept that respectfully, thank them, say they are welcome to continue "
+                "another time, and say goodbye.",
+                "candidate_withdrew",
+            )
+        return self._move(
+            "confirm_stop",
+            "The candidate may want to stop. Ask kindly whether they would like to stop, or whether a short break or "
+            "moving on at an easier pace would help.",
+        )
+
+    def _absorb_claims(self, a: TurnAnalysis) -> None:
+        st = self.state
+        for claim in a.new_claims:
+            if claim not in st.claims:
+                st.claims.append(claim)
+        del st.claims[:-30]
+
+    def _contradiction_move(
+        self, a: TurnAnalysis, deferred_grade: dict[str, Any] | None, *, dont_know: bool = False
+    ) -> Move | None:
+        st = self.state
+        lim = self.bp.limits
+        if not a.contradictions or st.contradiction_probes >= lim.max_contradiction_probes:
+            return None
+        c = a.contradictions[0]
+        st.contradiction_probes += 1
+        st.contradictions.append({**c, "turn": st.turns, "resolved": False, "resolution": ""})
+        # What the answer was is remembered, so the interview carries on from it once the probe is answered.
+        self._set_focus("contradiction", deferred_grade=deferred_grade, deferred_dont_know=dont_know)
+        return self._move(
+            "probe_contradiction",
+            f"Earlier the candidate said: \"{c['claim_a']}\". Just now they said: \"{c['claim_b']}\". Do not accuse "
+            "them. In a friendly way, say you want to note it down correctly and ask them to help you understand the "
+            "difference.",
+            events=[("contradiction.detected", {"a": c["claim_a"], "b": c["claim_b"], "note": c["note"]})],
+        )
+
+    def _resolve_contradiction(self, a: TurnAnalysis) -> None:
+        for c in reversed(self.state.contradictions):
+            if not c.get("resolved"):
+                c["resolved"] = True
+                c["resolution"] = a.gist_en[:300]
+                break
+
+    # ---------------------------------------------------------------------------------------------- screening
+
+    def _slots_done(self) -> bool:
+        return all(self.state.slots.get(f.id) and self.state.slots[f.id].status != "empty" for f in self.bp.fields)
+
+    def _absorb_slot_updates(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
+        st = self.state
+        for u in a.slot_updates:
+            spec = self.bp.field_spec(u.field)
+            if spec is None:
+                continue
+            norm = normalize_field(spec.kind, u.value)
+            slot = st.slot(spec.id)
+            if not norm.ok:
+                self._invalid[spec.id] = norm.reason
+                continue
+            if slot.status == "confirmed" and slot.value == norm.value:
+                continue
+            slot.value = norm.value
+            slot.status = "captured"
+            slot.confidence = u.confidence
+            slot.evidence = u.evidence[:200]
+            slot.turn = st.turns
+            events.append(("slot.captured", {"field": spec.id, "confidence": u.confidence, "pii": spec.kind == "phone"}))
+        years = st.slots.get("experience_years")
+        if years and years.status in ("captured", "confirmed") and years.value is not None:
+            n = float(years.value)
+            st.experience_level = "fresher" if n < 0.5 else "junior" if n < 3 else "experienced"
+
+    def _absorb_confirmation(self, a: TurnAnalysis) -> None:
+        pending = self.pending_confirmation()
+        if not pending or a.confirmation == "none":
+            return
+        field_id = pending[0]
+        slot = self.state.slot(field_id)
+        if a.confirmation == "confirmed":
+            slot.status = "confirmed"
+        elif a.confirmation == "denied":
+            fresh = any(u.field == field_id for u in a.slot_updates)
+            if not fresh:
+                slot.status, slot.value = "empty", None
+
+    def _absorb_care(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
+        for u in a.care_updates:
+            if self.bp.care_item(u.item) is None:
+                continue
+            care = self.state.care_state(u.item)
+            care.stance, care.reason, care.evidence = u.stance, u.reason[:200], u.evidence[:200]
+            events.append(("care.stance", {"item": u.item, "stance": u.stance}))
+
+    def _mark_care_focus_negative(self, intent: str) -> None:
+        """Apply no/idk on the current care focus when the analyst omitted care_updates.
+
+        Essential (gate) items must land in a negative stance so persuasion can run. Non-gate
+        items are marked too and then skipped — only gate_items enter the persuade loop.
+        """
+        st = self.state
+        for item_id in st.focus.get("items", []):
+            if self.bp.care_item(item_id) is None:
+                continue
+            care = st.care_state(item_id)
+            if care.stance not in ("unknown", *NEGATIVE_STANCES):
+                continue  # already willing / comfortable — do not overwrite
+            if intent == "refusal":
+                care.stance = "refuses"
+                care.reason = care.reason or "refused"
+            elif care.stance == "unknown":
+                care.stance, care.reason = "hesitant", "unsure"
+
+    def _screening(self, a: TurnAnalysis) -> Move:
+        st = self.state
+        events: list[tuple[str, dict[str, Any]]] = []
+        focus_type = st.focus.get("type")
+
+        self._absorb_confirmation(a)
+        self._absorb_slot_updates(a, events)
+        self._absorb_care(a, events)
+
+        if a.intent == "dont_know" and focus_type in ("slots", "confirm"):
+            # Candidate said they don't know — do not re-ask; mark the focus fields and move on.
+            self._give_up_focus_slots(hard_kinds=(), force=True)
+        elif a.intent in ("dont_know", "refusal") and focus_type == "care":
+            # Gate duties (diaper): no/idk → hesitant/refuses so persuasion runs (up to max_persuasions).
+            # Non-gate care: mark and move on — _screening_next only persuades gate_items.
+            self._mark_care_focus_negative(a.intent)
+        elif a.intent == "refusal" and focus_type in ("slots", "confirm"):
+            self._give_up_focus_slots(hard_kinds=(), refusal=True, force=True)
+
+        if focus_type != "contradiction":
+            move = self._contradiction_move(a, None)
+            if move:
+                move.events = events + move.events
+                return move
+        return self._screening_next(events)
+
+    def _give_up_focus_slots(
+        self, *, hard_kinds: tuple[str, ...], refusal: bool = False, force: bool = False
+    ) -> None:
+        st = self.state
+        for fid in st.focus.get("ids", []):
+            spec = self.bp.field_spec(fid)
+            slot = st.slot(fid)
+            if spec is None or slot.status != "empty":
+                continue
+            # force=True: candidate said "I don't know" / refused — never hang on the same field.
+            if force or spec.kind in hard_kinds or slot.attempts >= 2 or refusal:
+                slot.status = "unknown"
+
+    def _missing_group(self) -> list[FieldSpec]:
+        st = self.state
+        for spec in self.bp.fields:
+            slot = st.slot(spec.id)
+            if slot.status == "empty":
+                if slot.attempts >= self.bp.limits.max_field_attempts:
+                    slot.status = "unknown"
+                    continue
+                return [s for s in self.bp.fields if s.group == spec.group and st.slot(s.id).status == "empty"]
+        return []
+
+    def _needs_confirmation(self) -> FieldSpec | None:
+        st = self.state
+        limit = self.bp.limits.max_field_attempts + 2
+        for spec in self.bp.fields:
+            slot = st.slot(spec.id)
+            if slot.status != "captured":
+                continue
+            if (spec.confirm or slot.confidence < LOW_CONFIDENCE) and slot.attempts <= limit:
+                return spec
+        return None
+
+    def _screening_next(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        st = self.state
+        lim = self.bp.limits
+
+        # 1. Essential duty the candidate is uncomfortable with: persuade up to the limit, then gate.
+        for item in self.bp.gate_items:
+            care = st.care_state(item.id)
+            if care.stance in NEGATIVE_STANCES:
+                if care.persuasions >= lim.max_persuasions:
+                    st.gate_failed = item.id
+                    events.append(("gate.failed", {"item": item.id, "persuasions": care.persuasions}))
+                    move = self._close(
+                        "screened_out",
+                        f"The candidate is not willing to do {item.label}, which is an essential part of this job, "
+                        "even after you explained. Respond with respect and no judgement. Say that because this duty "
+                        "is essential, you are not able to take the process forward to the next round right now. "
+                        "Thank them sincerely for their time and say goodbye. Do not argue and do not ask anything.",
+                        "gate_failed",
+                    )
+                    move.events = events + move.events
+                    return move
+                care.persuasions += 1
+                points = item.persuasion[min(care.persuasions - 1, len(item.persuasion) - 1)] if item.persuasion else (
+                    f"Explain kindly that {item.label} is an essential part of the role and ask if they can do it."
+                )
+                self._set_focus("care", items=[item.id])
+                events.append(("care.persuasion", {"item": item.id, "attempt": care.persuasions}))
+                return self._move(
+                    "persuade",
+                    f"The candidate seems uncomfortable with {item.label} (reason they gave: "
+                    f"{care.reason or 'not stated'}). This is an essential duty — do NOT move on or skip it yet. "
+                    f"Briefly explain why it matters and ask if they can do it. Never pressure or lecture. "
+                    f"Persuasion attempt {care.persuasions} of {lim.max_persuasions}. {points}",
+                    events=events,
+                )
+
+        # 2. A captured value that needs reading back (phone numbers, low-confidence hearing).
+        spec = self._needs_confirmation()
+        if spec is not None:
+            slot = st.slot(spec.id)
+            slot.attempts += 1
+            value = slot.value
+            shown = spoken_groups(str(value)) if spec.kind == "phone" else str(value)
+            self._set_focus("confirm", field=spec.id, ids=[spec.id])
+            return self._move(
+                "confirm",
+                f"Read back what you heard for their {spec.label}: {shown}. For numbers read in small groups, slowly. "
+                "Ask if that is correct. Do not ask anything else.",
+                events=events,
+            )
+
+        # 3. Something was heard but looked wrong: ask again.
+        if self._invalid:
+            fid, reason = next(iter(self._invalid.items()))
+            spec2 = self.bp.field_spec(fid)
+            if spec2 is not None:
+                slot = st.slot(fid)
+                slot.attempts += 1
+                if slot.attempts < lim.max_field_attempts:
+                    self._set_focus("slots", ids=[fid])
+                    return self._move(
+                        "reask_invalid",
+                        f"What you heard for their {spec2.label} did not sound right ({reason}). Politely say you may "
+                        "have misheard and ask them to say it again, slowly.",
+                        events=events,
+                    )
+                slot.status = "unknown"
+
+        # 4. Next group of missing details.
+        group = self._missing_group()
+        if group:
+            for s in group:
+                st.slot(s.id).attempts += 1
+            asked_before = any(st.slot(s.id).attempts > 1 for s in group)
+            ids = [s.id for s in group]
+            self._set_focus("slots", ids=ids)
+            ask = group[0].ask  # the first missing field's wording already covers its group
+            prefix = "They did not answer that yet. " if asked_before else ""
+            return self._move("ask_field", f"{prefix}{ask}", events=events)
+
+        # 5. Comfort with hands-on care.
+        care_move = self._care_questions(events)
+        if care_move is not None:
+            return care_move
+
+        return self._enter_clinical(events)
+
+    def _care_questions(self, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
+        st = self.state
+        if not self.bp.care_items:
+            return None
+        unasked = [c for c in self.bp.care_items if st.care_state(c.id).stance == "unknown"]
+        if not unasked:
+            return None
+        # First ask about all hands-on care at once; afterwards chase only what is still unanswered.
+        if not st.care_intro_done:
+            st.care_intro_done = True
+            self._set_focus("care", items=[c.id for c in self.bp.care_items])
+            return self._move(
+                "ask_care",
+                self.bp.care_intro or "Ask how comfortable they are with hands-on patient care.",
+                events=events,
+            )
+        unasked.sort(key=lambda c: not c.gate)  # essential duties first
+        target = unasked[0]
+        care = st.care_state(target.id)
+        care.asked += 1
+        if care.asked > MAX_CARE_ASKS:
+            care.stance, care.reason = "hesitant", "did not give a clear answer"
+            return self._screening_next(events)
+        self._set_focus("care", items=[target.id])
+        return self._move("ask_care_item", target.ask, events=events)
+
+    # ------------------------------------------------------------------------------------------------ clinical
+
+    def _candidate_tags(self) -> set[str]:
+        text = " ".join(
+            str(self.state.slots[f].value or "")
+            for f in ("experience_settings",)
+            if f in self.state.slots
+        ).lower()
+        text += " " + (getattr(self.plan, "resume_text", "") or "").lower()
+        tags = {"general"}
+        for tag, words in _TAG_KEYWORDS.items():
+            if any(w in text for w in words):
+                tags.add(tag)
+        return tags
+
+    def _plan_areas(self) -> list[str]:
+        """Pick the areas to assess: relevant to where the candidate worked, with patient-safety basics always in."""
+        tags = self._candidate_tags()
+        scored: list[tuple[float, int, str]] = []
+        for idx, area in enumerate(self.bp.areas):
+            if not set(area.tags) & tags:
+                continue  # e.g. ICU-only content for a candidate with no ICU exposure
+            score = 3.0 * len(set(area.tags) & tags - {"general"})
+            if "general" not in area.tags:
+                score += 4.0  # specialty-only content (e.g. critical care) is what this candidate is best placed to show
+            if area.id in SAFETY_BASICS:
+                score += 2.0
+            scored.append((-score, idx, area.id))
+        scored.sort()
+        n = max(1, self.bp.limits.clinical_areas_target)
+        return [area_id for _, _, area_id in scored][:n]
+
+    def _enter_clinical(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        st = self.state
+        if not self.bp.areas:
+            return self._begin_closing(events)
+        st.stage = "clinical"
+        st.clinical_started_s = self.elapsed_s()
+        st.area_order = self._plan_areas()
+        events.append(("stage.clinical", {"areas": st.area_order, "experience_level": st.experience_level}))
+        move = self._start_next_area(
+            lead_in=(
+                "The quick details are done. Thank them briefly, then say the next part is a few nursing questions, "
+                "like a normal conversation, and there are no trick questions. "
+            )
+        )
+        move.events = events + move.events
+        return move
+
+    def _start_next_area(self, lead_in: str = "") -> Move:
+        st = self.state
+        nxt = next((aid for aid in st.area_order if st.area_progress(aid).status == "pending"), None)
+        if nxt is None:
+            return self._begin_closing([])
+        area = self.bp.area(nxt)
+        assert area is not None
+        prog = st.area_progress(nxt)
+        prog.status = "active"
+        prog.level = self.bp.start_level_by_experience.get(st.experience_level, 1)
+        prog.level = min(prog.level, area.max_level)
+        st.current_area = nxt
+        lv = area.level_spec(prog.level)
+        self._set_focus("clinical", area=nxt, level=lv.level, question=lv.seed)
+        return self._move(
+            "clinical_question",
+            f"{lead_in}Now ask a clinical question on '{area.title}'. Put it in your own natural words and fit it to "
+            f"what you know about the candidate's work. Do not reveal the answer or list the points. Question: {lv.seed}",
+            events=[("area.started", {"area": nxt, "level": lv.level})],
+        )
+
+    def _clinical_over_time(self) -> bool:
+        st = self.state
+        used = self.elapsed_s() - st.clinical_started_s
+        return used >= (self.bp.limits.clinical_target_minutes + 2) * 60
+
+    def _clinical(self, a: TurnAnalysis, deferred: dict[str, Any] | None, deferred_dont_know: bool = False) -> Move:
+        st = self.state
+        lim = self.bp.limits
+        if not st.current_area:
+            return self._start_next_area()
+        area = self.bp.area(st.current_area)
+        assert area is not None
+        prog = st.area_progress(area.id)
+        lv = area.level_spec(prog.level)
+
+        fresh = a.clinical
+        grade = fresh
+        if grade is None and deferred:
+            grade = ClinicalGrade(**deferred)  # graded before a contradiction probe interrupted; already recorded
+        if fresh is not None:
+            self._record_grade(area, prog, lv.level, fresh)
+
+        said_dont_know = a.intent == "dont_know" or deferred_dont_know
+        if st.focus.get("type") != "contradiction":
+            move = self._contradiction_move(
+                a, _grade_to_dict(grade) if grade else None, dont_know=a.intent == "dont_know"
+            )
+            if move:
+                return move
+
+        if said_dont_know or (grade is not None and grade.quality == "none" and a.intent == "dont_know"):
+            return self._clinical_dont_know(area, prog)
+
+        if grade is None or grade.quality in ("unrelated", "none"):
+            if prog.clarifications < lim.max_clarifications_per_area:
+                prog.clarifications += 1
+                self._set_focus("clinical", area=area.id, level=lv.level, question=st.focus.get("question", lv.seed))
+                return self._move(
+                    "clarify",
+                    "Their reply did not really answer the question. Without judging, restate what you are asking in "
+                    "simpler words and invite them to try, even if they are not sure.",
+                )
+            return self._finish_area(area, prog, "unknown")
+
+        if grade.needs_clarification and prog.clarifications < lim.max_clarifications_per_area:
+            prog.clarifications += 1
+            return self._move(
+                "clarify",
+                "Their answer was a bit vague. Ask them to be more specific about the part that was unclear, for "
+                "example 'what exactly would you do first?'. Do not hint at the correct answer.",
+            )
+
+        missing = [k.text for k in lv.key_points if k.id in grade.missing] or [
+            k.text for k in lv.key_points if k.id not in grade.covered
+        ]
+        over_time = self._clinical_over_time()
+
+        if grade.quality == "correct":
+            strong = prog.probes == 0 and prog.challenges == 0 and not prog.red_flags
+            if strong and not over_time and prog.deepened < 1 and prog.level < area.max_level:
+                prog.deepened += 1
+                prog.level += 1
+                nxt = area.level_spec(prog.level)
+                self._set_focus("clinical", area=area.id, level=nxt.level, question=nxt.seed)
+                return self._move(
+                    "deepen",
+                    "That was a solid answer. Acknowledge it in a few words without saying 'correct', then raise the "
+                    f"difficulty a notch with this related question, in your own words: {nxt.seed}",
+                    events=[("area.deepened", {"area": area.id, "level": nxt.level})],
+                )
+            return self._finish_area(area, prog, "strong" if strong else "adequate")
+
+        if grade.quality == "partial":
+            if prog.probes < lim.max_probes_per_area and not over_time:
+                prog.probes += 1
+                target = "; ".join(missing[:2]) or "the parts they skipped"
+                self._set_focus("clinical", area=area.id, level=lv.level, question=st.focus.get("question", lv.seed))
+                return self._move(
+                    "probe",
+                    "They gave a partly right answer. Acknowledge what they said briefly, then ask ONE follow-up that "
+                    f"makes them think about what is missing, without telling them the answer. Missing ideas (for you "
+                    f"only, never say them): {target}. Reference something they actually said.",
+                )
+            return self._finish_area(area, prog, "adequate" if len(prog.covered) * 2 >= len(lv.key_points) else "weak")
+
+        # incorrect
+        if prog.challenges < lim.max_challenges_per_area:
+            prog.challenges += 1
+            issue = "; ".join(grade.red_flags) or "something in their answer that is not right or not safe"
+            self._set_focus("clinical", area=area.id, level=lv.level, question=st.focus.get("question", lv.seed))
+            return self._move(
+                "challenge",
+                f"Part of their answer was not right ({issue}; for you only). Politely challenge it without saying "
+                "'wrong': present a short realistic situation where that approach could go badly, or ask 'are you "
+                "sure about that step?', and invite them to reconsider. Do not give the correct answer.",
+                events=[("area.challenged", {"area": area.id})],
+            )
+        # After a challenge allow a single easier try; hammering a wrong answer is bad interviewing.
+        if prog.probes < 1 and not over_time:
+            prog.probes += 1
+            return self._move(
+                "probe_simpler",
+                "They still seem unsure. Make it easier: ask only about the very first thing they would do. Do not "
+                "reveal the answer.",
+            )
+        return self._finish_area(area, prog, "unsafe" if prog.red_flags else "weak")
+
+    def _record_grade(self, area: AreaSpec, prog: AreaProgress, level: int, grade: Any) -> None:
+        for pid in grade.covered:
+            if pid not in prog.covered:
+                prog.covered.append(pid)
+        prog.missing = [p for p in grade.missing if p not in prog.covered]
+        for rf in grade.red_flags:
+            if rf not in prog.red_flags:
+                prog.red_flags.append(rf)
+        prog.evidence.append(
+            {
+                "turn": self.state.turns,
+                "level": level,
+                "quality": grade.quality,
+                "covered": list(grade.covered),
+                "missing": list(grade.missing),
+                "red_flags": list(grade.red_flags),
+                "quote": grade.quote[:300],
+                "summary": grade.summary_en[:300],
+            }
+        )
+
+    def _clinical_dont_know(self, area: AreaSpec, prog: AreaProgress) -> Move:
+        st = self.state
+        lim = self.bp.limits
+        prog.dont_knows += 1
+        st.dont_know_total += 1
+        prog.evidence.append(
+            {
+                "turn": st.turns,
+                "level": prog.level,
+                "quality": "dont_know",
+                "quote": "",
+                "summary": "Candidate said they do not know",
+            }
+        )
+        if st.dont_know_total >= lim.max_dont_know_total:
+            prog.status, prog.outcome = "done", "unknown"
+            return self._begin_closing([("clinical.ended_early", {"reason": "many_dont_know"})])
+        # One "I don't know" / idk is enough — acknowledge briefly and move to the next topic.
+        return self._finish_area(area, prog, "unknown")
+
+    def _finish_area(self, area: AreaSpec, prog: AreaProgress, outcome: str) -> Move:
+        st = self.state
+        prog.status, prog.outcome = "done", outcome
+        events = [("area.completed", {"area": area.id, "outcome": outcome, "level": prog.level})]
+        done = sum(1 for aid in st.area_order if st.area_progress(aid).status == "done")
+        if done >= self.bp.limits.clinical_areas_target or self._clinical_over_time():
+            return self._begin_closing(events)
+        move = self._start_next_area(lead_in="Move on naturally with a short transition, not a verdict on the last answer. ")
+        move.events = events + move.events
+        return move
+
+    # ------------------------------------------------------------------------------------------------ closing
+
+    def _begin_closing(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        st = self.state
+        st.stage = "closing"
+        st.current_area = None
+        self._set_focus("closing_qa", asks=0)
+        return self._move(
+            "wrap_up",
+            "That was the last question. Thank the candidate warmly by name for their time and honest answers, and "
+            "ask if they have any questions about the process before you finish. Do not mention scores or results.",
+            events=events + [("stage.closing", {})],
+        )
+
+    def _closing(self, a: TurnAnalysis) -> Move:
+        st = self.state
+        if a.intent == "candidate_question" and st.focus.get("asks", 0) < 2:
+            self._set_focus("closing_qa", asks=st.focus.get("asks", 0) + 1)
+            faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
+            return self._move(
+                "closing_answer",
+                f"Answer their question ONLY from this: {faq}. If not covered, say the recruitment team will share it. "
+                "Then ask if there is anything else.",
+            )
+        return self._close(
+            "completed",
+            "Wish them well, tell them the team will review the conversation and contact them on the phone number "
+            "they shared, and say goodbye. Do not mention scores or results and do not ask anything.",
+            "goodbye",
+        )
+
+    def _close(self, outcome: str, directive: str, kind: str) -> Move:
+        st = self.state
+        st.stage = "ended"
+        st.outcome = outcome
+        st.current_area = None
+        return self._move(
+            kind,
+            directive,
+            completed=True,
+            end_session=True,
+            events=[("flow.ended", {"outcome": outcome, "elapsed_s": round(self.elapsed_s())})],
+        )
+
+
+def _grade_to_dict(grade: Any) -> dict[str, Any]:
+    return {
+        "area_id": grade.area_id,
+        "quality": grade.quality,
+        "covered": list(grade.covered),
+        "missing": list(grade.missing),
+        "red_flags": list(grade.red_flags),
+        "needs_clarification": grade.needs_clarification,
+        "quote": grade.quote,
+        "summary_en": grade.summary_en,
+    }

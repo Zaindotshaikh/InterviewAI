@@ -1,0 +1,59 @@
+[
+  {
+    "id": "staff-nurse",
+    "title": "Staff Nurse",
+    "questions": [
+      "Walk me through how you start a shift and take handover on a busy ward.",
+      "Tell me about a time a patient's condition changed. What did you notice first, and what did you do?",
+      "How do you keep medication rounds safe when you are short-staffed?",
+      "Describe how you help a bedridden patient with hygiene, toileting and turning.",
+      "How do you talk to a family who is upset while you still have other patients waiting?",
+      "Walk me through a clean, useful handover you would give at the end of your shift."
+    ],
+    "criteria": [
+      "Safe bedside care and vital-sign judgement",
+      "Medication safety and documentation",
+      "Comfort with essential patient-care duties",
+      "Clear communication under pressure",
+      "Handover and escalation discipline"
+    ]
+  },
+  {
+    "id": "icu-nurse",
+    "title": "ICU / Critical Care Nurse",
+    "questions": [
+      "Walk me through how you monitor a ventilated patient at the start of your shift.",
+      "Tell me about an alarm or deterioration you acted on. What did you do first?",
+      "How do you give high-alert medicines safely in ICU?",
+      "Describe infection control around lines, catheters and a ventilated patient.",
+      "How do you work with doctors and the rest of the ICU team during an emergency?",
+      "Tell me about a time you caught a near-miss. What changed afterwards?"
+    ],
+    "criteria": [
+      "Critical-care monitoring and alarm response",
+      "Airway, ventilation and emergency basics",
+      "High-alert medication safety",
+      "Infection control in ICU",
+      "Team communication during deterioration"
+    ]
+  },
+  {
+    "id": "home-care-nurse",
+    "title": "Home Care Nurse",
+    "questions": [
+      "Walk me through a typical home visit from arrival to leaving the house.",
+      "How do you keep a patient safe when you are the only nurse in the home?",
+      "Tell me about helping with bathing, diaper care or toileting in a home setting.",
+      "How do you explain care to family members who are anxious or disagree with the plan?",
+      "What would you do if you found the patient worse than the last visit?",
+      "How do you document a home visit so the next nurse can continue care safely?"
+    ],
+    "criteria": [
+      "Independent judgement in a home setting",
+      "Hands-on personal care including hygiene and incontinence care",
+      "Patient and family communication",
+      "Early recognition of deterioration",
+      "Accurate visit documentation and follow-through"
+    ]
+  }
+]

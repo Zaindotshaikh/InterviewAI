@@ -1,0 +1,585 @@
+{
+  "id": "nursing-screening-clinical-v1",
+  "role_family": "nursing",
+  "limits": {
+    "screening_max_minutes": 7,
+    "clinical_target_minutes": 10,
+    "hard_cap_minutes": 25,
+    "clinical_areas_target": 4,
+    "max_probes_per_area": 2,
+    "max_challenges_per_area": 1,
+    "max_clarifications_per_area": 1,
+    "max_persuasions": 2,
+    "max_contradiction_probes": 2,
+    "max_unclear_streak": 3,
+    "max_dont_know_total": 4,
+    "max_field_attempts": 3
+  },
+  "screening": {
+    "fields": [
+      {
+        "id": "city",
+        "label": "City applying for",
+        "kind": "text",
+        "group": "city",
+        "ask": "Ask which city they are applying to work in."
+      },
+      {
+        "id": "phone",
+        "label": "Phone number",
+        "kind": "phone",
+        "group": "phone",
+        "confirm": true,
+        "ask": "Ask for their mobile number so the team can reach them. Say it is only for the recruitment team."
+      },
+      {
+        "id": "qualification",
+        "label": "Nursing qualification",
+        "kind": "text",
+        "group": "education",
+        "ask": "Ask for their nursing qualification (for example GNM, ANM, B.Sc Nursing, Post Basic, Diploma) and the year they passed."
+      },
+      {
+        "id": "qualification_year",
+        "label": "Year of passing",
+        "kind": "year",
+        "group": "education",
+        "ask": "Ask which year they passed that qualification."
+      },
+      {
+        "id": "height_cm",
+        "label": "Height",
+        "kind": "height",
+        "group": "body",
+        "ask": "Ask for their height and weight. Accept feet and inches or centimetres, and kilograms. Explain it is for the profile form only."
+      },
+      {
+        "id": "weight_kg",
+        "label": "Weight",
+        "kind": "weight",
+        "group": "body",
+        "ask": "Ask for their weight in kilograms."
+      },
+      {
+        "id": "experience_years",
+        "label": "Years of nursing experience",
+        "kind": "years",
+        "group": "experience",
+        "ask": "Ask about their nursing experience: how many years in total, and where they worked. If they are a fresher, ask about hospital postings, internship or any patient-care exposure instead."
+      },
+      {
+        "id": "experience_settings",
+        "label": "Where they worked or what exposure they have",
+        "kind": "text",
+        "group": "experience",
+        "ask": "Ask where they worked (hospital ward, ICU, OT, home care, clinic) and what they did day to day. For freshers, ask what clinical exposure they had."
+      }
+    ],
+    "care_intro": "Explain that the role includes hands-on bedside care, such as bathing and hygiene, bedpan and toileting help, changing diapers for bedridden or elderly patients, and turning or lifting patients. Ask how comfortable they are doing this care.",
+    "care_items": [
+      {
+        "id": "diaper_care",
+        "label": "changing diapers and incontinence care",
+        "gate": true,
+        "ask": "Ask directly whether they are comfortable changing diapers and doing incontinence care for adult patients.",
+        "persuasion": [
+          "If they said they have never done it or can do other care instead, acknowledge that briefly — never done is okay. Then say diaper and incontinence care is still a required part of this role (dignity, skin health, preventing infection), done with gloves and training, and ask if they are willing to learn and do it.",
+          "Be kind and direct. Answer the one concern (never done / discomfort / prefer other duties): training will be given, but this duty cannot be skipped for other tasks. Ask for a clear yes or no: can they do diaper care as part of the job?"
+        ]
+      },
+      {
+        "id": "hygiene_bathing",
+        "label": "bed bath and personal hygiene care",
+        "gate": false,
+        "ask": "Ask if they are comfortable giving bed baths and personal hygiene care.",
+        "persuasion": []
+      },
+      {
+        "id": "toileting_bedpan",
+        "label": "bedpan and toileting assistance",
+        "gate": false,
+        "ask": "Ask if they are comfortable helping patients with bedpan and toileting.",
+        "persuasion": []
+      },
+      {
+        "id": "lifting_repositioning",
+        "label": "turning, lifting and repositioning patients",
+        "gate": false,
+        "ask": "Ask if they are comfortable turning, lifting and repositioning patients.",
+        "persuasion": []
+      }
+    ]
+  },
+  "clinical": {
+    "start_level_by_experience": { "fresher": 1, "junior": 1, "experienced": 2 },
+    "areas": [
+      {
+        "id": "vitals_monitoring",
+        "title": "Vital signs and monitoring",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask the normal adult ranges for blood pressure, pulse, respiratory rate and temperature, and which one would worry them most if it was off.",
+            "key_points": [
+              { "id": "vm1_bp", "text": "BP roughly 120/80 (acceptable about 90-140 / 60-90)" },
+              { "id": "vm1_pulse", "text": "Pulse 60-100 per minute" },
+              { "id": "vm1_rr", "text": "Respiratory rate 12-20 per minute" },
+              { "id": "vm1_temp", "text": "Temperature about 36.5-37.5 C (97.7-99.5 F)" },
+              { "id": "vm1_spo2", "text": "SpO2 95% or higher on room air" }
+            ],
+            "red_flags": ["States clearly unsafe ranges (for example normal pulse 40 or 160)", "Says routine vitals do not need to be checked"]
+          },
+          {
+            "level": 2,
+            "seed": "Scenario: a patient's BP reads 80/50 and they feel dizzy. Ask what they do, step by step.",
+            "key_points": [
+              { "id": "vm2_pos", "text": "Keeps patient lying down, legs raised, safe from falling" },
+              { "id": "vm2_recheck", "text": "Rechecks BP properly (manual or other arm) and checks pulse, SpO2, consciousness" },
+              { "id": "vm2_inform", "text": "Informs the doctor or senior nurse promptly" },
+              { "id": "vm2_cause", "text": "Looks for causes (bleeding, dehydration, medicines, sepsis)" },
+              { "id": "vm2_doc", "text": "Monitors frequently and documents" }
+            ],
+            "red_flags": ["Gives medicines on their own without an order", "Does nothing or only waits and watches"]
+          },
+          {
+            "level": 3,
+            "seed": "Ask how they recognise that a ward patient is getting worse before it becomes an emergency, and what they do about it.",
+            "key_points": [
+              { "id": "vm3_trend", "text": "Looks at trends, not one reading; uses an early warning score if available" },
+              { "id": "vm3_rr", "text": "Knows rising respiratory rate and new confusion are early signs" },
+              { "id": "vm3_urine", "text": "Notes reduced urine output, skin colour, restlessness" },
+              { "id": "vm3_escalate", "text": "Escalates early with a structured message (SBAR) or rapid response" },
+              { "id": "vm3_freq", "text": "Increases monitoring frequency" }
+            ],
+            "red_flags": ["Waits for the patient to collapse before calling anyone"]
+          }
+        ]
+      },
+      {
+        "id": "medication_safety",
+        "title": "Safe medication administration",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask what checks they do before giving any medicine to a patient.",
+            "key_points": [
+              { "id": "ms1_patient", "text": "Right patient, confirmed with two identifiers" },
+              { "id": "ms1_drug", "text": "Right drug, dose, route and time checked against the order" },
+              { "id": "ms1_allergy", "text": "Checks allergies" },
+              { "id": "ms1_label", "text": "Checks label and expiry date" },
+              { "id": "ms1_doc", "text": "Documents after giving; explains to the patient" }
+            ],
+            "red_flags": ["Gives medicine without a doctor's order", "Does not verify the patient's identity"]
+          },
+          {
+            "level": 2,
+            "seed": "Scenario: the prescribed dose looks much higher than usual. Ask what they do.",
+            "key_points": [
+              { "id": "ms2_hold", "text": "Does not give it until clarified" },
+              { "id": "ms2_recheck", "text": "Rechecks the order and calculation" },
+              { "id": "ms2_verify", "text": "Confirms with the prescribing doctor or pharmacist" },
+              { "id": "ms2_doc", "text": "Documents and reports; never changes the dose on their own" }
+            ],
+            "red_flags": ["Gives it anyway because the doctor wrote it", "Changes the dose on their own"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: they realise they gave a wrong medicine to a patient. Ask what they do straight away and afterwards.",
+            "key_points": [
+              { "id": "ms3_assess", "text": "Checks the patient and vital signs immediately" },
+              { "id": "ms3_inform", "text": "Informs doctor and senior at once" },
+              { "id": "ms3_monitor", "text": "Monitors closely and follows orders for antidote or treatment" },
+              { "id": "ms3_report", "text": "Documents honestly and files an incident report" },
+              { "id": "ms3_family", "text": "Informs the patient or family as per policy" }
+            ],
+            "red_flags": ["Hides the error or says they would not report it"]
+          }
+        ]
+      },
+      {
+        "id": "infection_control",
+        "title": "Infection control and waste handling",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask when they wash their hands during patient care, and how.",
+            "key_points": [
+              { "id": "ic1_moments", "text": "Before touching a patient, before clean or aseptic procedures, after body-fluid exposure, after touching a patient, after touching surroundings" },
+              { "id": "ic1_method", "text": "Soap and water about 40-60 seconds, or alcohol rub about 20-30 seconds when hands are not visibly dirty" },
+              { "id": "ic1_gloves", "text": "Gloves do not replace hand washing" }
+            ],
+            "red_flags": ["Only washes at the end of the shift or only when hands look dirty"]
+          },
+          {
+            "level": 2,
+            "seed": "Ask how they dispose of used needles, soiled dressings and used gloves.",
+            "key_points": [
+              { "id": "ic2_sharps", "text": "Needles and sharps go into a puncture-proof container (white or translucent), never recapped" },
+              { "id": "ic2_yellow", "text": "Soiled dressings and body-fluid-contaminated items go to the yellow bag" },
+              { "id": "ic2_red", "text": "Contaminated plastics such as tubing, catheters, gloves go to the red bag" },
+              { "id": "ic2_source", "text": "Segregates at the point of generation; does not overfill containers" }
+            ],
+            "red_flags": ["Throws needles in normal dustbin", "Recaps used needles by hand as routine"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: they get a needle-stick injury from a used needle. Ask what they do.",
+            "key_points": [
+              { "id": "ic3_wash", "text": "Washes the area immediately with soap and running water; does not squeeze hard or suck the wound" },
+              { "id": "ic3_report", "text": "Reports to supervisor or infection control immediately" },
+              { "id": "ic3_pep", "text": "Gets medical evaluation and post-exposure prophylaxis as early as possible (ideally within hours)" },
+              { "id": "ic3_test", "text": "Baseline and follow-up tests; checks hepatitis B vaccination status" },
+              { "id": "ic3_doc", "text": "Documents the incident" }
+            ],
+            "red_flags": ["Ignores it or delays reporting"]
+          }
+        ]
+      },
+      {
+        "id": "emergency_response",
+        "title": "Emergency and resuscitation",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Scenario: they find a patient on the floor who is not responding. Ask their first steps.",
+            "key_points": [
+              { "id": "er1_safe", "text": "Checks the scene is safe" },
+              { "id": "er1_resp", "text": "Checks responsiveness (tap and shout)" },
+              { "id": "er1_help", "text": "Calls for help or the emergency team and brings the crash cart or AED" },
+              { "id": "er1_breath", "text": "Checks breathing and pulse for no more than about 10 seconds" },
+              { "id": "er1_cpr", "text": "Starts CPR if there is no breathing or pulse" }
+            ],
+            "red_flags": ["Leaves the patient to look for help without calling", "Waits for a doctor before starting CPR"]
+          },
+          {
+            "level": 2,
+            "seed": "Ask them to explain how they do CPR on an adult: rate, depth and compression-to-breath ratio.",
+            "key_points": [
+              { "id": "er2_pos", "text": "Hard, flat surface; hands on centre of the chest" },
+              { "id": "er2_rate", "text": "Rate 100-120 per minute" },
+              { "id": "er2_depth", "text": "Depth about 5-6 cm with full chest recoil" },
+              { "id": "er2_ratio", "text": "30 compressions to 2 breaths" },
+              { "id": "er2_switch", "text": "Minimises interruptions, rotates compressors about every 2 minutes, uses AED as soon as available" }
+            ],
+            "red_flags": ["Would not start CPR without a doctor's order"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: a patient's SpO2 drops to 85% and they are breathless. Ask what they do and in what order.",
+            "key_points": [
+              { "id": "er3_pos", "text": "Sits the patient upright (Fowler's position)" },
+              { "id": "er3_o2", "text": "Gives or increases oxygen as per protocol" },
+              { "id": "er3_assess", "text": "Quickly checks airway, breathing, vitals and the likely cause" },
+              { "id": "er3_call", "text": "Calls the doctor or rapid response team" },
+              { "id": "er3_monitor", "text": "Prepares suction or ordered medicines, monitors continuously and documents" }
+            ],
+            "red_flags": ["Lays the breathless patient flat and leaves"]
+          }
+        ]
+      },
+      {
+        "id": "patient_handling_hygiene",
+        "title": "Bedridden patient care, hygiene and pressure injury",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask how they prevent bedsores in a bedridden patient.",
+            "key_points": [
+              { "id": "ph1_turn", "text": "Repositions at least every 2 hours" },
+              { "id": "ph1_skin", "text": "Keeps skin clean and dry, checks pressure points (back of the hip, heels, elbows)" },
+              { "id": "ph1_bed", "text": "Keeps the bedsheet smooth; uses a pressure-relief mattress or pads" },
+              { "id": "ph1_nutrition", "text": "Ensures nutrition and hydration" },
+              { "id": "ph1_drag", "text": "Lifts rather than drags the patient (draw sheet)" }
+            ],
+            "red_flags": ["Says bedsores cannot be prevented", "Massages red pressure areas hard"]
+          },
+          {
+            "level": 2,
+            "seed": "Ask them to walk through how they change a diaper for a bedridden adult, with hygiene and dignity.",
+            "key_points": [
+              { "id": "ph2_privacy", "text": "Explains to the patient, ensures privacy (curtain or door)" },
+              { "id": "ph2_hygiene", "text": "Washes hands and wears gloves" },
+              { "id": "ph2_roll", "text": "Rolls the patient to the side, removes the soiled diaper, cleans front to back" },
+              { "id": "ph2_skin", "text": "Dries well, checks the skin for redness or rash, applies barrier cream if needed" },
+              { "id": "ph2_dispose", "text": "Places the clean diaper, repositions, disposes of waste properly, washes hands, documents" }
+            ],
+            "red_flags": ["No gloves or hand hygiene", "Rough or undignified handling"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: a bedridden elderly patient has a red patch on the heel that stays red when pressed. Ask what it means and what they do.",
+            "key_points": [
+              { "id": "ph3_stage", "text": "Recognises an early (stage 1) pressure injury: non-blanchable redness" },
+              { "id": "ph3_offload", "text": "Relieves pressure (float the heels, reposition more often)" },
+              { "id": "ph3_report", "text": "Reports and documents it" },
+              { "id": "ph3_care", "text": "Keeps skin clean, supports nutrition, avoids massaging the area" }
+            ],
+            "red_flags": ["Rubs or massages the red area", "Ignores it as normal"]
+          }
+        ]
+      },
+      {
+        "id": "iv_catheter_care",
+        "title": "IV line and urinary catheter care",
+        "tags": ["general", "ward", "icu"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask what they check at an IV cannula site.",
+            "key_points": [
+              { "id": "iv1_phleb", "text": "Redness, swelling, pain, warmth (phlebitis)" },
+              { "id": "iv1_infil", "text": "Leakage or swelling around the site (infiltration)" },
+              { "id": "iv1_dressing", "text": "Dressing intact and dry, insertion date noted" },
+              { "id": "iv1_patency", "text": "Line flows freely; changed per policy or when problems appear" }
+            ],
+            "red_flags": ["Says the site never needs checking"]
+          },
+          {
+            "level": 2,
+            "seed": "Scenario: a patient complains of burning pain at the IV site and the area is swollen. Ask what they do.",
+            "key_points": [
+              { "id": "iv2_stop", "text": "Stops the infusion immediately" },
+              { "id": "iv2_noflush", "text": "Does not flush or push more fluid into it" },
+              { "id": "iv2_remove", "text": "Removes the cannula per protocol and informs the doctor or senior" },
+              { "id": "iv2_resite", "text": "Re-sites in the other arm; elevates limb, assesses the extent; documents" }
+            ],
+            "red_flags": ["Continues the infusion"]
+          },
+          {
+            "level": 3,
+            "seed": "Ask how they care for a patient with a urinary catheter to prevent infection.",
+            "key_points": [
+              { "id": "uc_closed", "text": "Keeps the closed drainage system; never disconnects without need" },
+              { "id": "uc_level", "text": "Bag always below bladder level and never on the floor" },
+              { "id": "uc_hygiene", "text": "Hand hygiene; daily perineal hygiene" },
+              { "id": "uc_secure", "text": "Secures the tube; empties the bag when about two-thirds full" },
+              { "id": "uc_watch", "text": "Watches for cloudy or foul urine, fever and reports; catheter removed as soon as not needed" }
+            ],
+            "red_flags": ["Lifts the bag above the bladder", "Opens the system routinely"]
+          }
+        ]
+      },
+      {
+        "id": "feeding_nutrition",
+        "title": "Safe feeding and nutrition",
+        "tags": ["general", "homecare", "ward"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask how they feed a weak patient who is lying in bed.",
+            "key_points": [
+              { "id": "fn1_upright", "text": "Sits the patient upright as much as possible" },
+              { "id": "fn1_slow", "text": "Small bites, slowly; waits for swallowing" },
+              { "id": "fn1_stop", "text": "Stops if coughing or choking; checks food temperature and consistency" },
+              { "id": "fn1_after", "text": "Keeps the patient upright for a while after feeding" }
+            ],
+            "red_flags": ["Feeds a lying-flat patient quickly"]
+          },
+          {
+            "level": 2,
+            "seed": "Scenario: a patient starts coughing and turns blue while eating. Ask what they do.",
+            "key_points": [
+              { "id": "fn2_stop", "text": "Stops feeding and calls for help" },
+              { "id": "fn2_encourage", "text": "Encourages coughing if they can cough or speak" },
+              { "id": "fn2_back", "text": "If they cannot breathe or speak: back blows and abdominal thrusts" },
+              { "id": "fn2_escalate", "text": "Starts CPR if they become unresponsive; informs the doctor" }
+            ],
+            "red_flags": ["Gives water to wash it down"]
+          },
+          {
+            "level": 3,
+            "seed": "Ask how they give feeds through a nasogastric tube safely.",
+            "key_points": [
+              { "id": "fn3_check", "text": "Confirms tube position before feeding (per protocol)" },
+              { "id": "fn3_pos", "text": "Head of bed raised 30-45 degrees during and after" },
+              { "id": "fn3_flush", "text": "Slow feed, flushes with water before and after" },
+              { "id": "fn3_stop", "text": "Stops if there is vomiting, distension or breathlessness and reports" }
+            ],
+            "red_flags": ["Feeds without checking tube position", "Feeds with the patient lying flat"]
+          }
+        ]
+      },
+      {
+        "id": "communication_ethics",
+        "title": "Communication, dignity and ethics",
+        "tags": ["general", "ward", "icu", "homecare"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Scenario: a patient's relatives keep asking about the diagnosis, which the doctor has not explained yet. Ask what they say.",
+            "key_points": [
+              { "id": "ce1_conf", "text": "Respects confidentiality; does not share unauthorised details" },
+              { "id": "ce1_redirect", "text": "Politely redirects to the doctor and offers to call the doctor" },
+              { "id": "ce1_empathy", "text": "Shows empathy and does not give false hope" }
+            ],
+            "red_flags": ["Shares the full diagnosis themselves"]
+          },
+          {
+            "level": 2,
+            "seed": "Scenario: a confused elderly patient refuses medicine and gets angry. Ask how they handle it.",
+            "key_points": [
+              { "id": "ce2_calm", "text": "Stays calm; does not argue or force" },
+              { "id": "ce2_explain", "text": "Explains simply, reorients, tries again later or with a family member" },
+              { "id": "ce2_cause", "text": "Considers causes such as pain, infection, unfamiliar surroundings" },
+              { "id": "ce2_report", "text": "Informs the doctor or senior and documents the refusal" }
+            ],
+            "red_flags": ["Forces the medicine", "Mixes it secretly in food"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: they see a colleague being rude to a patient or skipping hand washing. Ask what they do.",
+            "key_points": [
+              { "id": "ce3_safety", "text": "Puts patient safety and dignity first" },
+              { "id": "ce3_speak", "text": "Speaks up respectfully, privately" },
+              { "id": "ce3_report", "text": "Reports to the supervisor if it continues" }
+            ],
+            "red_flags": ["Ignores it as not their business"]
+          }
+        ]
+      },
+      {
+        "id": "documentation_handover",
+        "title": "Documentation and handover",
+        "tags": ["general", "ward", "icu"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask why nurses document care, and what makes a good nursing note.",
+            "key_points": [
+              { "id": "dh1_legal", "text": "Legal record and continuity of care" },
+              { "id": "dh1_facts", "text": "Factual, objective, no guesses" },
+              { "id": "dh1_time", "text": "Dated, timed and signed; written at the time of care" },
+              { "id": "dh1_correct", "text": "Corrections by a single line strike, never overwriting or erasing" }
+            ],
+            "red_flags": ["Writes notes for care that was not given"]
+          },
+          {
+            "level": 2,
+            "seed": "Ask how they hand over a patient to the next shift.",
+            "key_points": [
+              { "id": "dh2_sbar", "text": "Structured handover (situation, background, assessment, recommendation)" },
+              { "id": "dh2_pending", "text": "Pending medicines, tests and tasks" },
+              { "id": "dh2_lines", "text": "Lines, drains, allergies, risks (fall, pressure injury)" },
+              { "id": "dh2_ask", "text": "Hands over at the bedside and allows questions" }
+            ],
+            "red_flags": []
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: they notice the previous shift did not record a medicine that may or may not have been given. Ask what they do.",
+            "key_points": [
+              { "id": "dh3_verify", "text": "Does not give it again until verified" },
+              { "id": "dh3_ask", "text": "Checks with the colleague and the chart" },
+              { "id": "dh3_inform", "text": "Informs the in-charge and the doctor" },
+              { "id": "dh3_late", "text": "Documents correctly as a late entry" }
+            ],
+            "red_flags": ["Gives the medicine again to be safe without checking"]
+          }
+        ]
+      },
+      {
+        "id": "critical_care",
+        "title": "Critical care and ventilated patients",
+        "tags": ["icu"],
+        "levels": [
+          {
+            "level": 1,
+            "seed": "Ask what they check regularly for a patient on a ventilator.",
+            "key_points": [
+              { "id": "cc1_tube", "text": "Tube position, cuff and securement" },
+              { "id": "cc1_monitor", "text": "SpO2, vitals, ventilator settings and alarms" },
+              { "id": "cc1_secretions", "text": "Secretions and need for suction; sedation level" },
+              { "id": "cc1_vap", "text": "Head of bed raised 30-45 degrees and oral care to prevent ventilator pneumonia" }
+            ],
+            "red_flags": ["Silences alarms without checking the patient"]
+          },
+          {
+            "level": 2,
+            "seed": "Ask how they safely suction an intubated patient.",
+            "key_points": [
+              { "id": "cc2_hygiene", "text": "Hand hygiene, sterile gloves and catheter" },
+              { "id": "cc2_preo2", "text": "Pre-oxygenates the patient" },
+              { "id": "cc2_time", "text": "Suctions for no more than about 10-15 seconds, only while withdrawing" },
+              { "id": "cc2_monitor", "text": "Watches SpO2 and heart rate; documents the secretions" }
+            ],
+            "red_flags": ["Suctions for long periods or uses non-sterile technique"]
+          },
+          {
+            "level": 3,
+            "seed": "Scenario: the ventilator high-pressure alarm goes off. Ask what they do.",
+            "key_points": [
+              { "id": "cc3_patient", "text": "Looks at the patient first, not the machine" },
+              { "id": "cc3_causes", "text": "Checks for secretions, biting or coughing, kinked or watery circuit, possible pneumothorax" },
+              { "id": "cc3_suction", "text": "Suctions if needed" },
+              { "id": "cc3_bag", "text": "If unresolved, disconnects and bags manually and calls the doctor or respiratory therapist" }
+            ],
+            "red_flags": ["Mutes the alarm and walks away"]
+          }
+        ]
+      }
+    ]
+  },
+  "tiers": [
+    {
+      "id": "tier_1",
+      "name": "Tier 1 - Ready to deploy",
+      "description": "Meets all screening requirements and shows solid, safe clinical knowledge at independent-practice level.",
+      "criteria": [
+        "Screening complete and eligible (accepts essential care duties)",
+        "At least 2 years of relevant experience, or clearly strong clinical performance",
+        "Most assessed areas strong or adequate at intermediate level or above",
+        "No unsafe answers and no unresolved contradictions"
+      ]
+    },
+    {
+      "id": "tier_2",
+      "name": "Tier 2 - Deployable with support",
+      "description": "Eligible with sound fundamentals but gaps in some areas; suitable with orientation or supervision.",
+      "criteria": [
+        "Screening complete and eligible",
+        "Fundamentals correct; some partial answers at intermediate level",
+        "No unsafe answers",
+        "Minor inconsistencies at most"
+      ]
+    },
+    {
+      "id": "tier_3",
+      "name": "Tier 3 - Needs training",
+      "description": "Eligible and willing, but limited experience or knowledge gaps in several basic areas.",
+      "criteria": [
+        "Screening complete and eligible",
+        "Fresher or limited experience, or weak answers in several basic areas",
+        "Shows willingness and no unsafe practice"
+      ]
+    },
+    {
+      "id": "not_eligible",
+      "name": "Not eligible",
+      "description": "Does not meet a requirement of the role.",
+      "criteria": [
+        "Declined an essential care duty after a respectful explanation, or",
+        "Gave answers that would put patients at risk, or",
+        "Material misrepresentation of experience or qualification"
+      ]
+    },
+    {
+      "id": "needs_review",
+      "name": "Needs human review",
+      "description": "The AI cannot classify confidently, for example the audio was too poor, the interview ended early, or answers were too limited to assess.",
+      "criteria": [
+        "Interview incomplete or heavily affected by audio problems",
+        "Too little evidence to classify without a human"
+      ]
+    }
+  ],
+  "faq": [
+    { "topic": "salary, pay, benefits", "answer": "The recruitment team will share the pay and benefits details; I do not have them." },
+    { "topic": "result, selection, next steps", "answer": "The team will review the conversation and contact them on their phone number." },
+    { "topic": "location, shift timing, joining date", "answer": "The recruitment team will share the exact location, shifts and joining details." }
+  ]
+}

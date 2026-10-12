@@ -1,0 +1,3 @@
+# Clips directory for STT bake-off. Drop WAVs named:
+#   {lang}__{condition}__{id}.wav
+# e.g. ta-IN__ward__001.wav

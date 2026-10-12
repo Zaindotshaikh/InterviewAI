@@ -1,0 +1,39 @@
+name: interview-v2-agent
+
+on:
+  push:
+    paths:
+      - "agent/**"
+      - "server/v2/**"
+  pull_request:
+    paths:
+      - "agent/**"
+      - "server/v2/**"
+
+jobs:
+  agent-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install minimal test deps
+        run: |
+          pip install pytest pydantic pydantic-settings httpx python-dotenv
+      - name: Unit tests (no LiveKit required)
+        run: pytest -q tests/test_controller.py tests/test_language.py
+
+  server-typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bunx tsc --noEmit

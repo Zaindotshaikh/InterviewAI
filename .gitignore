@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+.env
+*.log
+.DS_Store
+agent/google-credentials.json
+agent/.venv/
+server/data/*.json
+server/data/*.debug.jsonl
+!server/data/.gitkeep
