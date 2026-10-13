@@ -54,16 +54,18 @@ class Disfluency:
         """Rewrite a streamed LLM reply sentence by sentence.
 
         skip_first: a reaction was just played, so the first sentence gets no um.
-        opening: the greeting must start with the greeting itself, so no um anywhere in it.
+        opening: first sentence must stay a clean greeting (नमस्ते…); later opening sentences may keep umm.
         Buffering to a sentence boundary adds no latency: the TTS plugin's sentence tokenizer waits for it anyway.
         """
-        um_left = not opening and self.rate > 0 and self._rng.random() < self.rate
+        # Openings used to ban um entirely, which made the intro sound rushed/robotic.
+        um_left = self.rate > 0 and self._rng.random() < (1.0 if opening else self.rate)
         buf = ""
         first = True
 
         def shape(sentence: str) -> str:
             nonlocal um_left, first
-            allow = um_left and not (first and skip_first)
+            # Never put um on the very first spoken sentence (greeting / post-filler continue).
+            allow = um_left and not (first and (skip_first or opening))
             shaped, used = self._shape(sentence, language, allow_um=allow)
             if used:
                 um_left = False

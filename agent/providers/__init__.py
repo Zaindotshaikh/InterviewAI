@@ -110,6 +110,57 @@ def build_llm(settings: Settings | None = None):
     return openai_plugin.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
 
 
+def _scribe_language_hints(language: str) -> tuple[str, list[str]]:
+    """Primary + secondary language codes for Scribe v2 realtime code-mix."""
+    primary = (language or "en-IN").split("-")[0].lower()
+    # Always allow English code-mix; Indic pairs get Hindi as a bridge when useful.
+    secondary = ["en"]
+    if primary not in ("en", "hi"):
+        secondary.append("hi")
+    secondary = [c for c in secondary if c != primary]
+    return primary, secondary
+
+
+def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: list[str] | None = None):
+    """ElevenLabs Scribe v2 realtime with word timestamps for adaptive interruption A/B."""
+    from livekit.plugins import elevenlabs
+
+    api_key = settings.elevenlabs_api_key or os.environ.get("ELEVEN_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError("elevenlabs_scribe requires ELEVENLABS_API_KEY / ELEVEN_API_KEY")
+
+    primary, secondary = _scribe_language_hints(language)
+    # Realtime keyterms: up to 50 terms, ≤20 chars each (plugin docs).
+    trimmed: list[str] = []
+    for term in keyterms or []:
+        t = " ".join(str(term).split())[:20].strip()
+        if t and t.lower() not in {x.lower() for x in trimmed}:
+            trimmed.append(t)
+        if len(trimmed) >= 50:
+            break
+
+    kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "model": "scribe_v2_realtime",
+        "language_code": primary,
+        "secondary_languages": secondary,
+        "include_timestamps": True,
+        "sample_rate": 16000,
+    }
+    if trimmed:
+        kwargs["keyterms"] = trimmed
+    stt = elevenlabs.STT(**kwargs)
+    aligned = getattr(getattr(stt, "capabilities", None), "aligned_transcript", None)
+    logger.info(
+        "ElevenLabs Scribe STT model=scribe_v2_realtime lang=%s secondary=%s aligned=%s keyterms=%d",
+        primary,
+        secondary,
+        aligned,
+        len(trimmed),
+    )
+    return stt
+
+
 def build_stt(language: str, settings: Settings | None = None, keyterms: list[str] | None = None):
     settings = settings or get_settings()
     provider = settings.resolved_stt()
@@ -120,6 +171,20 @@ def build_stt(language: str, settings: Settings | None = None, keyterms: list[st
             openai_plugin.STT(model="gpt-4o-mini-transcribe", api_key=settings.openai_api_key),
             settings,
         )
+
+    if provider == "elevenlabs_scribe":
+        try:
+            return build_elevenlabs_scribe_stt(language, settings, keyterms)
+        except Exception as err:  # noqa: BLE001
+            fallback = settings.stt_scribe_fallback
+            logger.warning(
+                "elevenlabs_scribe STT failed (%s); fallback=%s",
+                err,
+                fallback,
+            )
+            if fallback == "openai":
+                return build_openai_stt(language, settings, keyterms)
+            raise
 
     if provider == "sarvam":
         # Prefer realtime streaming class when available
@@ -262,31 +327,67 @@ def build_tts(language: str, settings: Settings | None = None, *, provider: str 
 
 
 def build_noise_cancellation(settings: Settings | None = None):
+    """Inbound audio cleanup before VAD/STT.
+
+    - krisp → Krisp BVC (background *voice* + noise cancellation; preferred for ward chatter)
+    - aicoustics → ai-coustics Quail Voice Focus L (primary-speaker isolation A/B)
+    - none → passthrough
+    Never stack client + agent enhanced NC on the same stream.
+    """
     settings = settings or get_settings()
     provider = settings.noise_provider
     if provider == "none":
+        logger.info("noise cancellation disabled (NOISE_PROVIDER=none)")
         return None
 
     if provider == "krisp":
         try:
+            # BVC isolates the near-field speaker and suppresses other talkers — NC alone is not enough.
             if hasattr(noise_cancellation_plugin, "BVC"):
-                return noise_cancellation_plugin.BVC()
+                opts = noise_cancellation_plugin.BVC()
+                logger.info("noise cancellation: Krisp BVC (background voice + noise)")
+                return opts
             if hasattr(noise_cancellation_plugin, "NC"):
-                return noise_cancellation_plugin.NC()
+                opts = noise_cancellation_plugin.NC()
+                logger.warning("noise cancellation: Krisp NC only (no BVC in plugin — env noise, not other voices)")
+                return opts
         except Exception as err:  # noqa: BLE001
             logger.warning("Krisp noise cancellation unavailable: %s", err)
             return None
 
     if provider == "aicoustics":
         try:
-            for name in ("VoiceFocus", "QUAIL_VF_S", "NC"):
-                factory = getattr(noise_cancellation_plugin, name, None)
-                if callable(factory):
-                    return factory()
+            from livekit.plugins import ai_coustics
+
+            model = getattr(ai_coustics.EnhancerModel, "QUAIL_VF_L", None) or getattr(
+                ai_coustics.EnhancerModel, "QUAIL_VF_S", None
+            )
+            if model is None:
+                logger.warning("ai-coustics installed but Voice Focus model missing")
+                return None
+            params = None
+            if hasattr(ai_coustics, "ModelParameters"):
+                try:
+                    params = ai_coustics.ModelParameters(enhancement_level=0.8)
+                except Exception:  # noqa: BLE001
+                    params = None
+            kwargs: dict[str, Any] = {"model": model}
+            if params is not None:
+                kwargs["model_parameters"] = params
+            opts = ai_coustics.audio_enhancement(**kwargs)
+            logger.info("noise cancellation: ai-coustics Voice Focus (%s)", getattr(model, "name", model))
+            return opts
+        except ImportError:
+            logger.warning(
+                "NOISE_PROVIDER=aicoustics but livekit-plugins-ai-coustics is not installed "
+                "(pip install livekit-plugins-ai-coustics)"
+            )
+            return None
         except Exception as err:  # noqa: BLE001
             logger.warning("ai-coustics noise cancellation unavailable: %s", err)
             return None
 
+    logger.warning("unknown NOISE_PROVIDER=%s — disabling", provider)
     return None
 
 

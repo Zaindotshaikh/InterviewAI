@@ -10,10 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 ProviderMode = Literal["mock", "openai", "sarvam"]
-SttProvider = Literal["openai", "sarvam", "mock"]
+SttProvider = Literal["openai", "sarvam", "elevenlabs_scribe", "mock"]
 TtsProvider = Literal["openai", "sarvam", "google", "elevenlabs", "mock"]
 LlmProvider = Literal["openai", "sarvam", "mock"]
 NoiseProvider = Literal["none", "krisp", "aicoustics"]
+SttFallback = Literal["openai", "none"]
 
 
 class Settings(BaseSettings):
@@ -37,6 +38,10 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     noise_provider: NoiseProvider = "none"
     fallback_stt_key: str | None = None
+    # When STT_PROVIDER=elevenlabs_scribe fails to build/connect, fall back (default openai).
+    stt_scribe_fallback: SttFallback = "openai"
+    # Persist per-turn turn.latency events (additive; default on for Phase 1 baselines).
+    voice_latency_log: bool = True
 
     # API keys
     openai_api_key: str | None = None
@@ -178,6 +183,8 @@ def get_settings() -> Settings:
         "V2_INTERNAL_SECRET": "v2_internal_secret",
         "PROVIDER_MODE": "provider_mode",
         "STT_PROVIDER": "stt_provider",
+        "STT_SCRIBE_FALLBACK": "stt_scribe_fallback",
+        "VOICE_LATENCY_LOG": "voice_latency_log",
         "TTS_PROVIDER": "tts_provider",
         "LLM_PROVIDER": "llm_provider",
         "LLM_MODEL": "llm_model",
@@ -212,18 +219,22 @@ def get_settings() -> Settings:
         "SILENCE_NUDGE_SECONDS": "silence_nudge_seconds",
         "RECONNECT_GRACE_SECONDS": "reconnect_grace_seconds",
     }
-    # Ensure dotenv from parent server/.env is visible when running from agent/
-    for path in (".env", "../server/.env", "../.env"):
-        if os.path.exists(path):
-            try:
-                from dotenv import load_dotenv
+    # Agent .env wins (override=True). Parent server/.env only fills gaps.
+    try:
+        from dotenv import load_dotenv
 
+        if os.path.exists(".env"):
+            load_dotenv(".env", override=True)
+        for path in ("../server/.env", "../.env"):
+            if os.path.exists(path):
                 load_dotenv(path, override=False)
-            except Exception:
-                pass
-    # LiveKit ElevenLabs plugin reads ELEVEN_API_KEY; accept either env name.
-    if not os.environ.get("ELEVEN_API_KEY") and os.environ.get("ELEVENLABS_API_KEY"):
-        os.environ["ELEVEN_API_KEY"] = os.environ["ELEVENLABS_API_KEY"]
+    except Exception:
+        pass
+    # LiveKit ElevenLabs plugin reads ELEVEN_API_KEY — always mirror the active key.
+    key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY")
+    if key:
+        os.environ["ELEVENLABS_API_KEY"] = key
+        os.environ["ELEVEN_API_KEY"] = key
     # pydantic-settings reads env; aliases above are identical names after lowercasing
     _ = aliases
     return Settings()

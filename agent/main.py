@@ -35,6 +35,7 @@ from backend import BackendClient
 from config import get_settings
 from interview import (
     BASE_VOICE_RULES,
+    ELEVENLABS_EXPRESSIVE_RULES,
     Blueprint,
     Disfluency,
     FillerPlayer,
@@ -52,11 +53,13 @@ from interview import (
     detect_script_language,
     frames_iter,
     get_profile,
+    opening_seed,
     native_script_reminder,
     sanitize_candidate_text,
     spoken_style,
 )
 from interview.director import Director
+from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from providers import (
     build_fallback_stt,
@@ -213,11 +216,16 @@ class InterviewAgent(Agent):
         director: Director,
         backend: BackendClient,
         session_ref: dict[str, Any],
+        tts_provider: str | None = None,
     ) -> None:
         voice = get_settings().google_tts_voice
+        self._tts_provider = (tts_provider or "").strip().lower()
+        expressive = (
+            f"\n\n{ELEVENLABS_EXPRESSIVE_RULES}" if self._tts_provider == "elevenlabs" else ""
+        )
         instructions = (
             f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n{spoken_style(plan.language, voice)}\n\n"
-            f"{native_script_reminder(plan.language)}"
+            f"{native_script_reminder(plan.language)}{expressive}"
         )
         super().__init__(instructions=instructions)
         self.plan = plan
@@ -230,6 +238,7 @@ class InterviewAgent(Agent):
         self._persist_lock = asyncio.Lock()  # FIFO, so state patches reach the server in order
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closing = False
+        # Chirp markup pauses only; never inject [pause short] on ElevenLabs (use audio tags instead).
         self._disfluency = Disfluency(
             get_settings().hesitation_rate,
             use_pause_tags=False,
@@ -238,10 +247,17 @@ class InterviewAgent(Agent):
         # Set when a pre-rendered reaction was just played, so the reply's first sentence gets no um.
         self._suppress_lead = False
         self._greeting_pending = True
+        self.latency: LatencyTracker | None = None
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001
         tts = self.session.tts
-        self._disfluency.use_pause_tags = bool(getattr(getattr(tts, "_opts", None), "use_markup", False))
+        if self._tts_provider == "elevenlabs" or (
+            _elevenlabs_plugin is not None and isinstance(tts, _elevenlabs_plugin.TTS)
+        ):
+            # Keep ElevenLabs audio tags intact; do not wrap with Chirp [pause] markup.
+            self._disfluency.use_pause_tags = False
+        else:
+            self._disfluency.use_pause_tags = bool(getattr(getattr(tts, "_opts", None), "use_markup", False))
         skip_first, self._suppress_lead = self._suppress_lead, False
         opening, self._greeting_pending = self._greeting_pending, False
         shaped = self._disfluency.apply(
@@ -349,6 +365,13 @@ class InterviewAgent(Agent):
         self.spawn(self._persist(move.events))
         self._finish_if_needed(move)
         try:
+            if move.kind == "opening":
+                # Speak the greeting word immediately so first audio is not blocked on the LLM.
+                seed = opening_seed(
+                    self.flow.state.language,
+                    elevenlabs=self._tts_provider == "elevenlabs",
+                )
+                await self.session.say(seed, allow_interruptions=True)
             await self.session.generate_reply(instructions=f"CONTROLLER DIRECTIVE: {move.directive}")
         except Exception:  # noqa: BLE001
             logger.exception("generate_reply failed for %s", move.kind)
@@ -378,8 +401,13 @@ class InterviewAgent(Agent):
                     self.director.note_user(turn["text"])
             await self._rehydrate()
         move = self.flow.resume() if resuming else self.flow.opening()
-        await self.backend.post_event(
-            self.plan.interview_id, "interview.agent_entered", {"resumed": resuming, "stage": self.flow.state.stage}
+        # Don't block first audio on analytics — speak immediately.
+        self.spawn(
+            self.backend.post_event(
+                self.plan.interview_id,
+                "interview.agent_entered",
+                {"resumed": resuming, "stage": self.flow.state.stage},
+            )
         )
         await self.speak_move(move)
 
@@ -390,18 +418,25 @@ class InterviewAgent(Agent):
         text = sanitize_candidate_text(str(raw))
         settings = get_settings()
 
+        self._turn_index += 1
+        if self.latency is not None:
+            self.latency.on_hook_start(self._turn_index)
+
         detected = detect_script_language(text)
         events: list[tuple[str, dict[str, Any]]] = []
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
         # Play the short acknowledgement first, so the analyst call below is covered by speech rather than silence.
+        # (Phase 4: filler bucket from STT heuristics / neutral only — not Director sentiment.)
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
         if fillers is not None and not self.flow.done and classify_answer(text) == "substantive":
             picked = fillers.pick(self.flow.state.language, text)
             if picked is not None:
                 filler_text, frames = picked
+                if self.latency is not None:
+                    self.latency.on_filler_start()
                 self.session.say(filler_text, audio=frames_iter(frames), add_to_chat_ctx=False)
                 self._suppress_lead = True
                 filler_note = (
@@ -410,13 +445,15 @@ class InterviewAgent(Agent):
                 )
 
         elapsed_min = (datetime.now(timezone.utc) - self._started_at).total_seconds() / 60.0
+        t0 = datetime.now(timezone.utc)
         if elapsed_min >= settings.v2_max_minutes and not self.flow.done:
             move = self.flow.force_complete("time")
         else:
             move = await self.director.decide(text)
+        if self.latency is not None:
+            self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
         self.director.note_user(text)
 
-        self._turn_index += 1
         self.spawn(
             self.backend.post_transcript(
                 self.plan.interview_id, role="user", text=text, turn_index=self._turn_index
@@ -432,6 +469,8 @@ class InterviewAgent(Agent):
                 f"{native_script_reminder(self.flow.state.language)}{filler_note}"
             ),
         )
+        if self.latency is not None:
+            self.latency.on_hook_end()
         self._finish_if_needed(move)
 
 
@@ -482,6 +521,15 @@ async def entrypoint(ctx: JobContext) -> None:
     language = flow.state.language or plan.language
     llm = build_llm(settings)
     stt = build_stt(language, settings, keyterms=plan.keyterms)
+    stt_caps = getattr(stt, "capabilities", None)
+    stt_aligned = getattr(stt_caps, "aligned_transcript", False) if stt_caps else False
+    logger.info(
+        "STT ready provider=%s class=%s aligned_transcript=%s interruption_mode=%s",
+        settings.resolved_stt(),
+        f"{type(stt).__module__}.{type(stt).__name__}",
+        stt_aligned,
+        settings.interruption_mode,
+    )
     tts = build_tts(language, settings, provider=tts_override)
     _tts_opts = getattr(tts, "_opts", None)
     logger.info(
@@ -513,10 +561,22 @@ async def entrypoint(ctx: JobContext) -> None:
         pass
 
     noise = build_noise_cancellation(settings)
+    logger.info(
+        "inbound audio noise_cancellation=%s provider=%s",
+        "on" if noise is not None else "off",
+        settings.noise_provider,
+    )
     session_ref: dict[str, Any] = {}
 
     session_ref["job_ctx"] = ctx
-    agent = InterviewAgent(plan=plan, flow=flow, director=director, backend=backend, session_ref=session_ref)
+    agent = InterviewAgent(
+        plan=plan,
+        flow=flow,
+        director=director,
+        backend=backend,
+        session_ref=session_ref,
+        tts_provider=tts_override or settings.resolved_tts(),
+    )
 
     detector = build_turn_detector(settings) if vad is not None else None
     turn_handling = build_turn_handling(language, settings, has_vad=vad is not None, detector=detector)
@@ -559,6 +619,34 @@ async def entrypoint(ctx: JobContext) -> None:
     session_ref["session"] = session
     watchdog = TurnWatchdog(session=session, backend=backend, interview_id=interview_id, settings=settings)
     watchdog.attach()
+    latency = LatencyTracker(
+        backend=backend,
+        interview_id=interview_id,
+        enabled=bool(settings.voice_latency_log),
+        spawn=agent.spawn,
+    )
+    agent.latency = latency
+    latency.attach(session)
+    logger.info(
+        "voice latency log=%s headline=ttfa_vad_ms also=ttfa_confirm_ms stt_aligned=%s",
+        settings.voice_latency_log,
+        stt_aligned,
+    )
+    agent.spawn(
+        backend.post_event(
+            interview_id,
+            "voice.session_config",
+            {
+                "stt_provider": settings.resolved_stt(),
+                "stt_aligned_transcript": stt_aligned,
+                "interruption_mode": settings.interruption_mode,
+                "false_interruption_timeout": settings.false_interruption_timeout,
+                "tts_provider": tts_override or settings.resolved_tts(),
+                "voice_latency_log": settings.voice_latency_log,
+                "preemptive_generation": settings.preemptive_generation,
+            },
+        )
+    )
     if settings.resolved_tts() != "mock":
         fillers = FillerPlayer(tts, settings.thinking_filler_probability)
         fillers.prepare(language)
@@ -627,6 +715,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _shutdown() -> None:
         await watchdog.post_summary()
+        try:
+            summary = latency.summary()
+            if settings.voice_latency_log and summary.get("turns"):
+                await backend.post_event(interview_id, "turn.latency_summary", summary)
+                logger.info("turn.latency_summary %s", summary)
+        except Exception:  # noqa: BLE001
+            logger.exception("latency summary failed")
         await backend.flush()
         await backend.aclose()
 
@@ -639,15 +734,22 @@ def prewarm(proc: JobProcess) -> None:
         proc.userdata["vad"] = build_vad(settings)
     except Exception as err:  # noqa: BLE001
         logger.warning("VAD prewarm skipped: %s", err)
-    # Prewarm TTS when Sarvam is configured
-    if settings.resolved_tts() == "sarvam" and settings.sarvam_api_key:
+    # Warm TTS websockets / HTTP so the first greeting is not cold-start slow.
+    providers: list[str] = []
+    if settings.elevenlabs_api_key:
+        providers.append("elevenlabs")
+    resolved = settings.resolved_tts()
+    if resolved and resolved != "mock" and resolved not in providers:
+        providers.append(resolved)
+    for provider in providers:
         try:
-            tts = build_tts("hi-IN", settings)
+            tts = build_tts("hi-IN", settings, provider=provider)
             if hasattr(tts, "prewarm"):
                 tts.prewarm()
             proc.userdata["tts_prewarmed"] = True
+            logger.info("TTS prewarmed provider=%s", provider)
         except Exception as err:  # noqa: BLE001
-            logger.warning("TTS prewarm skipped: %s", err)
+            logger.warning("TTS prewarm skipped for %s: %s", provider, err)
 
 
 def cli_main() -> None:

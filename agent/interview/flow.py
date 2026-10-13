@@ -18,6 +18,7 @@ from interview.analysis import (
     ClinicalGrade,
     TurnAnalysis,
     build_user_payload,
+    looks_like_care_consent,
 )
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
@@ -36,8 +37,12 @@ _TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 STYLE_FOOTER = (
-    "Reply in 1-2 short spoken sentences. Ask only ONE question. Do not say whether their answer was right or wrong."
+    "Reply in 1-2 short spoken sentences, like a recruiter on a phone. Ask only ONE question. "
+    "No long intros such as 'now we will discuss' or 'there are no trick questions'. "
+    "Do not say whether their answer was right or wrong."
 )
+
+MAX_FOCUS_RETRIES = 3  # repeat / rephrase / unclear on the same focus before soft-skip
 
 
 @dataclass
@@ -183,12 +188,17 @@ class InterviewFlow:
         first = self._screening_next([])
         ask = first.directive.removesuffix(f"\n{STYLE_FOOTER}")
         greeting = (
-            f"Start with the greeting itself as your first spoken word (नमस्ते / नमस्कार / Hello). "
-            f"Greet {name} by name and introduce yourself as {self.plan.interviewer_name} from "
-            f"{self.plan.company_name}. In one short breath say this is a friendly two-part chat: first a few quick "
-            "details about them, then some nursing questions. Tell them they can speak in whatever language is "
-            "comfortable, mixing is fine, and there are no trick questions. This opening may be up to three short "
-            f"sentences, then ask only this first question: {ask}"
+            f"OPENING CONTINUATION — the greeting word (नमस्ते / नमस्कार / Hello) was ALREADY spoken aloud. "
+            f"Do NOT say it again.\n"
+            f"- Greet {name} by name and say you are {self.plan.interviewer_name} from "
+            f"{self.plan.company_name} — one short sentence, then a pause.\n"
+            f"- Optional one short beat: Hindi/English/mix is fine. Do NOT say 'two-part chat', "
+            f"'no trick questions', or any long process explanation.\n"
+            f"- Then ask ONLY this first question: {ask}\n"
+            f"- Keep it SHORT and HUMAN: 2–3 very short sentences total (not one long paragraph). "
+            f"Commas and '…' for breath pauses. You MAY write one 'umm,' before the question.\n"
+            f"- If ElevenLabs audio tags are active: use several between beats, e.g. [friendly] "
+            f"[short pause] [hesitant] [curious]."
         )
         return Move("opening", greeting, events=[("flow.started", {"stage": "screening"})] + first.events)
 
@@ -236,6 +246,40 @@ class InterviewFlow:
             "didn't catch your answer'), and ask them to say it once more. Do not guess what they said.",
             events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
         )
+
+    def _bump_focus_retry(self) -> Move | None:
+        """After too many repeats/unclear on the same focus, soft-skip so the call does not loop forever."""
+        st = self.state
+        focus = st.focus
+        if not focus.get("type"):
+            return None
+        retries = int(focus.get("retries") or 0) + 1
+        focus["retries"] = retries
+        if retries < MAX_FOCUS_RETRIES:
+            return None
+        focus_type = focus.get("type")
+        events: list[tuple[str, dict[str, Any]]] = [
+            ("focus.soft_skip", {"type": focus_type, "retries": retries})
+        ]
+        if focus_type in ("slots", "confirm"):
+            self._give_up_focus_slots(hard_kinds=(), force=True)
+            return self._screening_next(events)
+        if focus_type == "care":
+            self._mark_care_focus_negative("dont_know")
+            return self._screening_next(events)
+        if focus_type == "experience_dive":
+            st.experience_dive_done = True
+            return self._screening_next(events)
+        if focus_type == "clinical" and st.current_area:
+            area = self.bp.area(st.current_area)
+            if area is not None:
+                return self._finish_area(area, st.area_progress(area.id), "unknown")
+        if focus_type == "contradiction":
+            self._set_focus("none")
+            if st.stage == "clinical":
+                return self._clinical(TurnAnalysis(), None, False)
+            return self._screening_next(events)
+        return None
 
     def silence(self, level: int) -> Move:
         st = self.state
@@ -305,16 +349,25 @@ class InterviewFlow:
         # Intents that never advance the interview
         if a.intent == "repeat_request":
             st.repeat_requests += 1
+            skip = self._bump_focus_retry()
+            if skip is not None:
+                return self._wrap(skip, a.nervous)
             return self._wrap(self._repeat(), a.nervous)
         if a.intent == "rephrase_request":
             st.repeat_requests += 1
+            skip = self._bump_focus_retry()
+            if skip is not None:
+                return self._wrap(skip, a.nervous)
             return self._wrap(self._rephrase(), a.nervous)
         if a.intent == "candidate_question" and st.stage != "closing":
-            return self._wrap(self._answer_question(), a.nervous)
+            return self._wrap(self._answer_question(a), a.nervous)
         if a.intent == "wants_to_stop":
             return self._wrap(self._handle_stop(), a.nervous)
         if a.intent == "off_topic":
-            return self._wrap(self._redirect(), a.nervous)
+            return self._wrap(self._redirect(a), a.nervous)
+        if a.intent == "refusal" and st.focus.get("type") not in ("care", "slots", "confirm"):
+            # e.g. "I won't answer until you tell me the salary"
+            return self._wrap(self._salary_or_holdout(a), a.nervous)
 
         if st.stage == "screening":
             move = self._screening(a)
@@ -343,20 +396,44 @@ class InterviewFlow:
             "if it helps, a small relatable example. Do not give away the answer.",
         )
 
-    def _redirect(self) -> Move:
+    def _mentions_comp(self, a: TurnAnalysis) -> bool:
+        blob = f"{a.gist_en} {getattr(a, 'language', '')}".lower()
+        return any(
+            w in blob
+            for w in (
+                "salary", "pay", "ctc", "package", "benefit", "joining", "offer",
+                "सैलरी", "पगार", "वेतन", "सैलरी",
+            )
+        ) or any(w in (a.gist_en or "").lower() for w in ("salary", "pay", "ctc"))
+
+    def _redirect(self, a: TurnAnalysis | None = None) -> Move:
+        if a is not None and self._mentions_comp(a):
+            return self._salary_or_holdout(a)
         return self._move(
             "redirect",
             "They went off topic. Acknowledge in a few words, then gently bring them back by asking your last "
             "question again in other words.",
         )
 
-    def _answer_question(self) -> Move:
+    def _salary_or_holdout(self, a: TurnAnalysis) -> Move:
+        return self._move(
+            "salary_holdout",
+            "They are asking about salary, benefits, or joining, or refusing to continue until you share that. "
+            "In one short sentence say you cannot quote numbers — the recruitment team shares salary and benefits "
+            "after they review this chat. Then ask if they can continue with the next question, or prefer to stop. "
+            "Never invent a figure.",
+            events=[("branch.salary_holdout", {"gist": (a.gist_en or "")[:120]})],
+        )
+
+    def _answer_question(self, a: TurnAnalysis | None = None) -> Move:
+        if a is not None and self._mentions_comp(a):
+            return self._salary_or_holdout(a)
         faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
         return self._move(
             "answer_question",
             "The candidate asked you a question. Answer ONLY from this information: "
             f"{faq}. If it is not covered, say honestly that the recruitment team will share it. Never invent details "
-            "and never discuss their score or result. Then return to your last question.",
+            "and never discuss their score or result. Then return to your last question in one short ask.",
         )
 
     def _handle_stop(self) -> Move:
@@ -452,10 +529,22 @@ class InterviewFlow:
                 slot.status, slot.value = "empty", None
 
     def _absorb_care(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
+        st = self.state
+        # Care intro focuses every item at once. Positive stances without care-domain evidence
+        # (e.g. "हाँ, तीन साल ICU…") must not clear the diaper gate.
+        multi_intro = st.focus.get("type") == "care" and len(st.focus.get("items") or []) > 1
         for u in a.care_updates:
             if self.bp.care_item(u.item) is None:
                 continue
-            care = self.state.care_state(u.item)
+            evidence = (u.evidence or u.reason or "").strip()
+            if (
+                multi_intro
+                and u.stance in ("comfortable", "willing_with_training")
+                and evidence
+                and not looks_like_care_consent(evidence)
+            ):
+                continue
+            care = st.care_state(u.item)
             care.stance, care.reason, care.evidence = u.stance, u.reason[:200], u.evidence[:200]
             events.append(("care.stance", {"item": u.item, "stance": u.stance}))
 
@@ -487,6 +576,14 @@ class InterviewFlow:
         self._absorb_slot_updates(a, events)
         self._absorb_care(a, events)
 
+        if focus_type == "experience_dive":
+            # Any substantive reply (or idk) closes the dive; we still keep what they said as claims.
+            st.experience_dive_done = True
+            if a.intent == "dont_know":
+                events.append(("experience.dive", {"status": "skipped"}))
+            else:
+                events.append(("experience.dive", {"status": "answered"}))
+
         if a.intent == "dont_know" and focus_type in ("slots", "confirm"):
             # Candidate said they don't know — do not re-ask; mark the focus fields and move on.
             self._give_up_focus_slots(hard_kinds=(), force=True)
@@ -503,6 +600,14 @@ class InterviewFlow:
                 move.events = events + move.events
                 return move
         return self._screening_next(events)
+
+    def _experience_captured(self) -> bool:
+        """True once experience years/settings are no longer waiting to be asked."""
+        st = self.state
+        needed = [f.id for f in self.bp.fields if f.id in ("experience_years", "experience_settings")]
+        if not needed:
+            return True
+        return all(st.slot(fid).status != "empty" for fid in needed)
 
     def _give_up_focus_slots(
         self, *, hard_kinds: tuple[str, ...], refusal: bool = False, force: bool = False
@@ -619,7 +724,19 @@ class InterviewFlow:
             prefix = "They did not answer that yet. " if asked_before else ""
             return self._move("ask_field", f"{prefix}{ask}", events=events)
 
-        # 5. Comfort with hands-on care.
+        # 5. What did they actually do in those settings (depth before care / clinical).
+        if self._experience_captured() and not st.experience_dive_done:
+            settings = st.slots.get("experience_settings")
+            where = str(settings.value) if settings and settings.value else "that work"
+            self._set_focus("experience_dive")
+            return self._move(
+                "experience_dive",
+                f"They said they have experience in {where}. In one short question, ask what they actually did day to "
+                "day there — concrete duties, not hospital name again. Do not start clinical scenarios yet.",
+                events=events,
+            )
+
+        # 6. Comfort with hands-on care.
         care_move = self._care_questions(events)
         if care_move is not None:
             return care_move
@@ -694,8 +811,8 @@ class InterviewFlow:
         events.append(("stage.clinical", {"areas": st.area_order, "experience_level": st.experience_level}))
         move = self._start_next_area(
             lead_in=(
-                "The quick details are done. Thank them briefly, then say the next part is a few nursing questions, "
-                "like a normal conversation, and there are no trick questions. "
+                "Screening details are done. Thank them in a few words, then go straight into the first nursing "
+                "question — no long preamble. "
             )
         )
         move.events = events + move.events

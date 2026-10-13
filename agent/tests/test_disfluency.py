@@ -55,8 +55,11 @@ def test_no_um_right_after_a_reaction_was_played_or_in_the_greeting():
     d = Disfluency(rate=1.0, use_pause_tags=False)
     after_ack = _run(d, ["तर umm, तुम्ही कुठे काम करता? "], language="mr-IN", skip_first=True)
     assert "umm" not in after_ack[0]
-    greeting = "".join(_run(d, ["नमस्कार Priya. ", "तर umm, थोडं सांगा? "], language="mr-IN", opening=True))
-    assert greeting.lstrip().startswith("नमस्कार") and "umm" not in greeting
+    # Opening: first sentence stays a clean greeting; later sentences may keep umm.
+    parts = _run(d, ["नमस्कार Priya. ", "तर umm, थोडं सांगा? "], language="mr-IN", opening=True)
+    greeting = "".join(parts)
+    assert parts[0].lstrip().startswith("नमस्कार") and "umm" not in parts[0]
+    assert "umm" in greeting
 
 
 def test_moans_are_removed_and_real_words_kept():
