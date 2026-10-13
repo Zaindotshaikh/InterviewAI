@@ -1,6 +1,6 @@
 # Voice layer refactor (InterviewAI v2)
 
-**Status:** Phase 1 committed (instrumentation + Scribe behind flag). Await your baseline calls.  
+**Status:** Phases 1–7 implemented for combined testing. Agent `.env` defaults to `STT_PROVIDER=elevenlabs_scribe` + `VOICE_EXPRESSIVENESS=engine`. Restart worker before testing.  
 **Scope:** Human-sounding, fast voice on the **ElevenLabs TTS path**, without changing interview policy.  
 **Order (Path X):** `0 → 1 (instrument + wire Scribe behind flag + baselines) → 4+6 → 3 → 2 (Scribe A/B polish) → 5 → 7`  
 **Commits:** One commit per phase after approval.

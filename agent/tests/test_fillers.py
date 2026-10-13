@@ -13,7 +13,7 @@ def _frame(amplitude: int, seconds: float = 0.2, sr: int = 24000) -> rtc.AudioFr
 
 def _player(probability: float = 1.0) -> FillerPlayer:
     player = FillerPlayer(tts=None, probability=probability)
-    player._cache["mr-IN"] = {t: [_frame(3000)] for t in ACKS["mr-IN"]}
+    player._cache["mr-IN"] = {f"neutral:{t}": [_frame(3000)] for t in ACKS["mr-IN"]}
     return player
 
 
@@ -34,7 +34,9 @@ def test_probability_zero_disables():
 
 
 def test_dragged_out_takes_are_rejected():
-    takes = iter([[_frame(3000, seconds=3.0)], [_frame(3000, seconds=0.6)]] * len(ACKS["mr-IN"]))
+    # Neutral + empathetic texts for mr-IN (empathy falls back to hi forms for mr).
+    n = len(acks_for("mr-IN", "neutral")) + len(acks_for("mr-IN", "empathetic"))
+    takes = iter([[_frame(3000, seconds=3.0)], [_frame(3000, seconds=0.6)]] * n)
     player = FillerPlayer(tts=object(), probability=1.0)
 
     async def fake_synthesize(_text):

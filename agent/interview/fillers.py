@@ -32,18 +32,30 @@ ENGLISH_UM = "um,"
 
 # Turn-start reactions, real words only (bare vowels like "आ" are what moaned). Period, not ellipsis,
 # so the voice does not drag the word out. Two words each: Chirp streams a lone word ("बरं.") as silence.
-ACKS: dict[str, list[str]] = {
-    "hi-IN": ["ठीक है.", "अच्छा, ठीक है.", "हाँ जी, अच्छा."],
-    "mr-IN": ["हो, बरं.", "बरं, ठीक आहे.", "अच्छा, बरं."],
-    "ta-IN": ["சரி, சரி.", "ஓகே, சரி."],
-    "te-IN": ["సరే, సరే.", "ఓకే, సరే."],
-    "kn-IN": ["ಸರಿ, ಸರಿ.", "ಓಕೆ, ಸರಿ."],
-    "ml-IN": ["ശരി, ശരി.", "ഓക്കെ, ശരി."],
-    "bn-IN": ["আচ্ছা, ঠিক আছে.", "ঠিক আছে."],
-    "gu-IN": ["સારું, સારું.", "અચ્છા, સારું."],
-    "pa-IN": ["ਠੀਕ ਹੈ.", "ਅੱਛਾ, ਠੀਕ ਹੈ."],
-    "en-IN": ["Okay, got it.", "Right, okay.", "Okay, sure."],
+# Neutral acks (default). Empathetic bucket used when STT/prior-turn heuristics say so.
+ACKS_NEUTRAL: dict[str, list[str]] = {
+    "hi-IN": ["ठीक है.", "अच्छा, ठीक है.", "हाँ जी, अच्छा.", "ओके.", "समझ गई."],
+    "mr-IN": ["हो, बरं.", "बरं, ठीक आहे.", "अच्छा, बरं.", "ठीक आहे.", "समजलं."],
+    "ta-IN": ["சரி, சரி.", "ஓகே, சரி.", "சரி.", "புரிஞ்சுது."],
+    "te-IN": ["సరే, సరే.", "ఓకే, సరే.", "సరే.", "అర్థమైంది."],
+    "kn-IN": ["ಸರಿ, ಸರಿ.", "ಓಕೆ, ಸರಿ.", "ಸರಿ.", "ಅರ್ಥವಾಯಿತು."],
+    "ml-IN": ["ശരി, ശരി.", "ഓക്കെ, ശരി.", "ശരി.", "മനസ്സിലായി."],
+    "bn-IN": ["আচ্ছা, ঠিক আছে.", "ঠিক আছে.", "ওকে.", "বুঝেছি."],
+    "gu-IN": ["સારું, સારું.", "અચ્છા, સારું.", "ઠીક છે.", "સમજાયું."],
+    "pa-IN": ["ਠੀਕ ਹੈ.", "ਅੱਛਾ, ਠੀਕ ਹੈ.", "ਓਕੇ.", "ਸਮਝ ਗਈ."],
+    "en-IN": ["Okay, got it.", "Right, okay.", "Okay, sure.", "Got it.", "Alright."],
 }
+
+# Reviewed: hi / mr / en. Other langs fall back to hi/en forms via acks_for().
+ACKS_EMPATHETIC: dict[str, list[str]] = {
+    "hi-IN": ["कोई बात नहीं.", "समझ सकती हूँ.", "ठहरिए, कोई जल्दी नहीं.", "हाँ, ठीक है धीरे से."],
+    "mr-IN": ["काही हरकत नाही.", "समजू शकते.", "हळूच सांगा.", "बरं, घाई नको."],
+    "en-IN": ["That's okay.", "No rush.", "I understand.", "Take your time."],
+}
+
+# Backward-compatible alias (neutral list).
+ACKS: dict[str, list[str]] = ACKS_NEUTRAL
+REVIEWED_FILLER_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN"})
 
 MIN_WORDS_FOR_FILLER = 4
 MIN_VOICED_SECONDS = 0.15
@@ -55,8 +67,17 @@ def um_for(language: str) -> str:
     return ENGLISH_UM if language.startswith("en") else INDIC_UM
 
 
-def acks_for(language: str) -> list[str]:
-    return ACKS.get(language, ACKS["en-IN"])
+def acks_for(language: str, bucket: str = "neutral") -> list[str]:
+    """Return ack variants. Unreviewed languages fall back to hi (Indic) or en."""
+    lang = language if language in ACKS_NEUTRAL else (
+        "en-IN" if (language or "").startswith("en") else "hi-IN"
+    )
+    if bucket == "empathetic":
+        if lang in ACKS_EMPATHETIC:
+            return ACKS_EMPATHETIC[lang]
+        # Unreviewed empathy → reviewed hi/en empathy forms
+        return ACKS_EMPATHETIC.get("en-IN" if lang.startswith("en") else "hi-IN", ACKS_NEUTRAL["en-IN"])
+    return ACKS_NEUTRAL.get(lang, ACKS_NEUTRAL["en-IN"])
 
 
 # --- text normalization ------------------------------------------------------------------------
@@ -140,17 +161,20 @@ class FillerPlayer:
         self._tasks[language] = asyncio.create_task(self._render(language))
 
     async def _render(self, language: str) -> None:
+        # Cache both buckets under composite keys.
         rendered: dict[str, list[rtc.AudioFrame]] = {}
-        for text in acks_for(language):
-            for _ in range(MAX_RENDER_ATTEMPTS):
-                try:
-                    frames = await self._synthesize(text)
-                except Exception:  # noqa: BLE001
-                    logger.warning("filler render failed for %r (%s)", text, language)
-                    continue
-                if MIN_VOICED_SECONDS <= _voiced_seconds(frames) <= MAX_VOICED_SECONDS:
-                    rendered[text] = frames
-                    break
+        for bucket in ("neutral", "empathetic"):
+            for text in acks_for(language, bucket):
+                key = f"{bucket}:{text}"
+                for _ in range(MAX_RENDER_ATTEMPTS):
+                    try:
+                        frames = await self._synthesize(text)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("filler render failed for %r (%s)", text, language)
+                        continue
+                    if MIN_VOICED_SECONDS <= _voiced_seconds(frames) <= MAX_VOICED_SECONDS:
+                        rendered[key] = frames
+                        break
         self._cache[language] = rendered
 
     async def _synthesize(self, text: str) -> list[rtc.AudioFrame]:
@@ -162,7 +186,13 @@ class FillerPlayer:
         finally:
             await stream.aclose()
 
-    def pick(self, language: str, candidate_text: str) -> tuple[str, list[rtc.AudioFrame]] | None:
+    def pick(
+        self,
+        language: str,
+        candidate_text: str,
+        *,
+        bucket: str = "neutral",
+    ) -> tuple[str, list[rtc.AudioFrame]] | None:
         """Return a reaction to play for this turn, or None to stay silent."""
         if len(candidate_text.split()) < MIN_WORDS_FOR_FILLER or random.random() >= self._probability:
             return None
@@ -170,10 +200,17 @@ class FillerPlayer:
         if not rendered:
             self.prepare(language)
             return None
-        options = [t for t in rendered if t != self._last] or list(rendered)
-        text = random.choice(options)
-        self._last = text
-        return text, rendered[text]
+        prefix = f"{bucket}:"
+        keys = [k for k in rendered if k.startswith(prefix)]
+        if not keys:
+            keys = [k for k in rendered if k.startswith("neutral:")]
+        options = [k for k in keys if k != self._last] or keys
+        if not options:
+            return None
+        key = random.choice(options)
+        self._last = key
+        text = key.split(":", 1)[1]
+        return text, rendered[key]
 
 
 async def frames_iter(frames: list[rtc.AudioFrame]):

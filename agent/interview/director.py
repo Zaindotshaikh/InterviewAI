@@ -103,8 +103,8 @@ class Director:
             analysis = await self.analyzer.analyze(
                 payload, clinical=self.flow.wants_clinical_model, fallback=fallback
             )
-        # Persuasion follow-ups: if the model missed a clear "हाँ / ready / कर सकता हूँ", recover it
-        # so the diaper gate does not fire after the candidate already accepted.
+        # Single-item care focus only (persuasion / item ask): recover clear हाँ/ready if the LLM omitted it.
+        # Never recover on care-intro (all items focused) — bare हाँ about ICU used to skip the diaper ask.
         if self.flow.state.focus.get("type") == "care":
             items = [str(i) for i in (self.flow.state.focus.get("items") or [])]
             before = len(analysis.care_updates)
@@ -120,4 +120,26 @@ class Director:
             self.flow.stage,
             self.analyzer.last_latency_ms,
         )
-        return self.flow.apply(analysis)
+        move = self.flow.apply(analysis)
+        # Tone is outside Flow policy. Empathy override only when DIRECTOR_EMPATHY_TONE=true.
+        try:
+            from config import get_settings
+            from interview.voice_tone import resolve_tone
+
+            settings = get_settings()
+            empathy: str | None = None
+            if settings.director_empathy_tone:
+                empathy = analysis.empathy_tone or None
+                if not empathy and (
+                    analysis.nervous
+                    or any(c.stance in ("hesitant", "refuses") for c in analysis.care_updates)
+                ):
+                    empathy = "gentle"
+            move.tone = resolve_tone(
+                move.kind,
+                empathy_tone=empathy,
+                empathy_enabled=settings.director_empathy_tone,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("tone resolve skipped", exc_info=True)
+        return move

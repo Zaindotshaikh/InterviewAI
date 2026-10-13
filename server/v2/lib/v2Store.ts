@@ -107,6 +107,8 @@ async function appendV2TranscriptUnlocked(
     role: turn.role,
     text: turn.text,
     timestamp: turn.timestamp,
+    ...(turn.llmText != null ? { llmText: turn.llmText } : {}),
+    ...(turn.interrupted != null ? { interrupted: turn.interrupted } : {}),
   });
 
   const extras = record.extras;

@@ -1,7 +1,7 @@
 """Static prompt fragments for the interviewer agent."""
 
 
-def opening_seed(language: str, *, elevenlabs: bool = False) -> str:
+def opening_seed(language: str, *, elevenlabs: bool = False, engine: bool = False) -> str:
     """Instant first audio before the LLM finishes the rest of the intro."""
     lang = (language or "hi-IN").lower()
     if lang.startswith("mr"):
@@ -10,7 +10,8 @@ def opening_seed(language: str, *, elevenlabs: bool = False) -> str:
         word = "Hello"
     else:
         word = "नमस्ते"
-    if elevenlabs:
+    # Engine mode: plain greeting; expressiveness adds the tag in later LLM continuation.
+    if elevenlabs and not engine:
         return f"[warmly] {word}… [short pause]"
     return f"{word}…"
 
@@ -176,7 +177,15 @@ def spoken_style(language: str, voice: str = "Kore") -> str:
     return f"{examples}\n{_CANDIDATE_MALE_RULE}\n{_INTERVIEWER_GENDER_RULES[voice_gender(voice)]}"
 
 
-# Opt-in when TTS is ElevenLabs — tags are stage directions for v4 / v4 turbo, not spoken words.
+# Engine mode (VOICE_EXPRESSIVENESS=engine): LLM writes plain speech; tags added in tts_node.
+ELEVENLABS_PLAIN_SPEECH_RULES = """
+## ElevenLabs voice (engine mode)
+Write plain spoken words only. Do NOT write square-bracket tags like [warmly] or [short pause] —
+a post-processor adds at most one expression tag. You MAY use "..." once for a breath pause.
+Keep 1-2 short sentences. One mid-sentence "umm," is allowed rarely (not on the greeting's first words).
+"""
+
+# Legacy mode: LLM writes tags directly (VOICE_EXPRESSIVENESS=legacy).
 ELEVENLABS_EXPRESSIVE_RULES = """
 ## ElevenLabs audio tags (ACTIVE — make speech sound more human)
 Your words are spoken by ElevenLabs v4 Turbo. Square-bracket tags are VOICE DIRECTIONS: the model acts them;

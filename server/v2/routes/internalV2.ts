@@ -66,6 +66,8 @@ router.post("/interviews/:id/transcript", async (req, res) => {
       text?: string;
       timestamp?: string;
       turnIndex?: number;
+      llmText?: string;
+      interrupted?: boolean;
     };
     if (body.role !== "user" && body.role !== "assistant") {
       res.status(400).json({ error: "role must be user or assistant" });
@@ -81,6 +83,8 @@ router.post("/interviews/:id/transcript", async (req, res) => {
       text: body.text.trim(),
       timestamp: body.timestamp || new Date().toISOString(),
       turnIndex: body.turnIndex,
+      ...(body.llmText != null ? { llmText: String(body.llmText) } : {}),
+      ...(body.interrupted != null ? { interrupted: Boolean(body.interrupted) } : {}),
     });
     res.json({ ok: true });
   } catch (err) {

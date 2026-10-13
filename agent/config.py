@@ -42,6 +42,24 @@ class Settings(BaseSettings):
     stt_scribe_fallback: SttFallback = "openai"
     # Persist per-turn turn.latency events (additive; default on for Phase 1 baselines).
     voice_latency_log: bool = True
+    # legacy = LLM writes EL tags; engine = post-processor owns ≤1 tag (EL TTS only).
+    voice_expressiveness: Literal["legacy", "engine"] = "engine"
+    voice_sigh_rate: float = 0.15
+    voice_umm_rate: float = 0.25
+    voice_pause_rate: float = 0.55
+    voice_express_cooldown_turns: int = 2
+    # Store text (= TTS-bound) + llmText separately; scoring uses text.
+    voice_transcript_split: bool = True
+    # Optional Director empathyTone field (default off — timeout uses kind→tone).
+    director_empathy_tone: bool = False
+    # Phase 3: start ack on VAD silence + interim; cancel if speech resumes.
+    voice_early_filler: bool = False
+    # Soft keyboard while thinking (0 volume still disables).
+    thinking_sound_enabled: bool = True
+    # Mid-call TTS fallback when ElevenLabs fails (google = Chirp).
+    tts_fallback_on_error: Literal["none", "google"] = "google"
+    # Raise when STT has no word alignment so हाँ/जी don't barge in.
+    interruption_min_words_no_align: int = 2
 
     # API keys
     openai_api_key: str | None = None
@@ -185,6 +203,17 @@ def get_settings() -> Settings:
         "STT_PROVIDER": "stt_provider",
         "STT_SCRIBE_FALLBACK": "stt_scribe_fallback",
         "VOICE_LATENCY_LOG": "voice_latency_log",
+        "VOICE_EXPRESSIVENESS": "voice_expressiveness",
+        "VOICE_SIGH_RATE": "voice_sigh_rate",
+        "VOICE_UMM_RATE": "voice_umm_rate",
+        "VOICE_PAUSE_RATE": "voice_pause_rate",
+        "VOICE_EXPRESS_COOLDOWN_TURNS": "voice_express_cooldown_turns",
+        "VOICE_TRANSCRIPT_SPLIT": "voice_transcript_split",
+        "DIRECTOR_EMPATHY_TONE": "director_empathy_tone",
+        "VOICE_EARLY_FILLER": "voice_early_filler",
+        "THINKING_SOUND_ENABLED": "thinking_sound_enabled",
+        "TTS_FALLBACK_ON_ERROR": "tts_fallback_on_error",
+        "INTERRUPTION_MIN_WORDS_NO_ALIGN": "interruption_min_words_no_align",
         "TTS_PROVIDER": "tts_provider",
         "LLM_PROVIDER": "llm_provider",
         "LLM_MODEL": "llm_model",

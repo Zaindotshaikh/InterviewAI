@@ -59,8 +59,12 @@ from interview import (
     spoken_style,
 )
 from interview.director import Director
+from interview.early_filler import EarlyFiller
+from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_text
 from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
+from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
+from interview.voice_tone import tone_for_kind
 from providers import (
     build_fallback_stt,
     build_llm,
@@ -73,6 +77,13 @@ from providers import (
 )
 
 logger = logging.getLogger("interview-v2")
+
+
+async def _iter_joined(chunks: list[str]):
+    if chunks:
+        yield "".join(chunks)
+
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -177,10 +188,20 @@ def _unwrap_stt(stt: Any) -> list[Any]:
 
 def _switch_stt_language(stt: Any, code: str, settings) -> None:  # noqa: ANN001
     for inner in _unwrap_stt(stt):
-        provider = getattr(inner, "provider", "") or ""
+        provider = getattr(inner, "provider", "") or type(inner).__module__
         try:
-            if "sarvam" in provider.lower():
+            if "sarvam" in str(provider).lower():
                 inner.update_options(language=code)
+            elif "elevenlabs" in str(provider).lower() or (
+                _elevenlabs_plugin is not None and isinstance(inner, _elevenlabs_plugin.STT)
+            ):
+                from providers import _scribe_language_hints
+
+                primary, secondary = _scribe_language_hints(code)
+                try:
+                    inner.update_options(language_code=primary, secondary_languages=secondary)
+                except TypeError:
+                    inner.update_options(language_code=primary)
             elif getattr(inner.capabilities, "keyterms", False):
                 inner.update_options(language=openai_stt_languages(code))
             else:
@@ -218,11 +239,17 @@ class InterviewAgent(Agent):
         session_ref: dict[str, Any],
         tts_provider: str | None = None,
     ) -> None:
-        voice = get_settings().google_tts_voice
+        settings = get_settings()
+        voice = settings.google_tts_voice
         self._tts_provider = (tts_provider or "").strip().lower()
-        expressive = (
-            f"\n\n{ELEVENLABS_EXPRESSIVE_RULES}" if self._tts_provider == "elevenlabs" else ""
-        )
+        self._expressiveness_mode = settings.voice_expressiveness
+        if self._tts_provider == "elevenlabs":
+            if self._expressiveness_mode == "engine":
+                expressive = f"\n\n{ELEVENLABS_PLAIN_SPEECH_RULES}"
+            else:
+                expressive = f"\n\n{ELEVENLABS_EXPRESSIVE_RULES}"
+        else:
+            expressive = ""
         instructions = (
             f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n{spoken_style(plan.language, voice)}\n\n"
             f"{native_script_reminder(plan.language)}{expressive}"
@@ -240,34 +267,95 @@ class InterviewAgent(Agent):
         self._closing = False
         # Chirp markup pauses only; never inject [pause short] on ElevenLabs (use audio tags instead).
         self._disfluency = Disfluency(
-            get_settings().hesitation_rate,
+            settings.hesitation_rate,
             use_pause_tags=False,
-            phrase_pause_rate=get_settings().phrase_pause_rate,
+            phrase_pause_rate=settings.phrase_pause_rate,
+        )
+        self._engine = ExpressivenessEngine(
+            sigh_rate=settings.voice_sigh_rate,
+            umm_rate=settings.voice_umm_rate,
+            pause_rate=settings.voice_pause_rate,
+            cooldown_turns=settings.voice_express_cooldown_turns,
         )
         # Set when a pre-rendered reaction was just played, so the reply's first sentence gets no um.
         self._suppress_lead = False
         self._greeting_pending = True
         self.latency: LatencyTracker | None = None
+        self._current_tone = "neutral"
+        self._empathy_hint = False
+        self._last_spoken = ""
+        self._last_llm_text = ""
+        self._interrupted = False
+        self._previous_empathy = False
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001
         tts = self.session.tts
-        if self._tts_provider == "elevenlabs" or (
+        is_el = self._tts_provider == "elevenlabs" or (
             _elevenlabs_plugin is not None and isinstance(tts, _elevenlabs_plugin.TTS)
-        ):
-            # Keep ElevenLabs audio tags intact; do not wrap with Chirp [pause] markup.
+        )
+        if is_el:
             self._disfluency.use_pause_tags = False
         else:
             self._disfluency.use_pause_tags = bool(getattr(getattr(tts, "_opts", None), "use_markup", False))
         skip_first, self._suppress_lead = self._suppress_lead, False
         opening, self._greeting_pending = self._greeting_pending, False
-        shaped = self._disfluency.apply(
-            text,
-            self.flow.state.language,
-            skip_first=skip_first,
-            opening=opening,
-        )
-        async for frame in Agent.default.tts_node(self, shaped, model_settings):
-            yield frame
+
+        # Collect LLM raw + spoken for transcript split.
+        raw_chunks: list[str] = []
+        spoken_chunks: list[str] = []
+
+        async def _tee_raw() -> Any:
+            async for chunk in text:
+                raw_chunks.append(chunk)
+                yield chunk
+
+        use_engine = is_el and self._expressiveness_mode == "engine"
+        if use_engine:
+            shaped = self._engine.apply(
+                _tee_raw(),
+                language=self.flow.state.language,
+                tone=self._current_tone,
+                opening=opening,
+                skip_first=skip_first,
+                empathy=self._empathy_hint,
+            )
+        else:
+            shaped = self._disfluency.apply(
+                _tee_raw(),
+                self.flow.state.language,
+                skip_first=skip_first,
+                opening=opening,
+            )
+
+        async def _collect_spoken() -> Any:
+            async for chunk in shaped:
+                spoken_chunks.append(chunk)
+                yield chunk
+
+        try:
+            async for frame in Agent.default.tts_node(self, _collect_spoken(), model_settings):
+                yield frame
+        except Exception:
+            # Phase 7: mid-call EL TTS failure → rebuild with Chirp if configured.
+            settings = get_settings()
+            if is_el and settings.tts_fallback_on_error == "google":
+                logger.exception("ElevenLabs TTS failed; falling back to Google Chirp")
+                try:
+                    from providers import build_tts
+
+                    self.session.tts = build_tts(self.flow.state.language, settings, provider="google")
+                    self._tts_provider = "google"
+                    async for frame in Agent.default.tts_node(self, _iter_joined(spoken_chunks or raw_chunks), model_settings):
+                        yield frame
+                    return
+                except Exception:  # noqa: BLE001
+                    logger.exception("Chirp fallback also failed")
+            raise
+        finally:
+            self._last_llm_text = "".join(raw_chunks)
+            self._last_spoken = "".join(spoken_chunks) if spoken_chunks else self._last_llm_text
+            if use_engine:
+                self._last_spoken = self._engine.spoken_for_transcript(self._last_spoken)
 
     @function_tool()
     async def switch_language(self, language_code: str) -> str:
@@ -365,11 +453,14 @@ class InterviewAgent(Agent):
         self.spawn(self._persist(move.events))
         self._finish_if_needed(move)
         try:
+            self._current_tone = move.tone or tone_for_kind(move.kind)
+            self._empathy_hint = self._current_tone in ("gentle", "reassuring")
             if move.kind == "opening":
                 # Speak the greeting word immediately so first audio is not blocked on the LLM.
                 seed = opening_seed(
                     self.flow.state.language,
                     elevenlabs=self._tts_provider == "elevenlabs",
+                    engine=self._expressiveness_mode == "engine",
                 )
                 await self.session.say(seed, allow_interruptions=True)
             await self.session.generate_reply(instructions=f"CONTROLLER DIRECTIVE: {move.directive}")
@@ -427,12 +518,12 @@ class InterviewAgent(Agent):
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
-        # Play the short acknowledgement first, so the analyst call below is covered by speech rather than silence.
-        # (Phase 4: filler bucket from STT heuristics / neutral only — not Director sentiment.)
+        # Ack filler BEFORE Director — bucket from STT heuristics / prior turn, never Director sentiment.
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
+        bucket = filler_bucket_from_text(text, previous_empathy=self._previous_empathy)
         if fillers is not None and not self.flow.done and classify_answer(text) == "substantive":
-            picked = fillers.pick(self.flow.state.language, text)
+            picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
             if picked is not None:
                 filler_text, frames = picked
                 if self.latency is not None:
@@ -452,6 +543,10 @@ class InterviewAgent(Agent):
             move = await self.director.decide(text)
         if self.latency is not None:
             self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
+        self._current_tone = move.tone or tone_for_kind(move.kind)
+        self._empathy_hint = bucket == "empathetic" or self._current_tone in ("gentle", "reassuring")
+        self._previous_empathy = self._empathy_hint
+        self._interrupted = False
         self.director.note_user(text)
 
         self.spawn(
@@ -579,7 +674,13 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     detector = build_turn_detector(settings) if vad is not None else None
-    turn_handling = build_turn_handling(language, settings, has_vad=vad is not None, detector=detector)
+    turn_handling = build_turn_handling(
+        language,
+        settings,
+        has_vad=vad is not None,
+        detector=detector,
+        stt_aligned=stt_aligned,
+    )
     logger.info(
         "turn handling: detector=%s endpointing=%s interruption=%s preemptive=%s",
         getattr(detector, "model", None) or turn_handling["turn_detection"],
@@ -644,6 +745,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 "tts_provider": tts_override or settings.resolved_tts(),
                 "voice_latency_log": settings.voice_latency_log,
                 "preemptive_generation": settings.preemptive_generation,
+                "voice_expressiveness": settings.voice_expressiveness,
+                "voice_transcript_split": settings.voice_transcript_split,
+                "voice_early_filler": settings.voice_early_filler,
+                "interruption_min_words": turn_handling["interruption"]["min_words"],
             },
         )
     )
@@ -652,16 +757,53 @@ async def entrypoint(ctx: JobContext) -> None:
         fillers.prepare(language)
         session_ref["fillers"] = fillers
 
+    early = EarlyFiller(
+        session=session,
+        fillers=session_ref.get("fillers"),
+        language=language,
+        enabled=bool(settings.voice_early_filler),
+        on_start=(latency.on_filler_start if latency else None),
+    )
+    early.attach()
+
     @session.on("conversation_item_added")
     def _on_item(ev):  # noqa: ANN001
         item = getattr(ev, "item", None)
         if item is None:
             return
         role = getattr(item, "role", None)
-        text = getattr(item, "text_content", None) or ""
-        if role == "assistant" and text:
-            director.note_assistant(str(text))
-            agent.spawn(backend.post_transcript(interview_id, role="assistant", text=str(text)))
+        llm_text = str(getattr(item, "text_content", None) or "")
+        if role == "assistant" and llm_text:
+            # Prefer post-processed TTS string for chat memory when split is on (no tag echo).
+            spoken = (agent._last_spoken or "").strip() or llm_text
+            if settings.voice_transcript_split and settings.voice_expressiveness == "engine":
+                display = agent._engine.spoken_for_transcript(spoken) if spoken else llm_text
+            elif settings.voice_transcript_split:
+                display = agent._engine.strip_tags(spoken) if hasattr(agent, "_engine") else spoken
+            else:
+                display = llm_text
+            # Keep Director memory on spoken/plain so the model doesn't copy tags next turn.
+            director.note_assistant(display)
+            agent.spawn(
+                backend.post_transcript(
+                    interview_id,
+                    role="assistant",
+                    text=display,
+                    llm_text=llm_text if settings.voice_transcript_split else None,
+                    interrupted=bool(agent._interrupted) if settings.voice_transcript_split else None,
+                )
+            )
+            agent._interrupted = False
+
+    @session.on("agent_false_interruption")
+    def _on_false_int(_ev):  # noqa: ANN001
+        pass
+
+    # Approximate barge-in: user starts speaking while agent speaks.
+    @session.on("user_state_changed")
+    def _on_user_barge(ev):  # noqa: ANN001
+        if getattr(ev, "new_state", None) == "speaking" and getattr(session, "agent_state", None) == "speaking":
+            agent._interrupted = True
 
     # Start analysing as soon as the speech-to-text commits a sentence; the turn is confirmed a little later.
     @session.on("user_input_transcribed")
@@ -699,7 +841,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(**start_kwargs)
 
-    if settings.thinking_sound_volume > 0 and not avatar_on:
+    if settings.thinking_sound_enabled and settings.thinking_sound_volume > 0 and not avatar_on:
         vol = settings.thinking_sound_volume
         background = BackgroundAudioPlayer(
             # Probabilities sum below 1 so some turns stay silent instead of typing every time.

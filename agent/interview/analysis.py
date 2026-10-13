@@ -80,6 +80,8 @@ class TurnAnalysis:
     contradictions: list[dict[str, str]] = field(default_factory=list)
     gist_en: str = ""
     source: str = "llm"  # llm | heuristic
+    # Optional (DIRECTOR_EMPATHY_TONE=true): gentle | reassuring | "" — never required.
+    empathy_tone: str = ""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], *, source: str = "llm") -> TurnAnalysis:
@@ -139,6 +141,11 @@ class TurnAnalysis:
             ][:3],
             gist_en=str(d.get("gist_en") or ""),
             source=source,
+            empathy_tone=(
+                emp
+                if (emp := str(d.get("empathy_tone") or "").strip()) in ("gentle", "reassuring")
+                else ""
+            ),
         )
 
 
@@ -366,6 +373,36 @@ _CARE_NEVER_DONE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# Hands-on care domain — used so "हाँ + ICU experience dump" is not treated as diaper consent.
+_CARE_DOMAIN = re.compile(
+    r"(?:"
+    r"\bdiaper\b|\bincontinence\b|\bbath(?:ing)?\b|\bhygiene\b|\bbedpan\b|\btoilet(?:ing)?\b"
+    r"|\blift(?:ing)?\b|\breposition\b|\bturn(?:ing)?\b|\bbedridden\b"
+    r"|डायपर|डायपर|बेडपैन|नहला|नहाने|हाइजीन|टॉयलेट|लिफ्ट|पलट"
+    r"|comfortable\s+with|willing\s+to\s+(?:do|learn)|कर\s*सक"
+    r")",
+    re.IGNORECASE,
+)
+_EXPERIENCE_DUMP = re.compile(
+    r"(?:"
+    r"\b(?:year|years|icu|hospital|internship|experience|ward|apollo|inamdar)\b"
+    r"|साल|वर्ष|हॉस्पिटल|अस्पताल|इनामदार|अपोलो|एक्सपीरियंस|अनुभव|इंटर्न"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def looks_like_care_consent(text: str) -> bool:
+    """True when the utterance is about hands-on care, not just a yes about work history."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _CARE_DOMAIN.search(t):
+        return True
+    # Short clear yes/ready on a single-item persuasion is fine.
+    if len(t) <= 48 and _CARE_YES.search(t) and not _EXPERIENCE_DUMP.search(t):
+        return True
+    return False
 
 
 def infer_care_accept(text: str) -> str | None:
@@ -379,6 +416,11 @@ def infer_care_accept(text: str) -> str | None:
     no = bool(_CARE_NO.search(t))
     yes = bool(_CARE_YES.search(t))
     if yes and not no:
+        # Experience dumps that start with हाँ must not count as care consent.
+        if _EXPERIENCE_DUMP.search(t) and not _CARE_DOMAIN.search(t):
+            return None
+        if not looks_like_care_consent(t):
+            return None
         low = t.lower()
         if "train" in low or "सीख" in t or "training" in low:
             return "willing_with_training"
@@ -389,8 +431,12 @@ def infer_care_accept(text: str) -> str | None:
 
 
 def recover_care_updates(analysis: TurnAnalysis, *, text: str, item_ids: list[str]) -> TurnAnalysis:
-    """If care is in focus and the LLM omitted a clear yes/no, invent the missing care_updates."""
-    if not item_ids:
+    """If one care item is in focus and the LLM omitted a clear yes/no, invent the missing update.
+
+    Never recover across the care-intro cluster (all items focused): a bare हाँ about ICU
+    experience used to stamp every duty comfortable and skip the diaper ask.
+    """
+    if len(item_ids) != 1:
         return analysis
     covered = {u.item for u in analysis.care_updates}
     missing = [i for i in item_ids if i not in covered]

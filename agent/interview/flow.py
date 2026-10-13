@@ -52,6 +52,8 @@ class Move:
     completed: bool = False
     end_session: bool = False
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    # Set outside InterviewFlow (agent layer). Never used for policy.
+    tone: str | None = None
 
 
 class InterviewFlow:

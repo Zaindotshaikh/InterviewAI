@@ -18,8 +18,13 @@ export type RoleConfig = {
 
 export type TranscriptTurn = {
   role: "user" | "assistant";
+  /** Spoken / TTS-bound text (scoring reads this). */
   text: string;
   timestamp: string;
+  /** Raw LLM output before expressiveness post-process (optional). */
+  llmText?: string;
+  /** True when the agent was interrupted mid-utterance. */
+  interrupted?: boolean;
 };
 
 /** Pipeline candidate saved from TA "Add Candidate" form. */

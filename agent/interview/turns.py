@@ -74,6 +74,7 @@ def build_turn_handling(
     *,
     has_vad: bool,
     detector: Any | None = None,
+    stt_aligned: bool | str = False,
 ) -> dict[str, Any]:
     """Options for ``AgentSession(turn_handling=...)``."""
     if not has_vad:
@@ -81,10 +82,17 @@ def build_turn_handling(
     else:
         turn_detection = detector if detector is not None else "vad"
 
+    # When STT has no word alignment, raise min_words so short backchannels (हाँ/जी) don't barge in.
+    aligned = bool(stt_aligned)
+    min_words = (
+        settings.interruption_min_words
+        if aligned
+        else max(settings.interruption_min_words, settings.interruption_min_words_no_align)
+    )
     interruption: dict[str, Any] = {
         "enabled": True,
         "mode": settings.interruption_mode if has_vad else "vad",
-        "min_words": settings.interruption_min_words,
+        "min_words": min_words,
         "false_interruption_timeout": settings.false_interruption_timeout,
         "resume_false_interruption": True,
     }
