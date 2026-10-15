@@ -17,6 +17,7 @@ from livekit.agents import (
     BuiltinAudioClip,
     JobContext,
     JobProcess,
+    StopResponse,
     WorkerOptions,
     cli,
 )
@@ -53,6 +54,7 @@ from interview import (
     detect_script_language,
     frames_iter,
     get_profile,
+    gpt_live_voice_instructions,
     opening_seed,
     native_script_reminder,
     sanitize_candidate_text,
@@ -137,6 +139,41 @@ def _tts_provider_override(payload: dict[str, Any], job_meta: dict[str, Any]) ->
         return None
     value = str(raw).strip().lower()
     return value if value in ("elevenlabs", "google", "openai", "sarvam", "mock") else None
+
+
+def _voice_provider_override(payload: dict[str, Any], job_meta: dict[str, Any]) -> str | None:
+    """Full-duplex voice path (e.g. gpt_live) — replaces cascade STT/LLM/TTS for that interview."""
+    raw = payload.get("voiceProvider") or job_meta.get("voiceProvider") or payload.get("voice_provider")
+    if not raw:
+        return None
+    value = str(raw).strip().lower()
+    return value if value in ("gpt_live",) else None
+
+
+# Instant speakable progress while Director runs (same delegation_id as the final directive).
+_GPT_LIVE_ACK_COMMENTARY = (
+    "Brief warm acknowledgement only — one short beat like हाँ / ठीक है / okay / hmm. "
+    "Do NOT ask any new interview question, follow-up, or topic yet. "
+    "Wait for the next CONTROLLER DIRECTIVE commentary."
+)
+
+_GPT_LIVE_FOCUS_LOCK_INSTRUCTIONS = (
+    "Standing rule: ask ONLY what the current CONTROLLER focus allows. "
+    "Never invent screening, clinical, salary, night-shift, join-date, hospital, or closing "
+    "questions on your own. While waiting for CONTROLLER DIRECTIVE commentary after a "
+    "delegation: brief ack/backchannel only — no new question."
+)
+
+
+def _gpt_live_commentary(move: Move, language: str) -> str:
+    """Commentary the voice model paraphrases; keep under the ~500-token append cap."""
+    text = (
+        "CONTROLLER DIRECTIVE — paraphrase naturally in the candidate's language; "
+        "do not invent a different question or topic:\n"
+        f"{move.directive}\n"
+        f"{native_script_reminder(language)}"
+    )
+    return text[:1800]
 
 
 async def _start_tavus_avatar(session: AgentSession, ctx: JobContext, settings) -> bool:  # noqa: ANN001
@@ -238,22 +275,35 @@ class InterviewAgent(Agent):
         backend: BackendClient,
         session_ref: dict[str, Any],
         tts_provider: str | None = None,
+        gpt_live: bool = False,
     ) -> None:
         settings = get_settings()
         voice = settings.google_tts_voice
+        self._gpt_live = bool(gpt_live)
         self._tts_provider = (tts_provider or "").strip().lower()
+        # /elevenlabs-interviewer locks TTS to ElevenLabs — never mid-call Chirp fallback.
+        self._tts_locked_el = self._tts_provider == "elevenlabs"
         self._expressiveness_mode = settings.voice_expressiveness
-        if self._tts_provider == "elevenlabs":
-            if self._expressiveness_mode == "engine":
-                expressive = f"\n\n{ELEVENLABS_PLAIN_SPEECH_RULES}"
-            else:
-                expressive = f"\n\n{ELEVENLABS_EXPRESSIVE_RULES}"
+        if self._gpt_live:
+            # GPT-Live owns audio pacing/fillers; cascade TTS tags / Disfluency are not used.
+            # Voice may be "gpt_live:marin" or "gpt_live:custom:voice_…" — use name for gender hints only.
+            live_voice = "marin"
+            if self._tts_provider.startswith("gpt_live:"):
+                rest = self._tts_provider.split(":", 1)[1]
+                live_voice = "marin" if rest.startswith("custom:") else (rest or "marin")
+            instructions = gpt_live_voice_instructions(plan, voice=live_voice)
         else:
-            expressive = ""
-        instructions = (
-            f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n{spoken_style(plan.language, voice)}\n\n"
-            f"{native_script_reminder(plan.language)}{expressive}"
-        )
+            if self._tts_provider == "elevenlabs":
+                if self._expressiveness_mode == "engine":
+                    expressive = f"\n\n{ELEVENLABS_PLAIN_SPEECH_RULES}"
+                else:
+                    expressive = f"\n\n{ELEVENLABS_EXPRESSIVE_RULES}"
+            else:
+                expressive = ""
+            instructions = (
+                f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n{spoken_style(plan.language, voice)}\n\n"
+                f"{native_script_reminder(plan.language)}{expressive}"
+            )
         super().__init__(instructions=instructions)
         self.plan = plan
         self.flow = flow
@@ -280,6 +330,8 @@ class InterviewAgent(Agent):
         # Set when a pre-rendered reaction was just played, so the reply's first sentence gets no um.
         self._suppress_lead = False
         self._greeting_pending = True
+        # False until the opening greeting finishes — ambient STT must not advance the interview.
+        self._listening_armed = False
         self.latency: LatencyTracker | None = None
         self._current_tone = "neutral"
         self._empathy_hint = False
@@ -287,6 +339,101 @@ class InterviewAgent(Agent):
         self._last_llm_text = ""
         self._interrupted = False
         self._previous_empathy = False
+        # After LiveKit resumes a false barge-in, briefly discard ambient STT fragments.
+        self._discard_user_until: float = 0.0
+        self._delegation_wired = False
+        # GPT-Live: drive Flow from user transcripts (like cascade). Delegation is backup only —
+        # the voice model often acks without ever emitting delegation_created.
+        self._gpt_live_user_buf: list[str] = []
+        self._gpt_live_buf_started: float = 0.0
+        # Wait for speech to STOP (partials keep resetting this). 0.7s was committing mid-answer.
+        self._gpt_live_drive_settle_s: float = 1.8
+        self._gpt_live_drive_gen: int = 0
+        self._gpt_live_driving: bool = False
+        self._gpt_live_last_user: str = ""
+        self._gpt_live_last_user_at: float = 0.0
+        self._gpt_live_last_committed: str = ""
+        self._gpt_live_open_dep_id: str | None = None
+        self._gpt_live_ignore_until: float = 0.0
+        self._gpt_live_held_voice: bool = False
+
+    def is_listening_armed(self) -> bool:
+        return bool(self._listening_armed)
+
+    def note_false_interruption(self, *, resumed: bool) -> None:
+        """Agent was paused by noise/cough, then resumed — do not treat that audio as an answer."""
+        self._interrupted = False
+        self.director._cancel_early()
+        self.director._finals = []
+        if resumed:
+            discard_s = float(get_settings().false_interrupt_discard_seconds or 0.0)
+            self._discard_user_until = asyncio.get_running_loop().time() + max(0.0, discard_s)
+            logger.info("false interruption resumed; discarding user audio for %.2fs", discard_s)
+
+    async def _await_playout(self, handle: Any) -> None:
+        """Wait until a SpeechHandle finishes playing (say / generate_reply return handles, not coroutines)."""
+        if handle is None:
+            return
+        wait = getattr(handle, "wait_for_playout", None)
+        try:
+            if callable(wait):
+                await wait()
+            elif hasattr(handle, "__await__"):
+                await handle
+        except Exception:  # noqa: BLE001
+            logger.exception("speech playout wait failed")
+
+    async def _gpt_live_wait_quiet(self, *, min_quiet_s: float = 1.2, timeout_s: float = 14.0) -> None:
+        """GPT-Live splits one directive into several spoken beats; wait until speech has truly stopped.
+
+        Pushing append_instructions / arming listening after the first beat was cutting the opening
+        mid-question (logs: greeting → focus_lock → leftover 'तो' / 'Umm आप किस city').
+        """
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is None:
+            await asyncio.sleep(min_quiet_s)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            await asyncio.sleep(min_quiet_s)
+            return
+        deadline = loop.time() + timeout_s
+        quiet_start: float | None = None
+        while loop.time() < deadline:
+            state = getattr(session, "agent_state", None)
+            if state in ("speaking", "thinking"):
+                quiet_start = None
+            else:
+                if quiet_start is None:
+                    quiet_start = loop.time()
+                elif loop.time() - quiet_start >= min_quiet_s:
+                    logger.info("GPT-Live quiet after opening/state=%s", state)
+                    return
+            await asyncio.sleep(0.15)
+        logger.info("GPT-Live quiet wait timed out after %.1fs", timeout_s)
+
+    async def _arm_listening(self, *, reason: str) -> None:
+        if self._listening_armed:
+            return
+        settle = float(get_settings().opening_settle_seconds or 0.0)
+        if settle > 0:
+            await asyncio.sleep(settle)
+        self._listening_armed = True
+        # Ignore echo / residual opening audio so we do not treat it as the candidate answering.
+        if self._gpt_live:
+            try:
+                self._gpt_live_ignore_until = asyncio.get_running_loop().time() + max(2.0, settle + 1.5)
+            except RuntimeError:
+                pass
+        logger.info("listening armed reason=%s settle=%.2fs", reason, settle)
+        self.spawn(
+            self.backend.post_event(
+                self.plan.interview_id,
+                "audio.listening_armed",
+                {"reason": reason, "settle_s": settle},
+            )
+        )
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001
         tts = self.session.tts
@@ -336,8 +483,11 @@ class InterviewAgent(Agent):
             async for frame in Agent.default.tts_node(self, _collect_spoken(), model_settings):
                 yield frame
         except Exception:
-            # Phase 7: mid-call EL TTS failure → rebuild with Chirp if configured.
+            # Phase 7: optional Chirp fallback — never on /elevenlabs-interviewer (locked EL).
             settings = get_settings()
+            if getattr(self, "_tts_locked_el", False):
+                logger.exception("ElevenLabs TTS failed; EL interview mode is locked (no Chirp fallback)")
+                raise
             if is_el and settings.tts_fallback_on_error == "google":
                 logger.exception("ElevenLabs TTS failed; falling back to Google Chirp")
                 try:
@@ -357,7 +507,6 @@ class InterviewAgent(Agent):
             if use_engine:
                 self._last_spoken = self._engine.spoken_for_transcript(self._last_spoken)
 
-    @function_tool()
     async def switch_language(self, language_code: str) -> str:
         """Switch interview language mid-call. language_code must be like hi-IN, ta-IN, te-IN, kn-IN, ml-IN, en-IN."""
         profile = get_profile(language_code)
@@ -455,6 +604,25 @@ class InterviewAgent(Agent):
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
             self._empathy_hint = self._current_tone in ("gentle", "reassuring")
+            block = bool(get_settings().opening_block_interruptions) and move.kind == "opening"
+            if self._gpt_live:
+                # GPT-Live has no half-cascade: session.say() needs a separate TTS. Use commentary.
+                reply_kwargs: dict[str, Any] = {
+                    "instructions": _gpt_live_commentary(move, self.flow.state.language),
+                }
+                # GPT-Live ignores allow_interruptions=False (server turn detection) — still request it.
+                if move.kind == "opening":
+                    reply_kwargs["allow_interruptions"] = not block
+                reply_handle = self.session.generate_reply(**reply_kwargs)
+                await self._await_playout(reply_handle)
+                if move.kind == "opening":
+                    # Do NOT append_instructions mid-opening — that glitches/stops the next beats.
+                    await self._gpt_live_wait_quiet(min_quiet_s=1.3, timeout_s=14.0)
+                    self._gpt_live_push_focus_lock()
+                    await self._arm_listening(reason="opening_complete")
+                else:
+                    self._gpt_live_push_focus_lock()
+                return
             if move.kind == "opening":
                 # Speak the greeting word immediately so first audio is not blocked on the LLM.
                 seed = opening_seed(
@@ -462,10 +630,386 @@ class InterviewAgent(Agent):
                     elevenlabs=self._tts_provider == "elevenlabs",
                     engine=self._expressiveness_mode == "engine",
                 )
-                await self.session.say(seed, allow_interruptions=True)
-            await self.session.generate_reply(instructions=f"CONTROLLER DIRECTIVE: {move.directive}")
+                await self._await_playout(self.session.say(seed, allow_interruptions=not block))
+            reply_kwargs = {"instructions": f"CONTROLLER DIRECTIVE: {move.directive}"}
+            if move.kind == "opening":
+                reply_kwargs["allow_interruptions"] = not block
+            reply_handle = self.session.generate_reply(**reply_kwargs)
+            await self._await_playout(reply_handle)
+            if move.kind == "opening":
+                # Playout already finished — do NOT poll agent_state (that used to hang ~45s).
+                await self._arm_listening(reason="opening_complete")
         except Exception:  # noqa: BLE001
             logger.exception("generate_reply failed for %s", move.kind)
+            if move.kind == "opening" and not self._listening_armed:
+                # Fail open so a TTS glitch does not mute the candidate forever.
+                await self._arm_listening(reason="opening_error_fail_open")
+
+    def _wire_gpt_live_delegation(self) -> None:
+        if self._delegation_wired or not self._gpt_live:
+            return
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            logger.warning("GPT-Live duplex_session missing; client delegation not wired yet")
+            return
+        duplex.on("delegation_created", self._on_gpt_live_delegation)
+        # Capture finals before speech buffer is cleared (pending_transcript often arrives empty).
+        try:
+            duplex.on("input_audio_transcription_completed", self._on_gpt_live_user_transcript)
+        except Exception:  # noqa: BLE001
+            logger.debug("GPT-Live transcript hook not available", exc_info=True)
+        self._delegation_wired = True
+        logger.info("GPT-Live client delegation wired")
+
+    def _on_gpt_live_delegation(self, delegation: Any) -> None:
+        self.spawn(self._handle_gpt_live_delegation(delegation))
+
+    def _on_gpt_live_user_transcript(self, event: Any) -> None:
+        """Streaming partials → coalesce + reset silence timer. Commit only after speech stops."""
+        if not self._listening_armed or self._gpt_live_driving:
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        if now < self._gpt_live_ignore_until:
+            return
+        raw = getattr(event, "transcript", None) or ""
+        text = sanitize_candidate_text(str(raw)).strip()
+        if not text or text in {"\ufffd", "…", "..."} or set(text) <= {"\ufffd", " ", ".", "…"}:
+            return
+        joined = self._gpt_live_coalesce_transcript(text, now=now)
+        logger.info("GPT-Live user transcript stashed chars=%d text=%s", len(joined), joined[:80])
+        # Always re-arm debounce on every scrap — do not commit while they are still talking.
+        self._gpt_live_schedule_drive(source="transcript")
+
+    def _gpt_live_coalesce_transcript(self, text: str, *, now: float) -> str:
+        """Merge streaming scraps / phone chunks spoken as separate STT items."""
+        prev = (self._gpt_live_last_user or "").strip()
+        gap = now - self._gpt_live_last_user_at if self._gpt_live_last_user_at else 99.0
+        if prev and gap < 3.0:
+            if text == prev:
+                joined = prev
+            elif text.startswith(prev) or prev in text:
+                joined = text if len(text) >= len(prev) else prev
+            elif prev.startswith(text):
+                joined = prev  # older longer revision
+            else:
+                # New chunk in the same answer (e.g. phone digit groups).
+                joined = f"{prev} {text}".strip()
+        else:
+            joined = text
+        self._gpt_live_last_user = joined
+        self._gpt_live_last_user_at = now
+        if not self._gpt_live_user_buf or self._gpt_live_user_buf[-1] != joined:
+            self._gpt_live_user_buf.append(joined)
+        return joined
+
+    def _gpt_live_ready_enough(self, text: str) -> bool:
+        """Delegate to Flow so readiness matches the question currently in focus."""
+        return self.flow.utterance_ready_for_focus(text)
+
+    def _gpt_live_settle_s(self) -> float:
+        """Longer silence for phone / multi-fact answers so we do not cut them mid-speech."""
+        kinds = self.flow.short_answer_kinds()
+        if kinds and all(k == "phone" for k in kinds):
+            return 2.4
+        ftype = (self.flow.state.focus or {}).get("type") or ""
+        if ftype in ("clinical", "experience_dive"):
+            return 2.2
+        return self._gpt_live_drive_settle_s
+
+    def _gpt_live_user_from_chat(self) -> str:
+        """Latest user turn already in chat_ctx."""
+        try:
+            items = getattr(self.chat_ctx, "items", None) or []
+        except Exception:  # noqa: BLE001
+            return ""
+        for item in reversed(list(items)):
+            if getattr(item, "role", None) != "user":
+                continue
+            raw = getattr(item, "text_content", None) or getattr(item, "content", "") or ""
+            if isinstance(raw, list):
+                raw = " ".join(str(x) for x in raw)
+            text = sanitize_candidate_text(str(raw)).strip()
+            if text:
+                return text
+        return ""
+
+    def _gpt_live_resolve_utterance(self, pending: str = "") -> str:
+        """Best available candidate text: pending → stash → chat_ctx."""
+        pending = sanitize_candidate_text(pending or "").strip()
+        if pending:
+            return pending
+        stashed = (self._gpt_live_last_user or "").strip()
+        if stashed:
+            return stashed
+        return self._gpt_live_user_from_chat()
+
+    def _gpt_live_is_duplicate(self, text: str) -> bool:
+        """True if this is the same answer we already committed (or a shorter echo of it)."""
+        text = (text or "").strip()
+        prev = (self._gpt_live_last_committed or "").strip()
+        if not text or not prev:
+            return False
+        if text == prev:
+            return True
+        if text in prev or prev in text:
+            return True
+        return False
+
+    def _gpt_live_hold_voice(self) -> None:
+        """Stop the model inventing the next question while Director runs (once per answer)."""
+        if self._gpt_live_held_voice:
+            return
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            return
+        try:
+            duplex.append_instructions(
+                "The candidate is answering. Brief acknowledgement only if needed. "
+                "Do NOT ask any new interview question, list options, or invent a topic. "
+                "Wait for the next CONTROLLER DIRECTIVE commentary."
+            )
+            self._gpt_live_held_voice = True
+        except Exception:  # noqa: BLE001
+            logger.debug("GPT-Live hold_voice append failed", exc_info=True)
+
+    def _gpt_live_push_focus_lock(self) -> None:
+        """Standing rules so the voice model cannot freestyle the next interview topic."""
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            return
+        summary = self.flow.focus_lock_summary()
+        try:
+            duplex.append_instructions(f"{_GPT_LIVE_FOCUS_LOCK_INSTRUCTIONS} Current focus: {summary}")
+            duplex.append_thinking(f"Interview focus lock: {summary}")
+            logger.info("GPT-Live focus_lock %s", summary[:160])
+        except Exception:  # noqa: BLE001
+            logger.exception("GPT-Live focus lock append failed")
+
+    def _gpt_live_append(self, commentary: str, *, delegation_id: str | None = None) -> None:
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            return
+        try:
+            duplex.append_commentary(commentary, delegation_id=delegation_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("append_commentary failed")
+
+    def _gpt_live_schedule_drive(self, *, source: str) -> None:
+        """Debounce until silence after last scrap, then run Director (cascade-equivalent)."""
+        self._gpt_live_hold_voice()
+        self._gpt_live_drive_gen += 1
+        gen = self._gpt_live_drive_gen
+        settle = self._gpt_live_settle_s()
+
+        async def _drive() -> None:
+            await asyncio.sleep(settle)
+            if gen != self._gpt_live_drive_gen:
+                return
+            try:
+                now = asyncio.get_running_loop().time()
+            except RuntimeError:
+                now = 0.0
+            if now < self._gpt_live_ignore_until:
+                return
+            text = self._gpt_live_resolve_utterance()
+            if not text or not self._gpt_live_ready_enough(text):
+                logger.info(
+                    "GPT-Live drive skip source=%s settle=%.1f ready=%s text=%s",
+                    source,
+                    settle,
+                    bool(text and self._gpt_live_ready_enough(text)),
+                    (text or "")[:80],
+                )
+                return
+            await self._gpt_live_drive_turn(text, source=source)
+
+        self.spawn(_drive())
+
+    async def _gpt_live_drive_turn(self, text: str, *, source: str) -> None:
+        """Cascade-equivalent: user text → Director → CONTROLLER DIRECTIVE commentary."""
+        text = (text or "").strip()
+        if not text or not self._listening_armed or self.flow.done:
+            return
+        if self._gpt_live_driving:
+            logger.info("GPT-Live drive busy; skip source=%s", source)
+            return
+        if self._gpt_live_is_duplicate(text):
+            logger.info("GPT-Live drive duplicate skip chars=%d source=%s", len(text), source)
+            return
+
+        self._gpt_live_driving = True
+        dep_id = self._gpt_live_open_dep_id
+        self._gpt_live_open_dep_id = None
+        try:
+            await self._gpt_live_commit_joined(text, delegation_id=dep_id, ack_first=True, source=source)
+        finally:
+            self._gpt_live_driving = False
+            self._gpt_live_held_voice = False
+
+    async def _gpt_live_commit_joined(
+        self,
+        joined: str,
+        *,
+        delegation_id: str | None,
+        ack_first: bool = True,
+        source: str = "commit",
+    ) -> None:
+        """Ack (optional) → Director → CONTROLLER DIRECTIVE. Same Flow as ElevenLabs cascade."""
+        duplex = getattr(self, "duplex_session", None)
+        settings = get_settings()
+        self._gpt_live_user_buf = []
+        self._gpt_live_buf_started = 0.0
+        self._gpt_live_drive_gen += 1  # cancel pending debounce
+
+        if not joined.strip():
+            self._gpt_live_append(
+                "No clear candidate speech yet. Keep listening — do not ask a new interview question.",
+                delegation_id=delegation_id,
+            )
+            return
+
+        if self._gpt_live_is_duplicate(joined):
+            logger.info("GPT-Live skip duplicate commit chars=%d source=%s", len(joined), source)
+            self._gpt_live_append(
+                "Already noted. Continue with the current CONTROLLER focus only — "
+                "do not invent a new question.",
+                delegation_id=delegation_id,
+            )
+            return
+
+        # Reserve this utterance so concurrent transcript/delegation cannot double-apply Flow.
+        self._gpt_live_last_committed = joined.strip()
+        self._gpt_live_user_buf = []
+        self._gpt_live_last_user = ""
+
+        # Phase 1: speakable progress immediately so Director latency is not dead air.
+        if ack_first:
+            self._gpt_live_append(_GPT_LIVE_ACK_COMMENTARY, delegation_id=delegation_id)
+            logger.info(
+                "GPT-Live ack_sent source=%s dep=%s chars=%d focus=%s text=%s",
+                source,
+                delegation_id,
+                len(joined),
+                (self.flow.state.focus or {}).get("type"),
+                joined[:80],
+            )
+
+        self._turn_index += 1
+        if self.latency is not None:
+            self.latency.on_hook_start(self._turn_index)
+
+        detected = detect_script_language(joined)
+        events: list[tuple[str, dict[str, Any]]] = []
+        if detected and detected != self.flow.state.language:
+            events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
+
+        self.director.on_final_transcript(joined)
+
+        elapsed_min = (datetime.now(timezone.utc) - self._started_at).total_seconds() / 60.0
+        t0 = datetime.now(timezone.utc)
+        if elapsed_min >= settings.v2_max_minutes and not self.flow.done:
+            move = self.flow.force_complete("time")
+        else:
+            move = await self.director.decide(joined)
+        director_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000.0
+        if self.latency is not None:
+            self.latency.on_director_done(director_ms / 1000.0)
+
+        self._current_tone = move.tone or tone_for_kind(move.kind)
+        self._empathy_hint = self._current_tone in ("gentle", "reassuring")
+        self._previous_empathy = self._empathy_hint
+        self._interrupted = False
+        self.director.note_user(joined)
+
+        self.spawn(
+            self.backend.post_transcript(
+                self.plan.interview_id, role="user", text=joined, turn_index=self._turn_index
+            )
+        )
+        self.spawn(self._persist(events + move.events))
+        logger.info(
+            "gpt_live move=%s stage=%s director_ms=%.0f source=%s joined_chars=%d text=%s",
+            move.kind,
+            self.flow.state.stage,
+            director_ms,
+            source,
+            len(joined),
+            joined[:80],
+        )
+
+        # Phase 2: one CONTROLLER DIRECTIVE only (no generate_reply double-speak).
+        self._gpt_live_append(_gpt_live_commentary(move, self.flow.state.language), delegation_id=delegation_id)
+        self._gpt_live_push_focus_lock()
+        # Ignore echo / barge-in scraps while the model speaks the next question.
+        try:
+            self._gpt_live_ignore_until = asyncio.get_running_loop().time() + 2.0
+        except RuntimeError:
+            self._gpt_live_ignore_until = 0.0
+        if self.latency is not None:
+            self.latency.on_hook_end()
+        self._finish_if_needed(move)
+
+    async def _handle_gpt_live_delegation(self, delegation: Any) -> None:
+        """Backup path only — Flow is driven from transcripts; answer open deps without freestyle."""
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            return
+        dep_id = getattr(delegation, "id", None)
+        raw = getattr(delegation, "pending_transcript", None) or ""
+        fragment = self._gpt_live_resolve_utterance(str(raw))
+        logger.info(
+            "GPT-Live delegation id=%s pending_chars=%d resolved_chars=%d focus=%s text=%s",
+            dep_id,
+            len(str(raw or "").strip()),
+            len(fragment),
+            (self.flow.state.focus or {}).get("type"),
+            fragment[:100],
+        )
+
+        def _reply(commentary: str) -> None:
+            try:
+                duplex.append_commentary(commentary, delegation_id=dep_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("append_commentary failed")
+
+        if not self._listening_armed:
+            _reply(
+                "The candidate has not finished hearing the opening yet. "
+                "Pause briefly and keep listening — do not ask a new interview question."
+            )
+            return
+
+        # Already applied this answer via transcript-driven path.
+        if fragment and self._gpt_live_is_duplicate(fragment):
+            _reply(
+                "Already noted by the interview controller. "
+                "Follow the latest CONTROLLER DIRECTIVE only — do not invent a new question."
+            )
+            return
+
+        if self._gpt_live_driving:
+            self._gpt_live_open_dep_id = dep_id
+            _reply(_GPT_LIVE_ACK_COMMENTARY)
+            return
+
+        if not fragment.strip():
+            self._gpt_live_open_dep_id = dep_id
+            _reply(
+                "Brief acknowledgement only. Keep listening — do not ask a new interview question."
+            )
+            return
+
+        if not self._gpt_live_ready_enough(fragment):
+            self._gpt_live_open_dep_id = dep_id
+            self._gpt_live_last_user = fragment.strip()
+            _reply(_GPT_LIVE_ACK_COMMENTARY)
+            self._gpt_live_schedule_drive(source="delegation_hold")
+            return
+
+        await self._gpt_live_drive_turn(fragment, source="delegation")
 
     async def _rehydrate(self) -> None:
         """After a restart, give the voice model the last few turns so it keeps its thread."""
@@ -483,8 +1027,11 @@ class InterviewAgent(Agent):
     # --------------------------------------------------------------------------------------------- lifecycle
 
     async def on_enter(self) -> None:
+        if self._gpt_live:
+            self._wire_gpt_live_delegation()
         resuming = self.flow.state.stage != "opening"
         if resuming:
+            self._listening_armed = True
             for turn in self.plan.recent_transcript:
                 if turn["role"] == "assistant":
                     self.director.note_assistant(turn["text"])
@@ -497,7 +1044,11 @@ class InterviewAgent(Agent):
             self.backend.post_event(
                 self.plan.interview_id,
                 "interview.agent_entered",
-                {"resumed": resuming, "stage": self.flow.state.stage},
+                {
+                    "resumed": resuming,
+                    "stage": self.flow.state.stage,
+                    "voice_provider": "gpt_live" if self._gpt_live else "cascade",
+                },
             )
         )
         await self.speak_move(move)
@@ -508,6 +1059,92 @@ class InterviewAgent(Agent):
             raw = " ".join(str(x) for x in raw)
         text = sanitize_candidate_text(str(raw))
         settings = get_settings()
+
+        # GPT-Live: same Flow as cascade — drive Director from the user turn.
+        # Do not wait for model delegation (it often freestyles without ever delegating).
+        if self._gpt_live:
+            if text.strip():
+                self._gpt_live_last_user = text.strip()
+            if not self._listening_armed:
+                logger.info("gpt_live discard pre-arm user audio (%d chars): %s", len(text), text[:80])
+                self.spawn(
+                    self.backend.post_event(
+                        self.plan.interview_id,
+                        "audio.preamble_discard",
+                        {"text": text[:160], "chars": len(text), "source": "gpt_live_turn"},
+                    )
+                )
+                raise StopResponse()
+            now = asyncio.get_running_loop().time()
+            if now < self._discard_user_until:
+                verdict = classify_answer(text)
+                if verdict in ("noise", "weak") or len(text.strip()) < 24:
+                    logger.info(
+                        "gpt_live discard post-false-interrupt verdict=%s (%d chars)",
+                        verdict,
+                        len(text),
+                    )
+                    self.spawn(
+                        self.backend.post_event(
+                            self.plan.interview_id,
+                            "audio.false_interrupt_discard",
+                            {"text": text[:160], "verdict": verdict, "source": "gpt_live_turn"},
+                        )
+                    )
+                    self.director._cancel_early()
+                    self.director._finals = []
+                    raise StopResponse()
+            if text.strip():
+                try:
+                    now = asyncio.get_running_loop().time()
+                except RuntimeError:
+                    now = 0.0
+                if now < self._gpt_live_ignore_until:
+                    raise StopResponse()
+                joined = self._gpt_live_coalesce_transcript(text.strip(), now=now)
+                # Still debounce — turn_completed can fire on a mid-answer STT segment.
+                self._gpt_live_schedule_drive(source="user_turn")
+                logger.info(
+                    "GPT-Live user_turn scheduled chars=%d ready=%s text=%s",
+                    len(joined),
+                    self._gpt_live_ready_enough(joined),
+                    joined[:80],
+                )
+            raise StopResponse()
+
+        # Ambient noise during / right after greeting: discard — do not advance Flow.
+        if not self._listening_armed:
+            logger.info("discarding pre-arm user audio (%d chars): %s", len(text), text[:80])
+            self.spawn(
+                self.backend.post_event(
+                    self.plan.interview_id,
+                    "audio.preamble_discard",
+                    {"text": text[:160], "chars": len(text)},
+                )
+            )
+            raise StopResponse()
+
+        # Mid-question ward noise that briefly paused TTS: interviewer already resumed — drop junk.
+        now = asyncio.get_running_loop().time()
+        if now < self._discard_user_until:
+            verdict = classify_answer(text)
+            if verdict in ("noise", "weak") or len(text.strip()) < 24:
+                logger.info(
+                    "discarding post-false-interrupt audio verdict=%s (%d chars): %s",
+                    verdict,
+                    len(text),
+                    text[:80],
+                )
+                self.spawn(
+                    self.backend.post_event(
+                        self.plan.interview_id,
+                        "audio.false_interrupt_discard",
+                        {"text": text[:160], "verdict": verdict},
+                    )
+                )
+                self.director._cancel_early()
+                self.director._finals = []
+                raise StopResponse()
 
         self._turn_index += 1
         if self.latency is not None:
@@ -569,6 +1206,193 @@ class InterviewAgent(Agent):
         self._finish_if_needed(move)
 
 
+class CascadeInterviewAgent(InterviewAgent):
+    """Cascade STT/LLM/TTS path — exposes switch_language as a LiveKit tool.
+
+    GPT-Live client delegation has no tool channel, so the base InterviewAgent
+    must stay tool-free; only this subclass registers the function tool.
+    """
+
+    @function_tool()
+    async def switch_language(self, language_code: str) -> str:
+        """Switch interview language mid-call. language_code must be like hi-IN, ta-IN, te-IN, kn-IN, ml-IN, en-IN."""
+        return await super().switch_language(language_code)
+
+
+async def _run_gpt_live_session(
+    ctx: JobContext,
+    *,
+    settings: Any,
+    backend: BackendClient,
+    interview_id: str,
+    plan: InterviewPlan,
+    flow: InterviewFlow,
+    director: Director,
+    language: str,
+    wants_avatar: bool,
+) -> None:
+    """Full-duplex GPT-Live path: model owns STT+voice; Director/Flow via client delegation."""
+    from livekit.plugins.openai.realtime import GPTLiveModel
+
+    noise = build_noise_cancellation(settings)
+    gpt_voice = settings.gpt_live_voice_for(language)
+    gpt_voice_label = (
+        f"custom:{gpt_voice.get('id', '?')}" if isinstance(gpt_voice, dict) else str(gpt_voice)
+    )
+    logger.info(
+        "GPT-Live session model=%s voice=%s language=%s noise=%s",
+        settings.gpt_live_model,
+        gpt_voice_label,
+        language,
+        "on" if noise is not None else "off",
+    )
+
+    # Do NOT attach Silero VAD here. GPT-Live owns server-side turn detection; pairing it with
+    # client VAD was chopping answers into ~0.5s scraps (last_final_transcript_time=null,
+    # source=vad) so Director kept returning ask_repeat — felt like "not hearing".
+    # Model-controlled barge-in still works; local playback stop is secondary on this path.
+    llm = GPTLiveModel(
+        model=settings.gpt_live_model,
+        voice=gpt_voice,
+        delegation="client",
+        api_key=settings.openai_api_key,
+    )
+
+    session_ref: dict[str, Any] = {"job_ctx": ctx}
+    agent = InterviewAgent(
+        plan=plan,
+        flow=flow,
+        director=director,
+        backend=backend,
+        session_ref=session_ref,
+        gpt_live=True,
+        tts_provider=f"gpt_live:{gpt_voice_label}",
+    )
+    director._is_listening_armed = agent.is_listening_armed
+
+    session = AgentSession(
+        llm=llm,
+        user_away_timeout=float(settings.silence_nudge_seconds),
+    )
+    session_ref["session"] = session
+
+    watchdog = TurnWatchdog(
+        session=session,
+        backend=backend,
+        interview_id=interview_id,
+        settings=settings,
+        is_listening_armed=agent.is_listening_armed,
+    )
+    watchdog.attach()
+    latency = LatencyTracker(
+        backend=backend,
+        interview_id=interview_id,
+        enabled=bool(settings.voice_latency_log),
+        spawn=agent.spawn,
+    )
+    agent.latency = latency
+    latency.attach(session)
+
+    agent.spawn(
+        backend.post_event(
+            interview_id,
+            "voice.session_config",
+            {
+                "voice_provider": "gpt_live",
+                "gpt_live_model": settings.gpt_live_model,
+                "gpt_live_voice": gpt_voice_label,
+                "gpt_live_language": language,
+                "delegation": "client",
+                "stt_provider": "gpt_live_builtin",
+                "tts_provider": "gpt_live_builtin",
+                "voice_latency_log": settings.voice_latency_log,
+                # Cascade fillers / expressiveness intentionally off — model handles pacing.
+                "voice_expressiveness": "gpt_live_native",
+                "voice_early_filler": False,
+                "thinking_filler": False,
+            },
+        )
+    )
+
+    @session.on("conversation_item_added")
+    def _on_item(ev):  # noqa: ANN001
+        item = getattr(ev, "item", None)
+        if item is None:
+            return
+        role = getattr(item, "role", None)
+        text = str(getattr(item, "text_content", None) or "").strip()
+        if role == "assistant" and text:
+            director.note_assistant(text)
+            agent.spawn(
+                backend.post_transcript(
+                    interview_id,
+                    role="assistant",
+                    text=text,
+                    interrupted=bool(agent._interrupted) or None,
+                )
+            )
+            agent._interrupted = False
+
+    @session.on("agent_false_interruption")
+    def _on_false_int(ev):  # noqa: ANN001
+        resumed = bool(getattr(ev, "resumed", False))
+        agent.note_false_interruption(resumed=resumed)
+        agent.spawn(
+            backend.post_event(
+                interview_id,
+                "audio.false_interruption",
+                {"resumed": resumed, "source": "gpt_live"},
+            )
+        )
+
+    @session.on("user_state_changed")
+    def _on_user_barge(ev):  # noqa: ANN001
+        if getattr(ev, "new_state", None) == "speaking" and getattr(session, "agent_state", None) == "speaking":
+            agent._interrupted = True
+
+    from livekit.agents.voice import room_io
+
+    room_kwargs: dict[str, Any] = {"close_on_disconnect": False}
+    if noise is not None:
+        room_kwargs["audio_input"] = room_io.AudioInputOptions(noise_cancellation=noise)
+    start_kwargs: dict[str, Any] = {
+        "agent": agent,
+        "room": ctx.room,
+        "room_options": room_io.RoomOptions(**room_kwargs),
+    }
+
+    SilenceMonitor(
+        session=session, agent=agent, flow=flow, spacing_s=float(settings.silence_nudge_seconds)
+    ).attach()
+    ConnectionGuard(room=ctx.room, agent=agent, flow=flow, grace_s=float(settings.reconnect_grace_seconds)).attach()
+
+    avatar_on = False
+    if wants_avatar:
+        try:
+            avatar_on = await _start_tavus_avatar(session, ctx, settings)
+        except Exception:  # noqa: BLE001
+            logger.exception("Tavus avatar failed to start; continuing voice-only")
+        if avatar_on:
+            room_kwargs["audio_output"] = False
+            start_kwargs["room_options"] = room_io.RoomOptions(**room_kwargs)
+
+    await session.start(**start_kwargs)
+
+    async def _shutdown() -> None:
+        await watchdog.post_summary()
+        try:
+            summary = latency.summary()
+            if settings.voice_latency_log and summary.get("turns"):
+                await backend.post_event(interview_id, "turn.latency_summary", summary)
+                logger.info("turn.latency_summary %s", summary)
+        except Exception:  # noqa: BLE001
+            logger.exception("latency summary failed")
+        await backend.flush()
+        await backend.aclose()
+
+    ctx.add_shutdown_callback(_shutdown)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     settings = get_settings()
@@ -591,11 +1415,13 @@ async def entrypoint(ctx: JobContext) -> None:
     job_meta = _merge_job_payload(ctx)
     wants_avatar = _wants_avatar(payload) or _wants_avatar(job_meta)
     tts_override = _tts_provider_override(payload, job_meta)
+    voice_provider = _voice_provider_override(payload, job_meta)
     logger.info(
-        "job %s avatar=%s tts=%s (plan=%s meta=%s)",
+        "job %s avatar=%s tts=%s voice=%s (plan=%s meta=%s)",
         interview_id,
         wants_avatar,
         tts_override or settings.resolved_tts(),
+        voice_provider or "cascade",
         payload.get("avatar"),
         job_meta.get("avatar"),
     )
@@ -614,6 +1440,21 @@ async def entrypoint(ctx: JobContext) -> None:
     asyncio.create_task(analyzer.prewarm())
 
     language = flow.state.language or plan.language
+
+    if voice_provider == "gpt_live":
+        await _run_gpt_live_session(
+            ctx,
+            settings=settings,
+            backend=backend,
+            interview_id=interview_id,
+            plan=plan,
+            flow=flow,
+            director=director,
+            language=language,
+            wants_avatar=wants_avatar,
+        )
+        return
+
     llm = build_llm(settings)
     stt = build_stt(language, settings, keyterms=plan.keyterms)
     stt_caps = getattr(stt, "capabilities", None)
@@ -664,7 +1505,7 @@ async def entrypoint(ctx: JobContext) -> None:
     session_ref: dict[str, Any] = {}
 
     session_ref["job_ctx"] = ctx
-    agent = InterviewAgent(
+    agent = CascadeInterviewAgent(
         plan=plan,
         flow=flow,
         director=director,
@@ -672,6 +1513,7 @@ async def entrypoint(ctx: JobContext) -> None:
         session_ref=session_ref,
         tts_provider=tts_override or settings.resolved_tts(),
     )
+    director._is_listening_armed = agent.is_listening_armed
 
     detector = build_turn_detector(settings) if vad is not None else None
     turn_handling = build_turn_handling(
@@ -703,12 +1545,33 @@ async def entrypoint(ctx: JobContext) -> None:
         if vad is not None and settings.transcription_timeout_seconds > 0
         else None
     )
+    # Cap LiveKit LLM retries so one slow OpenAI blip doesn't stack into 20s+ of mute.
+    conn_options = None
+    try:
+        from livekit.agents.types import APIConnectOptions
+        from livekit.agents.voice import agent_session as _agent_session_mod
+
+        SessionConnectOptions = getattr(_agent_session_mod, "SessionConnectOptions", None)
+        if SessionConnectOptions is not None:
+            llm_retries = max(0, int(settings.llm_max_retry))
+            conn_options = SessionConnectOptions(
+                llm_conn_options=APIConnectOptions(
+                    max_retry=llm_retries,
+                    retry_interval=0.5,
+                    timeout=max(10.0, float(settings.llm_http_timeout_seconds)),
+                ),
+            )
+            logger.info("LLM conn_options max_retry=%s timeout=%.0fs", llm_retries, settings.llm_http_timeout_seconds)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not set LLM conn_options; using LiveKit defaults")
+
     # Newer SDKs use turn_handling; older use flat kwargs
     try:
         session = AgentSession(
             **session_kwargs,
             turn_handling=turn_handling,
             transcription_timeout=transcription_timeout,
+            **({"conn_options": conn_options} if conn_options is not None else {}),
         )
     except TypeError:
         session = AgentSession(
@@ -718,7 +1581,13 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     session_ref["session"] = session
-    watchdog = TurnWatchdog(session=session, backend=backend, interview_id=interview_id, settings=settings)
+    watchdog = TurnWatchdog(
+        session=session,
+        backend=backend,
+        interview_id=interview_id,
+        settings=settings,
+        is_listening_armed=agent.is_listening_armed,
+    )
     watchdog.attach()
     latency = LatencyTracker(
         backend=backend,
@@ -796,8 +1665,16 @@ async def entrypoint(ctx: JobContext) -> None:
             agent._interrupted = False
 
     @session.on("agent_false_interruption")
-    def _on_false_int(_ev):  # noqa: ANN001
-        pass
+    def _on_false_int(ev):  # noqa: ANN001
+        resumed = bool(getattr(ev, "resumed", False))
+        agent.note_false_interruption(resumed=resumed)
+        agent.spawn(
+            backend.post_event(
+                interview_id,
+                "audio.false_interruption",
+                {"resumed": resumed},
+            )
+        )
 
     # Approximate barge-in: user starts speaking while agent speaks.
     @session.on("user_state_changed")
@@ -808,8 +1685,16 @@ async def entrypoint(ctx: JobContext) -> None:
     # Start analysing as soon as the speech-to-text commits a sentence; the turn is confirmed a little later.
     @session.on("user_input_transcribed")
     def _on_transcribed(ev):  # noqa: ANN001
-        if getattr(ev, "is_final", False) and ev.transcript:
-            director.on_final_transcript(ev.transcript)
+        if not (getattr(ev, "is_final", False) and ev.transcript):
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        # Ambient barge-in while interviewer was talking — don't start Director on junk.
+        if now < agent._discard_user_until:
+            return
+        director.on_final_transcript(ev.transcript)
 
     from livekit.agents.voice import room_io
 

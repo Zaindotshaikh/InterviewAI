@@ -7,7 +7,13 @@ from interview.flow_state import FlowState
 from interview.guards import sanitize_candidate_text
 from interview.language import detect_script_language, get_profile, native_script_reminder
 from interview.plan import ControllerState, InterviewPlan, classify_answer
-from interview.prompts import BASE_VOICE_RULES, ELEVENLABS_EXPRESSIVE_RULES, opening_seed, spoken_style
+from interview.prompts import (
+    BASE_VOICE_RULES,
+    ELEVENLABS_EXPRESSIVE_RULES,
+    gpt_live_voice_instructions,
+    opening_seed,
+    spoken_style,
+)
 from interview.turns import (
     TurnWatchdog,
     apply_language_profile,
@@ -18,6 +24,7 @@ from interview.turns import (
 __all__ = [
     "BASE_VOICE_RULES",
     "ELEVENLABS_EXPRESSIVE_RULES",
+    "gpt_live_voice_instructions",
     "opening_seed",
     "spoken_style",
     "TurnWatchdog",

@@ -16,6 +16,19 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from interview.blueprint import Blueprint
+from interview.indic_phrases import (
+    CARE_NO_RE as _CARE_NO,
+    CARE_YES_RE as _CARE_YES,
+    CONFIRM_NO_RE as _CONFIRM_NO,
+    CONFIRM_YES_RE as _CONFIRM_YES,
+    DONT_KNOW_RE as _DONT_KNOW_RE,
+    FILLER_ONLY as _FILLER_ONLY,
+    OFF_TOPIC_RE as _OFF_TOPIC_RE,
+    REFUSAL_RE as _REFUSAL_RE,
+    REPEAT_RE as _REPEAT_RE,
+    REPHRASE_RE as _REPHRASE_RE,
+    STOP_RE as _STOP_RE,
+)
 
 logger = logging.getLogger("interview-v2.analysis")
 
@@ -321,50 +334,9 @@ def build_user_payload(
 
 # --------------------------------------------------------------------------------------------------------------
 # Heuristic fallback: keeps the interview moving if the analyst is slow, offline or returns garbage.
+# Pan-Indic phrase banks live in indic_phrases.py (compiled once at import).
 # --------------------------------------------------------------------------------------------------------------
 
-_DONT_KNOW = (
-    "don't know", "dont know", "do not know", "no idea", "not sure", "i don't remember", "never done",
-    "idk", "i dk", "dunno", "no clue", "not really sure", "can't say", "cannot say", "never learnt", "never learned",
-    "pata nahi", "pata nahin", "pata nai", "nahi pata", "maloom nahi", "malum nahi", "mahit nahi", "mahit nay",
-    "mala mahit nahi", "mala mahit nahie", "samajat nahi", "kala nahi",
-    "theriyadhu", "theriyathu", "theriyala", "telidu", "teliyadu", "gottilla", "gothilla", "ariyilla", "jani na",
-    "पता नहीं", "नहीं पता", "मालूम नहीं", "माहित नाही", "माहीत नाही", "मला माहित नाही", "मला माहीत नाही",
-    "कलत नाही", "समजत नाही", "தெரியாது", "தெரியலை", "తెలియదు", "తెలీదు",
-    "ಗೊತ್ತಿಲ್ಲ", "അറിയില്ല", "জানি না", "ખબર નથી", "ਪਤਾ ਨਹੀਂ",
-)
-_REPEAT = (
-    "repeat", "say again", "once more", "again please", "pardon", "sorry?", "phir se", "dobara", "dubara",
-    "फिर से", "दोबारा", "दुबारा", "पुन्हा", "परत सांगा", "மறுபடி", "మళ్ళీ", "ಮತ್ತೆ", "വീണ്ടും", "আবার বলুন",
-    "ફરીથી",
-)
-_REPHRASE = (
-    "don't understand", "didn't understand", "not understand", "what do you mean", "samajh nahi", "samaj nahi",
-    "समझ नहीं आया", "समझ नहीं आ", "समजलं नाही", "புரியவில்லை", "puriyala", "అర్థం కాలేదు",
-    "ಅರ್ಥವಾಗಲಿಲ್ಲ", "മനസ്സിലായില്ല", "বুঝতে পারিনি",
-)
-_FILLER_ONLY = {"hmm", "hm", "um", "uh", "umm", "uhh", "ok", "okay", "haan", "han", "ji", "huh", "ah", "aa"}
-
-# Clear accept / decline while a care item is in focus (covers LLM misses on persuasion follow-ups).
-_CARE_YES = re.compile(
-    r"(?:"
-    r"\b(?:yes|yeah|yep|sure|ready|okay|ok|haan|han|ho|will(?:\s+do)?|can\s+do|i'?ll\s+do)\b"
-    r"|हाँ|हां|हा\b|जी\b|हो\b|तयार|ready"
-    r"|कर\s*(?:सकता|सकती|सकते|लूँगा|लूंगी|लेंगे|लेगा|लेगी)"
-    r"|करु?\s*शकत"
-    r"|सीख\s*(?:लूँगा|लूंगी|लेंगे)|learn"
-    r")",
-    re.IGNORECASE,
-)
-_CARE_NO = re.compile(
-    r"(?:"
-    r"\b(?:nope|won'?t|refuse|not\s+willing)\b"
-    r"|नहीं\s*कर|नाही\s*कर|कर\s*नहीं|कर\s*नाही|नको\b|मना\b"
-    r"|अन्य\s*काम|other\s+(?:things|duties|work)|बाकी\s*काम"
-    r"|\bi\s+can'?t\b|\bcannot\b|\bi\s+won'?t\b"
-    r")",
-    re.IGNORECASE,
-)
 # "never done it" is experience, not a job refusal — leave that to the LLM (hesitant).
 _CARE_NEVER_DONE = re.compile(
     r"(?:"
@@ -410,6 +382,9 @@ def infer_care_accept(text: str) -> str | None:
     t = (text or "").strip()
     if not t:
         return None
+    # Don't-know must not become a care refuse ("pata nahi" / "தெரியாது").
+    if _DONT_KNOW_RE.search(t):
+        return None
     # Only recover clear accepts/refuses. "Never done it?" stays for the LLM → hesitant.
     if _CARE_NEVER_DONE.search(t) and not _CARE_YES.search(t):
         return None
@@ -431,12 +406,13 @@ def infer_care_accept(text: str) -> str | None:
 
 
 def recover_care_updates(analysis: TurnAnalysis, *, text: str, item_ids: list[str]) -> TurnAnalysis:
-    """If one care item is in focus and the LLM omitted a clear yes/no, invent the missing update.
+    """If care items are in focus and the LLM omitted a clear yes/no, invent the missing updates.
 
-    Never recover across the care-intro cluster (all items focused): a bare हाँ about ICU
-    experience used to stamp every duty comfortable and skip the diaper ask.
+    Works for single-item asks and for care-intro (all items). ``infer_care_accept`` already
+    rejects experience-dump हाँ (e.g. "हाँ, तीन साल ICU") so a short clear yes on the intro
+    can clear the checklist without re-asking diaper in a second format.
     """
-    if len(item_ids) != 1:
+    if not item_ids:
         return analysis
     covered = {u.item for u in analysis.care_updates}
     missing = [i for i in item_ids if i not in covered]
@@ -455,29 +431,64 @@ def recover_care_updates(analysis: TurnAnalysis, *, text: str, item_ids: list[st
 
 
 def heuristic_analysis(text: str, *, pending_field: str = "", pending_value: str = "") -> TurnAnalysis:
-    t = (text or "").strip().lower()
+    """Offline / timeout fallback — keep moving without inventing clinical grades.
+
+    On analyst failure, recover only high-precision signals (stop, refuse, repeat, phone,
+    confirmations). Never guess clinical quality from heuristics.
+    """
+    raw = (text or "").strip()
+    t = raw.lower()
     a = TurnAnalysis(source="heuristic")
-    tokens = [w.strip(".,!?;:'\"") for w in t.split()]
-    if not tokens or all(w in _FILLER_ONLY for w in tokens):
+    # Tokenise original text so Indic fillers match FILLER_ONLY (lower() is a no-op for them).
+    _punct = ".,!?;:'\""
+    tokens = [w.strip(_punct) for w in raw.split()]
+    if not tokens and t:
+        tokens = [w.strip(_punct) for w in t.split()]
+    blob = raw or t
+    if not tokens or all(w.lower() in _FILLER_ONLY or w in _FILLER_ONLY for w in tokens):
         a.intent = "filler_only"
+        if pending_field and pending_value:
+            if _CONFIRM_YES.search(blob) and not _CONFIRM_NO.search(blob):
+                a.intent = "answer"
+                a.confirmation_field, a.confirmation = pending_field, "confirmed"
+            elif _CONFIRM_NO.search(blob):
+                a.intent = "answer"
+                a.confirmation_field, a.confirmation = pending_field, "denied"
         return a
-    if any(p in t for p in _REPHRASE):
+    if _STOP_RE.search(blob):
+        a.intent = "wants_to_stop"
+    elif _REPHRASE_RE.search(blob):
         a.intent = "rephrase_request"
-    elif any(p in t for p in _REPEAT):
+    elif _REPEAT_RE.search(blob):
         a.intent = "repeat_request"
-    elif any(p in t for p in _DONT_KNOW) and len(tokens) <= 8:
+    elif _REFUSAL_RE.search(blob):
+        a.intent = "refusal"
+    elif _DONT_KNOW_RE.search(blob) and len(tokens) <= 8:
         a.intent = "dont_know"
+    elif _OFF_TOPIC_RE.search(blob):
+        a.intent = "off_topic"
     digits = re.sub(r"\D", "", t)
     if len(digits) == 10:
-        a.slot_updates.append(SlotUpdate("phone", digits, 0.6, text[:80]))
+        a.slot_updates.append(SlotUpdate("phone", digits, 0.55, raw[:80]))
+        if a.intent not in (
+            "wants_to_stop",
+            "refusal",
+            "repeat_request",
+            "rephrase_request",
+            "dont_know",
+        ):
+            a.intent = "answer"
     if pending_field and pending_value:
-        yes = re.search(r"\b(yes|yeah|correct|right|haan|han|sahi|ho|ஆமா|అవును|ಹೌದು|അതെ|হ্যাঁ)\b|हाँ|हां|बरोबर|सही", t)
-        no = re.search(r"\b(no|nahi|nope|wrong|galat)\b|नहीं|गलत|नाही|चूक", t)
-        if yes and not no:
+        if _CONFIRM_YES.search(blob) and not _CONFIRM_NO.search(blob):
             a.confirmation_field, a.confirmation = pending_field, "confirmed"
-        elif no:
+            if a.intent == "filler_only":
+                a.intent = "answer"
+        elif _CONFIRM_NO.search(blob):
             a.confirmation_field, a.confirmation = pending_field, "denied"
+            if a.intent == "filler_only":
+                a.intent = "answer"
     return a
+
 
 
 # --------------------------------------------------------------------------------------------------------------

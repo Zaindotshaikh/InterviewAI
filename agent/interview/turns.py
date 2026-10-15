@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
+from collections.abc import Callable
 from typing import Any
 
 from config import Settings
@@ -129,15 +130,38 @@ def summarize(eou_delays: list[float], counters: dict[str, int]) -> dict[str, An
 class TurnWatchdog:
     """Watches turn-taking health: logs, counts, and recovers when speech is heard but not transcribed."""
 
-    def __init__(self, *, session: Any, backend: Any, interview_id: str, settings: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        session: Any,
+        backend: Any,
+        interview_id: str,
+        settings: Settings,
+        is_listening_armed: Callable[[], bool] | None = None,
+    ) -> None:
         self._session = session
         self._backend = backend
         self._interview_id = interview_id
         self._settings = settings
+        self._is_listening_armed = is_listening_armed
         self._eou_delays: list[float] = []
-        self._counters = {"transcription_timeouts": 0, "false_interruptions": 0, "repeat_prompts": 0}
+        self._counters = {
+            "transcription_timeouts": 0,
+            "false_interruptions": 0,
+            "repeat_prompts": 0,
+            "interim_salvages": 0,
+            "preamble_skips": 0,
+        }
         self._events_sent = 0
         self._tasks: set[Any] = set()
+
+    def _armed(self) -> bool:
+        if self._is_listening_armed is None:
+            return True
+        try:
+            return bool(self._is_listening_armed())
+        except Exception:  # noqa: BLE001
+            return True
 
     def attach(self) -> None:
         self._session.on("user_transcription_timeout", self._on_transcription_timeout)
@@ -167,13 +191,41 @@ class TurnWatchdog:
 
     def _on_false_interruption(self, ev: Any) -> None:
         self._counters["false_interruptions"] += 1
-        logger.info("false interruption (resumed=%s)", getattr(ev, "resumed", None))
+        resumed = bool(getattr(ev, "resumed", False))
+        logger.info("false interruption (resumed=%s) — interviewer should continue", resumed)
+        self._spawn(
+            self._post_event("turn.false_interruption", {"resumed": resumed})
+        )
 
     def _on_transcription_timeout(self, ev: Any) -> None:
         self._counters["transcription_timeouts"] += 1
         speech_s = float(getattr(ev, "speech_duration", 0.0))
         logger.warning("speech heard (%.1fs) but no transcript arrived", speech_s)
         self._spawn(self._post_event("turn.transcription_timeout", {"speech_duration_s": round(speech_s, 2)}))
+        # Prefer promoting interim STT text (Scribe often has the digits already) over
+        # asking the candidate to repeat cold.
+        self._spawn(self._salvage_or_repeat())
+
+    async def _salvage_or_repeat(self) -> None:
+        if getattr(self._session, "agent_state", None) in ("speaking", "thinking"):
+            return
+        # During opening settle, ignore ambient STT — do not salvage junk into a real turn.
+        if not self._armed():
+            self._counters["preamble_skips"] += 1
+            logger.info("skipping transcript salvage — listening not armed yet")
+            self._spawn(self._post_event("audio.preamble_skip", {"reason": "transcription_timeout"}))
+            return
+        commit = getattr(self._session, "commit_user_turn", None)
+        if callable(commit):
+            try:
+                result = commit(transcript_timeout=1.5, stt_flush_duration=0.5)
+                transcript = await result if hasattr(result, "__await__") else result
+                if str(transcript or "").strip():
+                    self._counters["interim_salvages"] += 1
+                    logger.info("salvaged interim transcript after STT timeout (%d chars)", len(str(transcript)))
+                    return
+            except Exception:  # noqa: BLE001
+                logger.exception("could not salvage interim transcript")
         self._maybe_ask_to_repeat()
 
     def _maybe_ask_to_repeat(self) -> None:
@@ -181,6 +233,8 @@ class TurnWatchdog:
             return
         # Never talk over the agent itself; a transcript may also still be on its way.
         if getattr(self._session, "agent_state", None) in ("speaking", "thinking"):
+            return
+        if not self._armed():
             return
         try:
             self._session.generate_reply(instructions=REPEAT_DIRECTIVE)

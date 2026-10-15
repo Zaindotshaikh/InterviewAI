@@ -170,6 +170,8 @@ router.post("/start", async (req, res) => {
       avatar?: boolean;
       /** Opt-in TTS override for A/B routes (e.g. "elevenlabs"). */
       ttsProvider?: string;
+      /** Full-duplex voice path (e.g. "gpt_live") — replaces cascade STT/LLM/TTS. */
+      voiceProvider?: string;
     };
 
     if (!body.roleId) {
@@ -236,6 +238,10 @@ router.post("/start", async (req, res) => {
       typeof body.ttsProvider === "string" && body.ttsProvider.trim()
         ? body.ttsProvider.trim().toLowerCase()
         : undefined;
+    const voiceProvider =
+      typeof body.voiceProvider === "string" && body.voiceProvider.trim()
+        ? body.voiceProvider.trim().toLowerCase()
+        : undefined;
 
     await createV2Interview(
       {
@@ -272,7 +278,7 @@ router.post("/start", async (req, res) => {
           {
             ts: now,
             type: "interview.created",
-            data: { language: body.language, providerMode, avatar, ttsProvider },
+            data: { language: body.language, providerMode, avatar, ttsProvider, voiceProvider },
           },
         ],
         roomName,
@@ -280,15 +286,18 @@ router.post("/start", async (req, res) => {
         recordingConsent,
         avatar,
         ttsProvider,
+        voiceProvider,
       },
     );
 
     let livekit: { url: string; token: string; agentName: string } | null = null;
     if (isLiveKitConfigured()) {
-      console.info(`[v2] start interview=${interviewId} avatar=${avatar} tts=${ttsProvider || "default"}`);
+      console.info(
+        `[v2] start interview=${interviewId} avatar=${avatar} tts=${ttsProvider || "default"} voice=${voiceProvider || "cascade"}`,
+      );
       // Stagger room/dispatch creation to avoid Sarvam/LiveKit connection bursts
       livekit = await withV2StartSlot(async () => {
-        await ensureRoomAndDispatch({ roomName, interviewId, avatar, ttsProvider });
+        await ensureRoomAndDispatch({ roomName, interviewId, avatar, ttsProvider, voiceProvider });
         if (recordingConsent) {
           await startInterviewRecording({ roomName, interviewId });
         }
@@ -298,7 +307,14 @@ router.post("/start", async (req, res) => {
           interviewId,
           avatar,
           ttsProvider,
-          metadata: { language: body.language, recordingConsent, avatar, ttsProvider },
+          voiceProvider,
+          metadata: {
+            language: body.language,
+            recordingConsent,
+            avatar,
+            ttsProvider,
+            voiceProvider,
+          },
         });
         return { url: tok.url, token: tok.token, agentName: tok.agentName };
       });
@@ -320,6 +336,7 @@ router.post("/start", async (req, res) => {
       providerMode,
       avatar,
       ttsProvider,
+      voiceProvider,
       planStepCount: plan.steps.length,
       seniority: inferSeniority(role.title),
     });

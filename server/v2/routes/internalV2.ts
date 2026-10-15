@@ -52,6 +52,7 @@ router.get("/interviews/:id/plan", async (req, res) => {
       recordingConsent: record.extras.recordingConsent,
       avatar: Boolean(record.extras.avatar),
       ttsProvider: record.extras.ttsProvider || undefined,
+      voiceProvider: record.extras.voiceProvider || undefined,
     });
   } catch (err) {
     console.error("[v2/internal] plan error:", err);

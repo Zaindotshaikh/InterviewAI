@@ -17,9 +17,11 @@ type Props = {
   avatar?: boolean;
   /** When set, forces that TTS for this route only (e.g. elevenlabs). */
   ttsProvider?: string;
+  /** Full-duplex voice path (e.g. gpt_live) — replaces cascade STT/LLM/TTS. */
+  voiceProvider?: string;
 };
 
-export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
+export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider }: Props) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [roleId, setRoleId] = useState("");
   const [language, setLanguage] = useState("hi-IN");
@@ -37,6 +39,7 @@ export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const lk = useLiveKitInterview();
   const eleven = ttsProvider === "elevenlabs";
+  const gptLive = voiceProvider === "gpt_live";
 
   useEffect(() => {
     void fetch("/api/roles")
@@ -68,6 +71,7 @@ export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
           recordingConsent,
           avatar: avatar || undefined,
           ttsProvider: ttsProvider || undefined,
+          voiceProvider: voiceProvider || undefined,
           candidateContext: {
             name,
             roleAppliedFor: role?.title || "Staff Nurse",
@@ -88,7 +92,7 @@ export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [roles, roleId, name, resumeText, language, recordingConsent, avatar, ttsProvider]);
+  }, [roles, roleId, name, resumeText, language, recordingConsent, avatar, ttsProvider, voiceProvider]);
 
   const endAndScore = useCallback(async (integrity?: IntegrityReport) => {
     if (!session) return;
@@ -159,19 +163,25 @@ export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
 
   const title = avatar
     ? "Avatar interviewer test"
-    : eleven
-      ? "ElevenLabs voice test"
-      : "Indic voice interview test";
+    : gptLive
+      ? "GPT-Live voice test"
+      : eleven
+        ? "ElevenLabs voice test"
+        : "Indic voice interview test";
   const blurb = avatar
     ? "Same v2 interview agent, with a Tavus face on this route only. /v2/test stays voice-only."
-    : eleven
-      ? "Same interview flow as /v2/test, but speech uses ElevenLabs multilingual TTS so you can A/B how human it sounds vs Chirp."
-      : "Parallel flow for South Indian languages, Hinglish/Tanglish, and ward-noise handling. Existing `/i/*` routes are unchanged.";
+    : gptLive
+      ? "Same interview Flow/Director as /v2/test, but speech uses OpenAI GPT-Live full-duplex (model handles pauses, fillers, backchannels). Requires GPT-Live alpha on the API key."
+      : eleven
+        ? "Same interview flow as /v2/test, but speech uses ElevenLabs multilingual TTS so you can A/B how human it sounds vs Chirp."
+        : "Parallel flow for South Indian languages, Hinglish/Tanglish, and ward-noise handling. Existing `/i/*` routes are unchanged.";
   const startLabel = avatar
     ? "Start avatar interview"
-    : eleven
-      ? "Start ElevenLabs interview"
-      : "Start v2 interview";
+    : gptLive
+      ? "Start GPT-Live interview"
+      : eleven
+        ? "Start ElevenLabs interview"
+        : "Start v2 interview";
 
   return (
     <div className="mx-auto max-w-lg space-y-5 px-4 py-10">
@@ -180,6 +190,7 @@ export default function V2TestPage({ avatar = false, ttsProvider }: Props) {
           {COMPANY_NAME} · pipeline v2
           {avatar ? " · Tavus avatar" : ""}
           {eleven ? " · ElevenLabs TTS" : ""}
+          {gptLive ? " · GPT-Live" : ""}
         </p>
         <h1 className="text-2xl font-semibold text-stone-900">{title}</h1>
         <p className="mt-1 text-sm text-stone-600">{blurb}</p>

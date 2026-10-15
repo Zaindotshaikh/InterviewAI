@@ -56,6 +56,7 @@ class FlowState:
     care: dict[str, CareState] = field(default_factory=dict)
     gate_failed: str | None = None
     care_intro_done: bool = False
+    experience_dive_done: bool = False  # asked what they actually did in those settings
     experience_level: str = "unknown"  # fresher | junior | experienced | unknown
     areas: dict[str, AreaProgress] = field(default_factory=dict)
     area_order: list[str] = field(default_factory=list)

@@ -47,8 +47,19 @@ def test_turn_handling_uses_detector_adaptive_interruptions_and_no_preemptive_by
     handling = build_turn_handling("hi-IN", _settings(), has_vad=True, detector=detector)
     assert handling["turn_detection"] is detector
     assert handling["interruption"]["mode"] == "adaptive"
+    assert handling["interruption"]["resume_false_interruption"] is True
+    assert handling["interruption"]["min_words"] >= 2
+    assert handling["interruption"]["false_interruption_timeout"] >= 1.5
     assert handling["preemptive_generation"] == {"enabled": False}
     assert handling["endpointing"]["mode"] == "dynamic"
+
+
+def test_no_align_stt_requires_more_words_to_barge_in():
+    s = _settings(interruption_min_words=2, interruption_min_words_no_align=3)
+    aligned = build_turn_handling("hi-IN", s, has_vad=True, stt_aligned=True)
+    bare = build_turn_handling("hi-IN", s, has_vad=True, stt_aligned=False)
+    assert aligned["interruption"]["min_words"] == 2
+    assert bare["interruption"]["min_words"] == 3
 
 
 def test_turn_handling_falls_back_to_vad_then_stt():
@@ -84,16 +95,26 @@ def test_summarize():
 
 
 class _FakeSession:
-    def __init__(self, agent_state="listening"):
+    def __init__(self, agent_state="listening", salvage_transcript=""):
         self.agent_state = agent_state
         self.handlers = {}
         self.replies = []
+        self.salvage_transcript = salvage_transcript
+        self.commits = []
 
     def on(self, name, cb):
         self.handlers[name] = cb
 
     def generate_reply(self, **kw):
         self.replies.append(kw)
+
+    def commit_user_turn(self, **kw):
+        self.commits.append(kw)
+
+        async def _done():
+            return self.salvage_transcript
+
+        return _done()
 
 
 class _FakeBackend:
@@ -117,10 +138,47 @@ def test_missing_transcript_asks_the_candidate_to_repeat_with_a_cap():
         ev = SimpleNamespace(speech_duration=8.0)
         for _ in range(4):
             session.handlers["user_transcription_timeout"](ev)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
         assert [r["instructions"] for r in session.replies] == [REPEAT_DIRECTIVE] * 2
         assert wd.summary()["transcription_timeouts"] == 4
         assert wd.summary()["repeat_prompts"] == 2
+        assert len(session.commits) == 4
+
+    asyncio.run(run())
+
+
+def test_transcription_timeout_salvages_interim_instead_of_repeating():
+    async def run():
+        session, backend = _FakeSession(salvage_transcript="number hai 9112323549"), _FakeBackend()
+        wd = _watchdog(session, backend)
+        session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=4.0))
+        await asyncio.sleep(0.05)
+        assert session.replies == []
+        assert len(session.commits) == 1
+        assert wd.summary()["interim_salvages"] == 1
+        assert wd.summary()["repeat_prompts"] == 0
+
+    asyncio.run(run())
+
+
+def test_transcription_timeout_skips_salvage_before_listening_is_armed():
+    async def run():
+        session, backend = _FakeSession(salvage_transcript="बाहर कहीं जाना"), _FakeBackend()
+        wd = TurnWatchdog(
+            session=session,
+            backend=backend,
+            interview_id="i1",
+            settings=_settings(),
+            is_listening_armed=lambda: False,
+        )
+        wd.attach()
+        session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=4.0))
+        await asyncio.sleep(0.05)
+        assert session.commits == []
+        assert session.replies == []
+        assert wd.summary()["preamble_skips"] == 1
+        assert wd.summary()["interim_salvages"] == 0
+        assert backend.events[-1][0] == "audio.preamble_skip"
 
     asyncio.run(run())
 
@@ -130,7 +188,9 @@ def test_does_not_talk_over_the_agent():
         session = _FakeSession(agent_state="speaking")
         _watchdog(session, _FakeBackend())
         session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=5.0))
+        await asyncio.sleep(0.05)
         assert session.replies == []
+        assert session.commits == []
 
     asyncio.run(run())
 

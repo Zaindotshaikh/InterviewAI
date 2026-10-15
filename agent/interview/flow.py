@@ -44,6 +44,28 @@ STYLE_FOOTER = (
 
 MAX_FOCUS_RETRIES = 3  # repeat / rephrase / unclear on the same focus before soft-skip
 
+# Spoken English digit words GPT-Live often emits for phone numbers.
+_PHONE_DIGIT_WORDS = frozenset(
+    {
+        "zero",
+        "oh",
+        "o",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "double",
+        "triple",
+        "hundred",
+        "thousand",
+    }
+)
+
 
 @dataclass
 class Move:
@@ -129,6 +151,106 @@ class InterviewFlow:
             if slot and slot.value is not None:
                 return f["field"], str(slot.value)
         return None
+
+    def expects_short_answer(self) -> bool:
+        """True when the current focus is a one-fact / yes-no question (city, phone, year, confirm, care…)."""
+        f = self.state.focus or {}
+        ftype = f.get("type") or ""
+        if ftype in ("confirm", "care"):
+            return True
+        if ftype == "slots":
+            return True  # screening fields are single facts (city, phone, years, height, …)
+        return False
+
+    def short_answer_kinds(self) -> tuple[str, ...]:
+        """Field kinds currently in focus (empty when focus is not slots)."""
+        f = self.state.focus or {}
+        if f.get("type") != "slots":
+            return ()
+        kinds: list[str] = []
+        for fid in f.get("ids") or []:
+            spec = self.bp.field_spec(str(fid))
+            if spec is not None:
+                kinds.append(spec.kind)
+        return tuple(kinds)
+
+    def utterance_ready_for_focus(self, text: str) -> bool:
+        """Whether this transcript is enough to decide, given the live focus (not a fixed length rule)."""
+        from interview.plan import WEAK_TOKENS, classify_answer
+
+        text = (text or "").strip()
+        # Drop STT garbage (replacement char, bare ellipsis).
+        if not text or text in {"\ufffd", "…", "..."} or set(text) <= {"\ufffd", " ", ".", "…"}:
+            return False
+        verdict = classify_answer(text)
+        if verdict == "noise":
+            return False
+
+        tokens = [t.strip(".,!?;:\"'\ufffd").lower() for t in text.split() if t.strip(".,!?;:\"'\ufffd")]
+        tokens = [t for t in tokens if t and t != "\ufffd"]
+        kinds = self.short_answer_kinds()
+        # Phone: streaming STT often looks "substantive" after 3 digit-words — wait for a fuller number.
+        if kinds and all(k == "phone" for k in kinds):
+            digit_chars = sum(1 for ch in text if ch.isdigit())
+            digit_words = sum(
+                1
+                for t in tokens
+                if t in _PHONE_DIGIT_WORDS or any(ch.isdigit() for ch in t)
+            )
+            return digit_chars >= 8 or digit_words >= 6
+
+        if verdict == "substantive":
+            return True
+
+        if not self.expects_short_answer():
+            # Clinical / experience dive: keep holding short scraps for a fuller answer.
+            return False
+
+        ftype = (self.state.focus or {}).get("type") or ""
+        # Confirm / care: haan / nahi / yes / ok are valid one-word answers.
+        if ftype in ("confirm", "care"):
+            return True
+
+        if not tokens:
+            return False
+        numeric_kinds = {"year", "years", "height", "weight"}
+        for tok in tokens:
+            if tok in WEAK_TOKENS:
+                continue
+            if any(ch.isdigit() for ch in tok):
+                return True
+            if kinds and all(k in numeric_kinds for k in kinds) and len(tok) >= 2:
+                return True
+            if len(tok) >= 2:  # PUNE, Goa, ICU, GNM, …
+                return True
+        return False
+
+    def focus_lock_summary(self) -> str:
+        """Compact description of what the voice model may ask about right now."""
+        f = self.state.focus or {}
+        ftype = f.get("type") or "none"
+        stage = self.state.stage
+        if ftype == "slots":
+            ids = [str(i) for i in (f.get("ids") or [])]
+            kinds = list(self.short_answer_kinds())
+            return f"stage={stage} focus=slots fields={','.join(ids) or '?'} kinds={','.join(kinds) or '?'}"
+        if ftype == "confirm":
+            return f"stage={stage} focus=confirm field={f.get('field') or '?'}"
+        if ftype == "care":
+            items = [str(i) for i in (f.get("items") or [])]
+            return f"stage={stage} focus=care items={','.join(items) or '?'}"
+        if ftype == "clinical":
+            return (
+                f"stage={stage} focus=clinical area={f.get('area') or '?'} "
+                f"level={f.get('level') or '?'}"
+            )
+        if ftype == "experience_dive":
+            return f"stage={stage} focus=experience_dive"
+        if ftype == "contradiction":
+            return f"stage={stage} focus=contradiction"
+        if ftype == "closing_qa":
+            return f"stage={stage} focus=closing_qa"
+        return f"stage={stage} focus={ftype}"
 
     def analysis_payload(self, utterance: str, last_agent_text: str, recent_turns: list[dict[str, str]]) -> str:
         st = self.state
@@ -231,9 +353,23 @@ class InterviewFlow:
         return self._unclear()
 
     def _unclear(self) -> Move:
+        """Unrecognised speech: clarify, then soft-skip the stuck focus (never loop forever).
+
+        Production voice agents treat garbled audio as non-consent — ask once, then move on
+        rather than inventing an answer or re-asking the same field indefinitely.
+        """
         st = self.state
         st.unclear_streak += 1
         st.unclear_total += 1
+        # Same focus retried too often → mark unknown / skip area and continue the interview.
+        skip = self._bump_focus_retry()
+        if skip is not None:
+            st.unclear_streak = 0
+            skip.directive = (
+                "You could not make out their answer after a few tries. In one short warm sentence say you will "
+                "note that for now and move on — no blame. Then continue with: "
+            ) + skip.directive
+            return skip
         if st.unclear_streak >= self.bp.limits.max_unclear_streak:
             st.unclear_streak = 0
             return self._move(
@@ -248,6 +384,22 @@ class InterviewFlow:
             "didn't catch your answer'), and ask them to say it once more. Do not guess what they said.",
             events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
         )
+
+    def _preabsorb_screening_facts(self, a: TurnAnalysis) -> list[tuple[str, dict[str, Any]]]:
+        """Pull slot/care/confirm facts out of a compound turn before handling a meta-intent.
+
+        Real candidates often mix content with a question ("number is X, what's the salary?").
+        Meta-intents must not throw away the extractable fields.
+        """
+        events: list[tuple[str, dict[str, Any]]] = []
+        if self.state.stage not in ("screening", "opening"):
+            # Still accept phone etc. mentioned mid-clinical if the analyst extracted them.
+            if not a.slot_updates and not a.care_updates and a.confirmation == "none":
+                return events
+        self._absorb_confirmation(a)
+        self._absorb_slot_updates(a, events)
+        self._absorb_care(a, events)
+        return events
 
     def _bump_focus_retry(self) -> Move | None:
         """After too many repeats/unclear on the same focus, soft-skip so the call does not loop forever."""
@@ -334,8 +486,24 @@ class InterviewFlow:
         if st.elapsed_s >= self.bp.limits.hard_cap_minutes * 60:
             return self.force_complete("time")
 
-        if a.intelligibility == "unclear" or a.intent == "filler_only":
-            return self._unclear()
+        # Partial hearing → only force a read-back on fields marked confirm (phone).
+        # Height/weight/qualification must not get a confirm turn on every muddy STT pass.
+        if a.intelligibility == "partial":
+            for u in a.slot_updates:
+                spec = self.bp.field_spec(u.field)
+                if spec is not None and spec.confirm:
+                    u.confidence = min(float(u.confidence or 0.8), LOW_CONFIDENCE - 0.05)
+
+        if a.intelligibility == "unclear":
+            return self._wrap(self._unclear(), a.nervous)
+
+        # Short हाँ/जी/ok: filler on open questions, but usable when care/confirm already extracted a stance.
+        if a.intent == "filler_only":
+            if a.care_updates or a.slot_updates or a.confirmation != "none":
+                a.intent = "answer"
+            else:
+                return self._wrap(self._unclear(), a.nervous)
+
         st.unclear_streak = 0
 
         if a.experience_level != "unknown" and st.experience_level == "unknown":
@@ -348,7 +516,7 @@ class InterviewFlow:
             deferred_dk = bool(st.focus.get("deferred_dont_know"))
             self._resolve_contradiction(a)
 
-        # Intents that never advance the interview
+        # Intents that never advance the interview (but may still carry slot/care facts).
         if a.intent == "repeat_request":
             st.repeat_requests += 1
             skip = self._bump_focus_retry()
@@ -362,14 +530,35 @@ class InterviewFlow:
                 return self._wrap(skip, a.nervous)
             return self._wrap(self._rephrase(), a.nervous)
         if a.intent == "candidate_question" and st.stage != "closing":
-            return self._wrap(self._answer_question(a), a.nervous)
+            pre = self._preabsorb_screening_facts(a)
+            move = self._answer_question(a)
+            move.events = pre + list(move.events)
+            return self._wrap(move, a.nervous)
         if a.intent == "wants_to_stop":
             return self._wrap(self._handle_stop(), a.nervous)
         if a.intent == "off_topic":
-            return self._wrap(self._redirect(a), a.nervous)
-        if a.intent == "refusal" and st.focus.get("type") not in ("care", "slots", "confirm"):
-            # e.g. "I won't answer until you tell me the salary"
-            return self._wrap(self._salary_or_holdout(a), a.nervous)
+            # Ambient TV / hallway chatter often looks like fluent "off topic" STT.
+            # Only redirect when we also extracted screening facts; otherwise treat as unclear
+            # so we do not invent the next ask from resume noise.
+            pre = self._preabsorb_screening_facts(a)
+            has_facts = bool(a.slot_updates or a.care_updates or a.confirmation != "none")
+            move = self._redirect(a) if has_facts else self._unclear()
+            extra = [] if has_facts else [("audio.off_topic_as_noise", {"stage": st.stage})]
+            move.events = pre + extra + list(move.events)
+            return self._wrap(move, a.nervous)
+        if a.intent == "refusal":
+            focus_type = st.focus.get("type")
+            if focus_type in ("care", "slots", "confirm"):
+                pass  # screening absorbs refuse → hesitant / give-up
+            elif self._mentions_comp(a):
+                return self._wrap(self._salary_or_holdout(a), a.nervous)
+            elif st.stage == "clinical":
+                a.intent = "dont_know"  # refuse a clinical Q ≈ skip that area path
+            else:
+                skip = self._bump_focus_retry()
+                if skip is not None:
+                    return self._wrap(skip, a.nervous)
+                return self._wrap(self._redirect(a), a.nervous)
 
         if st.stage == "screening":
             move = self._screening(a)
@@ -636,14 +825,17 @@ class InterviewFlow:
         return []
 
     def _needs_confirmation(self) -> FieldSpec | None:
+        """Read-back only for blueprint `confirm` fields (phone). Other slots auto-accept after normalize."""
         st = self.state
         limit = self.bp.limits.max_field_attempts + 2
         for spec in self.bp.fields:
             slot = st.slot(spec.id)
             if slot.status != "captured":
                 continue
-            if (spec.confirm or slot.confidence < LOW_CONFIDENCE) and slot.attempts <= limit:
+            if spec.confirm and slot.attempts <= limit:
                 return spec
+            # Non-phone captures: no spoken confirm unless the blueprint opts in.
+            slot.status = "confirmed"
         return None
 
     def _screening_next(self, events: list[tuple[str, dict[str, Any]]]) -> Move:

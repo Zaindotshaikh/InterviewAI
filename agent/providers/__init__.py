@@ -94,20 +94,56 @@ def build_openai_stt(language: str, settings: Settings, keyterms: list[str] | No
     return _wrap_openai_stt(openai_plugin.STT(**kwargs), settings)
 
 
+def _openai_llm(model: str, settings: Settings):
+    """Voice OpenAI LLM with a streaming-friendly httpx timeout (plugin default read=5s is too tight)."""
+    import httpx
+
+    read_s = max(5.0, float(settings.llm_http_timeout_seconds))
+    return openai_plugin.LLM(
+        model=model,
+        api_key=settings.openai_api_key,
+        max_retries=0,
+        timeout=httpx.Timeout(connect=10.0, read=read_s, write=10.0, pool=5.0),
+    )
+
+
 def build_llm(settings: Settings | None = None):
     settings = settings or get_settings()
     provider = settings.resolved_llm()
 
     if provider == "mock":
         if settings.openai_api_key:
-            return openai_plugin.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
+            return _openai_llm(settings.llm_model, settings)
         raise RuntimeError("mock/openai LLM requires OPENAI_API_KEY")
 
     if provider == "sarvam":
         model = settings.llm_model if settings.llm_model in _SARVAM_LLM_MODELS else "sarvam-105b"
         return sarvam.LLM(model=model, api_key=settings.sarvam_api_key)
 
-    return openai_plugin.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
+    primary = _openai_llm(settings.llm_model, settings)
+    fallback_model = (settings.llm_fallback_model or "").strip()
+    if fallback_model and fallback_model != settings.llm_model:
+        try:
+            from livekit.agents.llm import FallbackAdapter
+
+            secondary = _openai_llm(fallback_model, settings)
+            logger.info(
+                "voice LLM primary=%s fallback=%s http_read=%.0fs",
+                settings.llm_model,
+                fallback_model,
+                settings.llm_http_timeout_seconds,
+            )
+            return FallbackAdapter([primary, secondary])
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM FallbackAdapter unavailable; using primary only")
+
+    logger.info(
+        "voice LLM model=%s http_read=%.0fs (Director stays %s)",
+        settings.llm_model,
+        settings.llm_http_timeout_seconds,
+        settings.director_model,
+    )
+    return primary
 
 
 def _scribe_language_hints(language: str) -> tuple[str, list[str]]:
@@ -139,6 +175,15 @@ def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: lis
         if len(trimmed) >= 50:
             break
 
+    # Manual commit never finalizes until ~36s of audio — phone digits die as partials
+    # and LiveKit fires transcription_timeout. Server VAD commits on silence so Flow
+    # sees FINAL transcripts (digits, city, yes/no) on each pause.
+    server_vad = {
+        "vad_silence_threshold_secs": 1.5,
+        "vad_threshold": 0.4,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 100,
+    }
     kwargs: dict[str, Any] = {
         "api_key": api_key,
         "model": "scribe_v2_realtime",
@@ -146,16 +191,19 @@ def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: lis
         "secondary_languages": secondary,
         "include_timestamps": True,
         "sample_rate": 16000,
+        "server_vad": server_vad,
     }
     if trimmed:
         kwargs["keyterms"] = trimmed
     stt = elevenlabs.STT(**kwargs)
     aligned = getattr(getattr(stt, "capabilities", None), "aligned_transcript", None)
     logger.info(
-        "ElevenLabs Scribe STT model=scribe_v2_realtime lang=%s secondary=%s aligned=%s keyterms=%d",
+        "ElevenLabs Scribe STT model=scribe_v2_realtime lang=%s secondary=%s aligned=%s "
+        "commit=server_vad silence=%.1fs keyterms=%d",
         primary,
         secondary,
         aligned,
+        server_vad["vad_silence_threshold_secs"],
         len(trimmed),
     )
     return stt

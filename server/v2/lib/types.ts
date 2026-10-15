@@ -131,6 +131,8 @@ export type V2InterviewExtras = {
   avatar?: boolean;
   /** Per-interview TTS override (e.g. "elevenlabs" for the test route). */
   ttsProvider?: string;
+  /** Full-duplex voice path (e.g. "gpt_live") — replaces cascade STT/LLM/TTS. */
+  voiceProvider?: string;
   englishTranscript?: { role: "user" | "assistant"; text: string; timestamp: string }[];
 };
 

@@ -34,6 +34,7 @@ export type V2StartResponse = {
   providerMode: string;
   avatar?: boolean;
   ttsProvider?: string;
+  voiceProvider?: string;
   planStepCount: number;
 };
 

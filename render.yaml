@@ -1,0 +1,43 @@
+# Free-tier teammate demo: one public URL for UI + API.
+# Agent deploys separately to LiveKit Cloud (also free Build plan) — see docs/deploy-free.md
+services:
+  - type: web
+    name: interviewai-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      # Paste the rest in the Render dashboard from your local server/.env
+      # (OPENAI_API_KEY, LIVEKIT_*, V2_*, ELEVENLABS_*, etc.)
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: V2_AGENT_NAME
+        value: interview-v2
+      - key: V2_INTERNAL_SECRET
+        sync: false
+      - key: V2_MAX_MINUTES
+        value: "25"
+      - key: COMPANY_NAME
+        value: Kreeda Labs
+      - key: PROVIDER_MODE
+        value: openai
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: TAVUS_API_KEY
+        sync: false

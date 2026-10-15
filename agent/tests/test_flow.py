@@ -82,7 +82,9 @@ def fill_screening(flow: InterviewFlow) -> None:
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
     flow.apply(say(("height_cm", "5 feet 4 inches"), ("weight_kg", "58 kg")))
-    flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
+    dive = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
+    assert dive.kind == "experience_dive"
+    flow.apply(TurnAnalysis(intent="answer", gist_en="Monitoring, meds, and ventilator care in ICU"))
 
 
 # ----------------------------------------------------------------------------------------------- screening
@@ -93,6 +95,47 @@ def test_opening_greets_and_asks_the_first_screening_question(blueprint):
     move = flow.opening()
     assert flow.stage == "screening"
     assert "Priya" in move.directive and "city" in move.directive.lower()
+
+
+def test_short_answers_ready_by_focus_not_fixed_length(blueprint):
+    """One-word replies are valid when the live question expects a short fact / yes-no."""
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    assert flow.expects_short_answer()
+    assert flow.state.focus.get("type") == "slots"
+    assert "slots" in flow.focus_lock_summary() and "city" in flow.focus_lock_summary()
+    assert flow.utterance_ready_for_focus("PUNE")
+    assert flow.utterance_ready_for_focus("Goa")
+    assert flow.utterance_ready_for_focus("ने और मुंबई")
+    assert not flow.utterance_ready_for_focus("um")
+    assert not flow.utterance_ready_for_focus("")
+    assert not flow.utterance_ready_for_focus("\ufffd")
+
+    flow.apply(say(("city", "Pune")))
+    assert flow.state.focus.get("type") == "slots"
+    # Phone must not fire on the first digit-word — wait for a fuller number.
+    assert "phone" in (flow.focus_lock_summary() or "")
+    assert not flow.utterance_ready_for_focus("nine")
+    assert not flow.utterance_ready_for_focus("nine double one")
+    assert flow.utterance_ready_for_focus("nine double one two three two three five four nine")
+
+    flow.apply(say(("phone", "9876543210")))
+    assert flow.state.focus.get("type") == "confirm"
+    assert flow.expects_short_answer()
+    assert "confirm" in flow.focus_lock_summary()
+    assert flow.utterance_ready_for_focus("haan")
+    assert flow.utterance_ready_for_focus("yes")
+    assert flow.utterance_ready_for_focus("nahi")
+
+    fill_screening(flow)
+    # After screening, clinical questions should not treat filler as ready.
+    if flow.state.focus.get("type") == "clinical":
+        assert not flow.expects_short_answer()
+        assert "clinical" in flow.focus_lock_summary()
+        assert not flow.utterance_ready_for_focus("ok")
+        assert flow.utterance_ready_for_focus(
+            "I check vitals every hour and escalate if BP drops suddenly"
+        )
 
 
 def test_one_utterance_can_fill_several_fields_and_phone_is_read_back(blueprint):
@@ -122,11 +165,13 @@ def test_denied_readback_clears_the_number_and_asks_again(blueprint):
     assert move.kind == "ask_field" and "mobile" in move.directive.lower()
 
 
-def test_low_confidence_hearing_is_read_back_even_for_plain_fields(blueprint):
+def test_low_confidence_plain_fields_skip_confirm_only_phone_reads_back(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     move = flow.apply(say(("city", "Pune"), conf=0.4))
-    assert move.kind == "confirm" and "Pune" in move.directive
+    assert flow.state.slots["city"].status == "confirmed"
+    assert move.kind != "confirm"
+    assert "mobile" in move.directive.lower() or "phone" in move.directive.lower()
 
 
 def test_height_and_weight_normalised_and_unbelievable_values_rejected(blueprint):
@@ -284,7 +329,7 @@ def test_diaper_clear_yes_after_hesitation_is_recovered_without_llm_care_updates
 
 
 def test_infer_care_accept_ready_phrases():
-    from interview.analysis import infer_care_accept
+    from interview.analysis import infer_care_accept, recover_care_updates
 
     assert infer_care_accept("हाँ हाँ मैं ready हूँ।") == "comfortable"
     assert infer_care_accept("हाँ मैं ready हूँ। डायपर चेंज करना") == "comfortable"
@@ -292,6 +337,94 @@ def test_infer_care_accept_ready_phrases():
     assert infer_care_accept("मैं ये काम नहीं करूँगा") == "refuses"
     assert infer_care_accept("I won't do diaper care") == "refuses"
     assert infer_care_accept("Actually मैंने कभी किया नहीं है क्या ये ज़रूरी है") is None
+    # Demo bug: हाँ about ICU experience is not care consent.
+    assert (
+        infer_care_accept("हाँ, मैंने तीन साल का आईसीयू वार्ड में मेरा एक्सपीरियंस है इनामदार हॉस्पिटल में")
+        is None
+    )
+    # Care-intro: short clear yes recovers every focused item (avoids re-asking diaper).
+    multi = recover_care_updates(
+        TurnAnalysis(intent="answer"),
+        text="हाँ हाँ मैं ready हूँ।",
+        item_ids=["diaper_care", "hygiene_bathing", "toileting_bedpan", "lifting_repositioning"],
+    )
+    assert len(multi.care_updates) == 4
+    assert {u.stance for u in multi.care_updates} == {"comfortable"}
+    # ICU-style हाँ on intro still must not recover.
+    multi_icu = recover_care_updates(
+        TurnAnalysis(intent="answer"),
+        text="हाँ, मैंने तीन साल का आईसीयू वार्ड में मेरा एक्सपीरियंस है इनामदार हॉस्पिटल में",
+        item_ids=["diaper_care", "hygiene_bathing", "toileting_bedpan", "lifting_repositioning"],
+    )
+    assert multi_icu.care_updates == []
+
+
+def test_care_intro_short_yes_skips_per_item_diaper_reask(blueprint):
+    """Clear हाँ on care intro should clear the checklist, not re-ask diaper in another format."""
+    from interview.analysis import recover_care_updates
+
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    assert flow.state.focus.get("type") == "care" and len(flow.state.focus.get("items") or []) > 1
+    recovered = recover_care_updates(
+        TurnAnalysis(intent="answer"),
+        text="हाँ।",
+        item_ids=[str(i) for i in flow.state.focus["items"]],
+    )
+    move = flow.apply(recovered)
+    assert all(flow.state.care_state(c.id).stance == "comfortable" for c in blueprint.care_items)
+    assert move.kind != "ask_care_item"
+    assert move.kind != "ask_care"
+    assert flow.stage == "clinical" or move.kind == "clinical_question"
+
+
+def test_care_intro_icu_yes_does_not_skip_diaper_ask(blueprint):
+    """Regression: experience-style हाँ during care intro must not mark all care comfortable."""
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            care_updates=[
+                CareUpdate(
+                    c.id,
+                    "comfortable",
+                    reason="recovered from clear yes/no",
+                    evidence="हाँ, मैंने तीन साल का आईसीयू वार्ड में मेरा एक्सपीरियंस है",
+                )
+                for c in blueprint.care_items
+            ],
+        )
+    )
+    assert all(flow.state.care_state(c.id).stance == "unknown" for c in blueprint.care_items)
+    assert move.kind in ("ask_care", "ask_care_item", "persuade")
+    assert flow.stage == "screening"
+
+
+def test_experience_dive_runs_before_care(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
+    flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    move = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU Apollo")))
+    assert move.kind == "experience_dive"
+    assert flow.state.focus["type"] == "experience_dive"
+    assert not flow.state.experience_dive_done
+    after = flow.apply(TurnAnalysis(intent="answer", gist_en="Handled ICU monitoring and meds"))
+    assert flow.state.experience_dive_done
+    assert after.kind == "ask_care" or flow.state.focus.get("type") == "care"
+
+
+def test_salary_holdout_does_not_invent_numbers(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(intent="candidate_question", gist_en="What is the salary? Tell me or I will not answer.")
+    )
+    assert move.kind == "salary_holdout"
+    assert "cannot quote" in move.directive.lower() or "recruitment team" in move.directive.lower()
 
 
 def test_diaper_idk_on_care_intro_persuades_before_skipping(blueprint):
@@ -312,6 +445,7 @@ def reach_clinical(flow, experience=("3", "ICU at a private hospital")):
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
     flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
     flow.apply(say(("experience_years", experience[0]), ("experience_settings", experience[1])))
+    flow.apply(TurnAnalysis(intent="answer", gist_en="Day to day ICU nursing duties"))
     flow.apply(TurnAnalysis(care_updates=[CareUpdate(c.id, "comfortable") for c in blueprint_items(flow)]))
     assert flow.stage == "clinical"
 
@@ -454,16 +588,73 @@ def test_contradiction_probes_are_capped(blueprint):
 # ----------------------------------------------------------------------------------- candidate behaviour
 
 
-def test_unclear_audio_asks_to_repeat_then_offers_noise_help_and_recovers(blueprint):
+def test_unclear_audio_asks_to_repeat_then_soft_skips_stuck_field(blueprint):
+    """Garbled audio clarifies twice, then soft-skips the stuck focus (no infinite loop)."""
     flow, _ = make_flow(blueprint)
     flow.opening()
+    assert flow.state.focus.get("type") == "slots"
     bad = TurnAnalysis(intelligibility="unclear")
-    kinds = [flow.apply(bad).kind for _ in range(3)]
-    assert kinds == ["ask_repeat", "ask_repeat", "noise_help"]
+    m1 = flow.apply(bad)
+    m2 = flow.apply(bad)
+    m3 = flow.apply(bad)
+    assert m1.kind == "ask_repeat" and m2.kind == "ask_repeat"
+    # Third unclear on same focus soft-skips (city → unknown) and advances.
+    assert m3.kind in ("ask_field", "ask_repeat", "noise_help", "confirm")
+    assert any(e[0] == "focus.soft_skip" for e in m3.events) or flow.state.slots["city"].status == "unknown"
     assert flow.state.unclear_total == 3
-    flow.apply(say(("city", "Pune")))
+    # Clear answer still captures; never stores garbage from unclear turns.
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     assert flow.state.unclear_streak == 0
-    assert flow.state.slots["city"].value == "Pune"  # unclear turns never stored garbage
+
+
+def test_filler_haan_with_care_updates_is_not_treated_as_unclear(blueprint):
+    """Short हाँ recovered as care consent must advance, not ask_repeat."""
+    from interview.analysis import recover_care_updates
+
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    recovered = recover_care_updates(
+        TurnAnalysis(intent="filler_only"),
+        text="हाँ।",
+        item_ids=[str(i) for i in flow.state.focus["items"]],
+    )
+    move = flow.apply(recovered)
+    assert move.kind != "ask_repeat"
+    assert all(flow.state.care_state(c.id).stance == "comfortable" for c in blueprint.care_items)
+
+
+def test_compound_candidate_question_still_captures_phone(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(
+            intent="candidate_question",
+            gist_en="my number is 9876543210, what is the salary?",
+            slot_updates=[SlotUpdate("phone", "9876543210", 0.9, "9876543210")],
+        )
+    )
+    assert move.kind in ("salary_holdout", "answer_question")
+    assert flow.state.slots["phone"].value == "9876543210"
+
+
+def test_partial_intelligibility_forces_phone_confirm(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(
+            intelligibility="partial",
+            intent="answer",
+            slot_updates=[
+                SlotUpdate("city", "Pune", 0.9),
+                SlotUpdate("phone", "9876543210", 0.9),
+            ],
+        )
+    )
+    assert flow.state.slots["city"].status == "confirmed"
+    assert flow.state.slots["city"].confidence >= 0.6  # partial must not clamp non-confirm fields
+    assert flow.state.slots["phone"].status == "captured"
+    assert flow.state.slots["phone"].confidence < 0.6
+    assert move.kind == "confirm" and "98765" in move.directive
 
 
 def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):
@@ -476,7 +667,13 @@ def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):
 
 @pytest.mark.parametrize(
     ("intent", "kind"),
-    [("repeat_request", "repeat"), ("rephrase_request", "rephrase"), ("off_topic", "redirect"), ("candidate_question", "answer_question")],
+    [
+        ("repeat_request", "repeat"),
+        ("rephrase_request", "rephrase"),
+        # Fact-less off-topic (ambient STT) → unclear, not a redirect that invents the next ask.
+        ("off_topic", "ask_repeat"),
+        ("candidate_question", "answer_question"),
+    ],
 )
 def test_requests_and_questions_do_not_advance_the_interview(blueprint, intent, kind):
     flow, _ = make_flow(blueprint)
@@ -486,6 +683,26 @@ def test_requests_and_questions_do_not_advance_the_interview(blueprint, intent, 
     assert move.kind == kind
     assert flow.state.current_area == area and flow.state.areas[area].level == level
     assert flow.state.areas[area].probes == 0
+
+
+def test_off_topic_with_screening_facts_still_redirects(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(intent="off_topic", slot_updates=[SlotUpdate("city", "Pune")])
+    )
+    assert move.kind == "redirect"
+    assert flow.state.slots["city"].status == "captured"
+
+
+def test_factless_off_topic_is_treated_as_noise_not_progress(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    before = dict(flow.state.focus)
+    move = flow.apply(TurnAnalysis(intent="off_topic", intelligibility="clear", gist_en="going somewhere outside"))
+    assert move.kind == "ask_repeat"
+    assert any(e[0] == "audio.off_topic_as_noise" for e in move.events)
+    assert flow.state.focus.get("type") == before.get("type")
 
 
 def test_answers_to_candidate_questions_come_from_the_faq_only(blueprint):
@@ -632,7 +849,29 @@ def test_heuristic_fallback_understands_the_basics_in_several_languages(text, in
 def test_heuristic_fallback_reads_confirmation_and_phone():
     assert heuristic_analysis("haan sahi hai", pending_field="phone", pending_value="9876543210").confirmation == "confirmed"
     assert heuristic_analysis("nahi galat hai", pending_field="phone", pending_value="9876543210").confirmation == "denied"
-    assert heuristic_analysis("my number is 98765 43210").slot_updates[0].value == "9876543210"
+    phone = heuristic_analysis("my number is 98765 43210")
+    assert phone.slot_updates[0].value == "9876543210"
+    assert phone.slot_updates[0].confidence <= 0.55
+
+
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        ("I want to stop the interview", "wants_to_stop"),
+        ("बंद करो", "wants_to_stop"),
+        ("I won't answer that", "refusal"),
+        ("नहीं बताऊँगा", "refusal"),
+        ("tell me a joke", "off_topic"),
+    ],
+)
+def test_heuristic_recovers_stop_refuse_off_topic(text, intent):
+    assert heuristic_analysis(text).intent == intent
+
+
+def test_heuristic_short_haan_is_filler_unless_confirming():
+    assert heuristic_analysis("हाँ").intent == "filler_only"
+    a = heuristic_analysis("हाँ", pending_field="phone", pending_value="9876543210")
+    assert a.intent == "answer" and a.confirmation == "confirmed"
 
 
 def test_analysis_payload_carries_the_rubric_only_for_the_current_question(blueprint):

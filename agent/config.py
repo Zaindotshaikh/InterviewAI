@@ -35,7 +35,14 @@ class Settings(BaseSettings):
     stt_provider: SttProvider | None = None
     tts_provider: TtsProvider | None = None
     llm_provider: LlmProvider | None = None
+    # Voice wording only — keep Director on director_model (stronger).
     llm_model: str = "gpt-4o-mini"
+    # httpx read timeout for streaming voice LLM (plugin default 5s is too tight under load).
+    llm_http_timeout_seconds: float = 25.0
+    # LiveKit LLM attempt retries after timeout (0 = single try; 1 = one retry).
+    llm_max_retry: int = 1
+    # Optional second OpenAI model if primary errors (empty = no fallback).
+    llm_fallback_model: str = ""
     noise_provider: NoiseProvider = "none"
     fallback_stt_key: str | None = None
     # When STT_PROVIDER=elevenlabs_scribe fails to build/connect, fall back (default openai).
@@ -59,7 +66,7 @@ class Settings(BaseSettings):
     # Mid-call TTS fallback when ElevenLabs fails (google = Chirp).
     tts_fallback_on_error: Literal["none", "google"] = "google"
     # Raise when STT has no word alignment so हाँ/जी don't barge in.
-    interruption_min_words_no_align: int = 2
+    interruption_min_words_no_align: int = 3
 
     # API keys
     openai_api_key: str | None = None
@@ -93,6 +100,16 @@ class Settings(BaseSettings):
 
     # gpt-live-transcribe streams and accepts a language list for code-switched speech
     openai_stt_model: str = "gpt-live-transcribe"
+    # Full-duplex voice model for /gpt-live-interviewer (replaces STT+LLM+TTS cascade).
+    gpt_live_model: str = "gpt-live-1"
+    # Default stock voice when no per-language override. Plugin: marin, vesper, beacon, stone, cinder, aster.
+    # OpenAI has no Indic-native GPT-Live voice yet — accent is mostly prompt-driven.
+    gpt_live_voice: str = "marin"
+    # Optional per-language voice overrides (comma list): hi-IN:marin,en-IN:beacon,ta-IN:marin
+    gpt_live_voice_by_lang: str = ""
+    # Approved OpenAI custom voice id (voice_...) — stronger Indian English than stock + "Speak Indian English".
+    # Requires custom-voice + GPT-Live access on the same project key. Empty = use stock voice name.
+    gpt_live_custom_voice_id: str = ""
 
     # Interview behaviour
     # Hard stop for the whole call; the blueprint's own hard cap applies too (the lower one wins).
@@ -113,8 +130,12 @@ class Settings(BaseSettings):
     vad_min_silence_ms: int = 400
     vad_min_speech_ms: int = 100
     vad_sot_threshold: float = 0.6
-    interruption_min_words: int = 1
-    false_interruption_timeout: float = 1.3
+    # Words of real STT needed before barge-in (1 lets ward TV / door noise stop the agent).
+    interruption_min_words: int = 2
+    # If barge-in produces no confirmed speech by this time, resume the interviewer mid-sentence.
+    false_interruption_timeout: float = 1.8
+    # After a false barge-in resume, ignore brief junk transcripts so Flow does not jump.
+    false_interrupt_discard_seconds: float = 1.2
 
     # --- Turn-taking (policy lives in interview/turns.py) ---
     # Semantic end-of-turn model: waits when the candidate is clearly mid-thought, replies fast when finished.
@@ -139,6 +160,10 @@ class Settings(BaseSettings):
     transcription_timeout_seconds: float = 3.0
     # Max times per call the agent asks the candidate to repeat after a missing transcript.
     max_repeat_prompts: int = 3
+    # Block barge-in during the opening greeting so ambient noise cannot skip the intro.
+    opening_block_interruptions: bool = True
+    # After the greeting finishes, wait this long before accepting candidate answers (settle room noise).
+    opening_settle_seconds: float = 0.8
 
     # Chance of a short native reaction ("बरं.", "अच्छा.") in the interview voice after the candidate finishes, 0 disables
     thinking_filler_probability: float = 0.6
@@ -178,6 +203,27 @@ class Settings(BaseSettings):
             return "mock"
         return "openai"
 
+    def gpt_live_voice_for(self, language: str) -> str | dict[str, str]:
+        """Pick GPT-Live output voice for an interview language (immutable after session start).
+
+        Returns a custom-voice dict when GPT_LIVE_CUSTOM_VOICE_ID is set (OpenAI's stronger
+        English-accent path); otherwise a stock voice name string.
+        """
+        custom = (self.gpt_live_custom_voice_id or "").strip()
+        if custom:
+            return {"id": custom}
+        raw = (self.gpt_live_voice_by_lang or "").strip()
+        if raw:
+            wanted = (language or "").strip().lower()
+            for part in raw.split(","):
+                piece = part.strip()
+                if ":" not in piece:
+                    continue
+                code, voice = piece.split(":", 1)
+                if code.strip().lower() == wanted and voice.strip():
+                    return voice.strip()
+        return (self.gpt_live_voice or "marin").strip() or "marin"
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -214,9 +260,15 @@ def get_settings() -> Settings:
         "THINKING_SOUND_ENABLED": "thinking_sound_enabled",
         "TTS_FALLBACK_ON_ERROR": "tts_fallback_on_error",
         "INTERRUPTION_MIN_WORDS_NO_ALIGN": "interruption_min_words_no_align",
+        "INTERRUPTION_MIN_WORDS": "interruption_min_words",
+        "FALSE_INTERRUPTION_TIMEOUT": "false_interruption_timeout",
+        "FALSE_INTERRUPT_DISCARD_SECONDS": "false_interrupt_discard_seconds",
         "TTS_PROVIDER": "tts_provider",
         "LLM_PROVIDER": "llm_provider",
         "LLM_MODEL": "llm_model",
+        "LLM_HTTP_TIMEOUT_SECONDS": "llm_http_timeout_seconds",
+        "LLM_MAX_RETRY": "llm_max_retry",
+        "LLM_FALLBACK_MODEL": "llm_fallback_model",
         "NOISE_PROVIDER": "noise_provider",
         "GOOGLE_APPLICATION_CREDENTIALS": "google_application_credentials",
         "GOOGLE_CLOUD_PROJECT": "google_cloud_project",
@@ -225,6 +277,10 @@ def get_settings() -> Settings:
         "GOOGLE_TTS_MODEL": "google_tts_model",
         "GOOGLE_TTS_STYLE": "google_tts_style",
         "OPENAI_STT_MODEL": "openai_stt_model",
+        "GPT_LIVE_MODEL": "gpt_live_model",
+        "GPT_LIVE_VOICE": "gpt_live_voice",
+        "GPT_LIVE_VOICE_BY_LANG": "gpt_live_voice_by_lang",
+        "GPT_LIVE_CUSTOM_VOICE_ID": "gpt_live_custom_voice_id",
         "THINKING_FILLER_PROBABILITY": "thinking_filler_probability",
         "THINKING_SOUND_VOLUME": "thinking_sound_volume",
         "OPENING_HESITATION": "opening_hesitation",
@@ -238,6 +294,8 @@ def get_settings() -> Settings:
         "PREEMPTIVE_GENERATION": "preemptive_generation",
         "TRANSCRIPTION_TIMEOUT_SECONDS": "transcription_timeout_seconds",
         "MAX_REPEAT_PROMPTS": "max_repeat_prompts",
+        "OPENING_BLOCK_INTERRUPTIONS": "opening_block_interruptions",
+        "OPENING_SETTLE_SECONDS": "opening_settle_seconds",
         "HESITATION_RATE": "hesitation_rate",
         "PHRASE_PAUSE_RATE": "phrase_pause_rate",
         "V2_AGENT_NAME": "v2_agent_name",

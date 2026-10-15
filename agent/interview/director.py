@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from interview.analysis import TurnAnalyzer, heuristic_analysis, recover_care_updates
@@ -22,13 +23,29 @@ RECENT_TURNS = 8
 
 
 class Director:
-    def __init__(self, flow: InterviewFlow, analyzer: TurnAnalyzer, *, recent: list[dict[str, str]] | None = None) -> None:
+    def __init__(
+        self,
+        flow: InterviewFlow,
+        analyzer: TurnAnalyzer,
+        *,
+        recent: list[dict[str, str]] | None = None,
+        is_listening_armed: Callable[[], bool] | None = None,
+    ) -> None:
         self.flow = flow
         self.analyzer = analyzer
         self.recent: list[dict[str, str]] = list(recent or [])[-RECENT_TURNS:]
         self.last_agent_text = ""
         self._finals: list[str] = []
         self._early: tuple[str, str, asyncio.Task[Any]] | None = None  # (text, payload, task)
+        self._is_listening_armed = is_listening_armed
+
+    def _armed(self) -> bool:
+        if self._is_listening_armed is None:
+            return True
+        try:
+            return bool(self._is_listening_armed())
+        except Exception:  # noqa: BLE001
+            return True
 
     # ------------------------------------------------------------------------------------------ conversation
 
@@ -66,6 +83,8 @@ class Director:
         """Start analysing now; the turn is usually confirmed 0.4-1.5s later, so this hides most of the latency."""
         if self.flow.done or not self.analyzer.available:
             return
+        if not self._armed():
+            return
         self._finals.append(sanitize_candidate_text(text))
         joined = " ".join(t for t in self._finals if t).strip()
         if classify_answer(joined) == "noise":
@@ -86,6 +105,10 @@ class Director:
         """Turn the confirmed utterance into the next move."""
         early, self._early = self._early, None
         self._finals = []
+        if not self._armed():
+            if early:
+                early[2].cancel()
+            return self.flow.noise_move()
         if classify_answer(text) == "noise":
             if early:
                 early[2].cancel()
@@ -103,8 +126,8 @@ class Director:
             analysis = await self.analyzer.analyze(
                 payload, clinical=self.flow.wants_clinical_model, fallback=fallback
             )
-        # Single-item care focus only (persuasion / item ask): recover clear हाँ/ready if the LLM omitted it.
-        # Never recover on care-intro (all items focused) — bare हाँ about ICU used to skip the diaper ask.
+        # Care focus (intro or single item): recover clear हाँ/नहीं if the LLM omitted care_updates.
+        # Experience-dump हाँ is still rejected inside recover_care_updates / infer_care_accept.
         if self.flow.state.focus.get("type") == "care":
             items = [str(i) for i in (self.flow.state.focus.get("items") or [])]
             before = len(analysis.care_updates)

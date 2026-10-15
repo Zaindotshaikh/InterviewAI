@@ -28,11 +28,14 @@ function interviewJobMeta(opts: {
   interviewId: string;
   avatar?: boolean;
   ttsProvider?: string;
+  /** Full-duplex voice path (e.g. "gpt_live") — replaces cascade STT/LLM/TTS. */
+  voiceProvider?: string;
 }): Record<string, unknown> {
   return {
     interviewId: opts.interviewId,
     avatar: Boolean(opts.avatar),
     ...(opts.ttsProvider ? { ttsProvider: opts.ttsProvider } : {}),
+    ...(opts.voiceProvider ? { voiceProvider: opts.voiceProvider } : {}),
   };
 }
 
@@ -43,6 +46,7 @@ export async function createCandidateToken(opts: {
   metadata?: Record<string, unknown>;
   avatar?: boolean;
   ttsProvider?: string;
+  voiceProvider?: string;
 }): Promise<{ token: string; url: string; agentName: string }> {
   const cfg = getLiveKitConfig();
   if (!cfg) {
@@ -86,6 +90,7 @@ export async function ensureRoomAndDispatch(opts: {
   interviewId: string;
   avatar?: boolean;
   ttsProvider?: string;
+  voiceProvider?: string;
 }): Promise<void> {
   const cfg = getLiveKitConfig();
   if (!cfg) return;
