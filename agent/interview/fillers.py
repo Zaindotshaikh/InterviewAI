@@ -18,12 +18,12 @@ import asyncio
 import logging
 import random
 import re
-from typing import Any
-
-import numpy as np
-from livekit import rtc
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger("interview-v2.fillers")
+
+if TYPE_CHECKING:
+    from livekit import rtc
 
 # Canonical in-sentence filled pause. Latin script in every language: the probe found it the most
 # consistent take-to-take in Marathi and Hindi.
@@ -134,6 +134,8 @@ def is_speakable(text: str) -> bool:
 
 def _voiced_seconds(frames: list[rtc.AudioFrame]) -> float:
     """Seconds of audible speech, in 20ms windows above a quiet-room RMS floor."""
+    import numpy as np  # local: keeps unit tests free of LiveKit/numpy
+
     if not frames:
         return 0.0
     sr = frames[0].sample_rate

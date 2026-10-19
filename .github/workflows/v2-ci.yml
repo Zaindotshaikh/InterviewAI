@@ -23,9 +23,10 @@ jobs:
           python-version: "3.12"
       - name: Install minimal test deps
         run: |
+          # Pure unit tests only — fillers lazy-imports livekit/numpy so this stays light.
           pip install pytest pydantic pydantic-settings httpx python-dotenv
       - name: Unit tests (no LiveKit required)
-        # test_controller.py was removed with the Flow rewrite — keep CI on pure unit files.
+        # test_controller.py never shipped; do not reference it. Keep CI on pure unit files.
         run: pytest -q tests/test_language.py tests/test_indic_phrases.py tests/test_normalize_blueprint.py
 
   server-typecheck:
