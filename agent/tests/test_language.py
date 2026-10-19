@@ -29,7 +29,7 @@ def test_gujarati_opening_seed():
 
 def test_elevenlabs_voice_is_sujata_for_every_language():
     from config import Settings
-    from providers import elevenlabs_voice_for
+    from providers.elevenlabs_voices import elevenlabs_voice_for
 
     sujata = "4mCfn38CsM9hGLvDrPxv"
     s = Settings(elevenlabs_voice_id=sujata, elevenlabs_voice_id_local=sujata)

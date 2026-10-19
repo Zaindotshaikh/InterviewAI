@@ -25,7 +25,8 @@ jobs:
         run: |
           pip install pytest pydantic pydantic-settings httpx python-dotenv
       - name: Unit tests (no LiveKit required)
-        run: pytest -q tests/test_controller.py tests/test_language.py
+        # test_controller.py was removed with the Flow rewrite — keep CI on pure unit files.
+        run: pytest -q tests/test_language.py tests/test_indic_phrases.py tests/test_normalize_blueprint.py
 
   server-typecheck:
     runs-on: ubuntu-latest
