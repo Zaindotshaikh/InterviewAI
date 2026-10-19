@@ -14,7 +14,7 @@ export function getV2ConcurrencyStats(): ConcurrencyStats {
   return { active, waiting };
 }
 
-export async function withV2StartSlot<T>(fn: () => Promise<T>, gapMs = 350): Promise<T> {
+export async function withV2StartSlot<T>(fn: () => Promise<T>, gapMs = 100): Promise<T> {
   waiting += 1;
   const run = chain.then(async () => {
     waiting -= 1;

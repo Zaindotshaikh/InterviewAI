@@ -164,10 +164,24 @@ _GPT_LIVE_FOCUS_LOCK_INSTRUCTIONS = (
     "delegation: brief ack/backchannel only — no new question."
 )
 
+# After we already spoke a question — must not trigger another spoken turn.
+_GPT_LIVE_LISTEN_HOLD = (
+    "LISTEN HOLD — you already asked the current question. Stay silent and wait for the "
+    "candidate. Do NOT repeat, rephrase, or ask anything else until CONTROLLER DIRECTIVE "
+    "commentary arrives."
+)
+
 
 def _gpt_live_commentary(move: Move, language: str) -> str:
     """Commentary the voice model paraphrases; keep under the ~500-token append cap."""
+    lead = ""
+    if move.kind == "opening":
+        lead = (
+            "OPENING — speak this greeting immediately. Do NOT wait for silence. "
+            "Ignore ambient/ward noise or mic pickup; it is not the candidate's turn.\n"
+        )
     text = (
+        f"{lead}"
         "CONTROLLER DIRECTIVE — paraphrase naturally in the candidate's language; "
         "do not invent a different question or topic:\n"
         f"{move.directive}\n"
@@ -347,7 +361,7 @@ class InterviewAgent(Agent):
         self._gpt_live_user_buf: list[str] = []
         self._gpt_live_buf_started: float = 0.0
         # Wait for speech to STOP (partials keep resetting this). 0.7s was committing mid-answer.
-        self._gpt_live_drive_settle_s: float = 1.8
+        self._gpt_live_drive_settle_s: float = 1.15
         self._gpt_live_drive_gen: int = 0
         self._gpt_live_driving: bool = False
         self._gpt_live_last_user: str = ""
@@ -359,6 +373,54 @@ class InterviewAgent(Agent):
 
     def is_listening_armed(self) -> bool:
         return bool(self._listening_armed)
+
+    def _set_candidate_mic(self, enabled: bool, *, reason: str) -> None:
+        """Gate candidate audio so ward noise cannot steal the turn before the greeting.
+
+        GPT-Live: use duplex mute_input (feed silence) — detaching RoomIO audio via
+        set_audio_enabled(False) can prevent the model from starting speech at all
+        (logs: \"the model did not start speaking when asked\" → ~10s silence).
+        Cascade: disable RoomIO input so VAD/STT do not hold the floor.
+        """
+        if self._gpt_live:
+            duplex = getattr(self, "duplex_session", None)
+            if duplex is not None:
+                try:
+                    if enabled:
+                        duplex.unmute_input()
+                    else:
+                        duplex.mute_input()
+                    logger.info("gpt-live mic %s reason=%s", "on" if enabled else "off", reason)
+                    return
+                except Exception:  # noqa: BLE001
+                    logger.exception("gpt-live mic toggle failed reason=%s", reason)
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is None:
+            return
+        try:
+            inp = getattr(session, "input", None)
+            if inp is None:
+                return
+            if bool(getattr(inp, "audio_enabled", True)) == enabled:
+                return
+            inp.set_audio_enabled(enabled)
+            logger.info("candidate mic %s reason=%s", "on" if enabled else "off", reason)
+        except Exception:  # noqa: BLE001
+            logger.exception("candidate mic toggle failed reason=%s", reason)
+
+    def _gate_opening_input(self) -> None:
+        """Mute + clear any in-flight user turn so opening speech starts immediately."""
+        self._set_candidate_mic(False, reason="opening_guard")
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is None:
+            return
+        try:
+            clear = getattr(session, "clear_user_turn", None)
+            if callable(clear):
+                clear()
+                logger.info("cleared pending user turn before opening")
+        except Exception:  # noqa: BLE001
+            logger.debug("clear_user_turn before opening failed", exc_info=True)
 
     def note_false_interruption(self, *, resumed: bool) -> None:
         """Agent was paused by noise/cough, then resumed — do not treat that audio as an answer."""
@@ -420,10 +482,13 @@ class InterviewAgent(Agent):
         if settle > 0:
             await asyncio.sleep(settle)
         self._listening_armed = True
+        # Opening used a mic mute; reopen only after settle so residual noise is ignored.
+        self._set_candidate_mic(True, reason=reason)
         # Ignore echo / residual opening audio so we do not treat it as the candidate answering.
+        # Keep this short so a real answer is not dropped; answer debounce stays in _gpt_live_settle_s.
         if self._gpt_live:
             try:
-                self._gpt_live_ignore_until = asyncio.get_running_loop().time() + max(2.0, settle + 1.5)
+                self._gpt_live_ignore_until = asyncio.get_running_loop().time() + max(1.2, settle + 0.8)
             except RuntimeError:
                 pass
         logger.info("listening armed reason=%s settle=%.2fs", reason, settle)
@@ -604,41 +669,54 @@ class InterviewAgent(Agent):
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
             self._empathy_hint = self._current_tone in ("gentle", "reassuring")
-            block = bool(get_settings().opening_block_interruptions) and move.kind == "opening"
+            # Opening must never wait on / yield to ambient mic noise.
+            block = move.kind == "opening" and bool(get_settings().opening_block_interruptions)
+            if move.kind == "opening":
+                self._gate_opening_input()
             if self._gpt_live:
                 # GPT-Live has no half-cascade: session.say() needs a separate TTS. Use commentary.
                 reply_kwargs: dict[str, Any] = {
                     "instructions": _gpt_live_commentary(move, self.flow.state.language),
                 }
-                # GPT-Live ignores allow_interruptions=False (server turn detection) — still request it.
+                # Still request no barge-in; mic is muted until listening is armed.
                 if move.kind == "opening":
-                    reply_kwargs["allow_interruptions"] = not block
+                    reply_kwargs["allow_interruptions"] = False
                 reply_handle = self.session.generate_reply(**reply_kwargs)
                 await self._await_playout(reply_handle)
                 if move.kind == "opening":
-                    # Do NOT append_instructions mid-opening — that glitches/stops the next beats.
-                    await self._gpt_live_wait_quiet(min_quiet_s=1.3, timeout_s=14.0)
-                    self._gpt_live_push_focus_lock()
+                    # Wait out multi-beat openings. 0.55s was too short: quiet gap between
+                    # greeting beats → focus_lock / retry re-asked the same question.
+                    await self._gpt_live_wait_quiet(min_quiet_s=1.6, timeout_s=14.0)
+                    self._gpt_live_push_listen_hold(reason="opening_complete")
                     await self._arm_listening(reason="opening_complete")
                 else:
-                    self._gpt_live_push_focus_lock()
+                    await self._gpt_live_wait_quiet(min_quiet_s=1.2, timeout_s=12.0)
+                    self._gpt_live_push_listen_hold(reason=move.kind)
                 return
             if move.kind == "opening":
-                # Speak the greeting word immediately so first audio is not blocked on the LLM.
+                # Speak the greeting word immediately; start the LLM while seed plays.
                 seed = opening_seed(
                     self.flow.state.language,
                     elevenlabs=self._tts_provider == "elevenlabs",
                     engine=self._expressiveness_mode == "engine",
                 )
-                await self._await_playout(self.session.say(seed, allow_interruptions=not block))
-            reply_kwargs = {"instructions": f"CONTROLLER DIRECTIVE: {move.directive}"}
-            if move.kind == "opening":
-                reply_kwargs["allow_interruptions"] = not block
-            reply_handle = self.session.generate_reply(**reply_kwargs)
-            await self._await_playout(reply_handle)
-            if move.kind == "opening":
+                seed_handle = self.session.say(seed, allow_interruptions=not block)
+                directive_text = (
+                    f"CONTROLLER DIRECTIVE: {move.directive}\n"
+                    f"{native_script_reminder(self.flow.state.language)}"
+                )
+                reply_handle = self.session.generate_reply(
+                    instructions=directive_text,
+                    allow_interruptions=not block,
+                )
+                await self._await_playout(seed_handle)
+                await self._await_playout(reply_handle)
                 # Playout already finished — do NOT poll agent_state (that used to hang ~45s).
                 await self._arm_listening(reason="opening_complete")
+            else:
+                directive_text = f"CONTROLLER DIRECTIVE: {move.directive}"
+                reply_handle = self.session.generate_reply(instructions=directive_text)
+                await self._await_playout(reply_handle)
         except Exception:  # noqa: BLE001
             logger.exception("generate_reply failed for %s", move.kind)
             if move.kind == "opening" and not self._listening_armed:
@@ -713,10 +791,10 @@ class InterviewAgent(Agent):
         """Longer silence for phone / multi-fact answers so we do not cut them mid-speech."""
         kinds = self.flow.short_answer_kinds()
         if kinds and all(k == "phone" for k in kinds):
-            return 2.4
+            return 1.7
         ftype = (self.flow.state.focus or {}).get("type") or ""
         if ftype in ("clinical", "experience_dive"):
-            return 2.2
+            return 1.5
         return self._gpt_live_drive_settle_s
 
     def _gpt_live_user_from_chat(self) -> str:
@@ -787,6 +865,25 @@ class InterviewAgent(Agent):
             logger.info("GPT-Live focus_lock %s", summary[:160])
         except Exception:  # noqa: BLE001
             logger.exception("GPT-Live focus lock append failed")
+
+    def _gpt_live_push_listen_hold(self, *, reason: str) -> None:
+        """After we asked something: lock focus silently and forbid repeating the question.
+
+        Thinking-only — append_instructions/commentary right after a question can make
+        GPT-Live speak again (double-ask within ~0.5s).
+        """
+        duplex = getattr(self, "duplex_session", None)
+        if duplex is None:
+            return
+        summary = self.flow.focus_lock_summary()
+        try:
+            duplex.append_thinking(
+                f"{_GPT_LIVE_FOCUS_LOCK_INSTRUCTIONS} {_GPT_LIVE_LISTEN_HOLD} "
+                f"Current focus: {summary} (reason={reason})"
+            )
+            logger.info("GPT-Live listen_hold reason=%s focus=%s", reason, summary[:120])
+        except Exception:  # noqa: BLE001
+            logger.exception("GPT-Live listen_hold failed")
 
     def _gpt_live_append(self, commentary: str, *, delegation_id: str | None = None) -> None:
         duplex = getattr(self, "duplex_session", None)
@@ -942,12 +1039,23 @@ class InterviewAgent(Agent):
 
         # Phase 2: one CONTROLLER DIRECTIVE only (no generate_reply double-speak).
         self._gpt_live_append(_gpt_live_commentary(move, self.flow.state.language), delegation_id=delegation_id)
-        self._gpt_live_push_focus_lock()
-        # Ignore echo / barge-in scraps while the model speaks the next question.
+        # Ignore echo while the model speaks; listen-hold after quiet (not immediately —
+        # immediate append_instructions was causing a second spoken ask).
         try:
-            self._gpt_live_ignore_until = asyncio.get_running_loop().time() + 2.0
+            self._gpt_live_ignore_until = asyncio.get_running_loop().time() + 3.0
         except RuntimeError:
             self._gpt_live_ignore_until = 0.0
+
+        async def _hold_after_speak() -> None:
+            await self._gpt_live_wait_quiet(min_quiet_s=1.2, timeout_s=12.0)
+            self._gpt_live_push_listen_hold(reason=f"after_{move.kind}")
+            try:
+                # Brief echo window only; answer debounce stays at _gpt_live_settle_s.
+                self._gpt_live_ignore_until = asyncio.get_running_loop().time() + 1.0
+            except RuntimeError:
+                pass
+
+        self.spawn(_hold_after_speak())
         if self.latency is not None:
             self.latency.on_hook_end()
         self._finish_if_needed(move)
@@ -1032,12 +1140,16 @@ class InterviewAgent(Agent):
         resuming = self.flow.state.stage != "opening"
         if resuming:
             self._listening_armed = True
+            self._set_candidate_mic(True, reason="resume")
             for turn in self.plan.recent_transcript:
                 if turn["role"] == "assistant":
                     self.director.note_assistant(turn["text"])
                 else:
                     self.director.note_user(turn["text"])
             await self._rehydrate()
+        else:
+            # Drop ambient STT/VAD so ward noise cannot delay or barge the greeting.
+            self._gate_opening_input()
         move = self.flow.resume() if resuming else self.flow.opening()
         # Don't block first audio on analytics — speak immediately.
         self.spawn(
@@ -1048,6 +1160,7 @@ class InterviewAgent(Agent):
                     "resumed": resuming,
                     "stage": self.flow.state.stage,
                     "voice_provider": "gpt_live" if self._gpt_live else "cascade",
+                    "opening_mic_gated": not resuming,
                 },
             )
         )
@@ -1270,10 +1383,26 @@ async def _run_gpt_live_session(
     )
     director._is_listening_armed = agent.is_listening_armed
 
-    session = AgentSession(
-        llm=llm,
-        user_away_timeout=float(settings.silence_nudge_seconds),
-    )
+    try:
+        session = AgentSession(
+            llm=llm,
+            user_away_timeout=float(settings.silence_nudge_seconds),
+            discard_audio_if_uninterruptible=True,
+            # Default 3s AEC warmup after first remote audio delays barge-in setup; keep short.
+            aec_warmup_duration=0.5,
+        )
+    except TypeError:
+        try:
+            session = AgentSession(
+                llm=llm,
+                user_away_timeout=float(settings.silence_nudge_seconds),
+                discard_audio_if_uninterruptible=True,
+            )
+        except TypeError:
+            session = AgentSession(
+                llm=llm,
+                user_away_timeout=float(settings.silence_nudge_seconds),
+            )
     session_ref["session"] = session
 
     watchdog = TurnWatchdog(
@@ -1282,6 +1411,7 @@ async def _run_gpt_live_session(
         interview_id=interview_id,
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
+        get_language=lambda: agent.flow.state.language,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -1538,6 +1668,8 @@ async def entrypoint(ctx: JobContext) -> None:
         "vad": vad,
         # Marks the candidate "away" after this much quiet; SilenceMonitor turns that into escalating nudges.
         "user_away_timeout": float(settings.silence_nudge_seconds),
+        # While opening uses allow_interruptions=False, drop buffered ward noise instead of queuing it.
+        "discard_audio_if_uninterruptible": True,
     }
     # Needs both VAD and STT: fires when speech was heard but no transcript arrived.
     transcription_timeout = (
@@ -1587,6 +1719,7 @@ async def entrypoint(ctx: JobContext) -> None:
         interview_id=interview_id,
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
+        get_language=lambda: agent.flow.state.language,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -1771,8 +1904,17 @@ def prewarm(proc: JobProcess) -> None:
     for provider in providers:
         try:
             tts = build_tts("hi-IN", settings, provider=provider)
-            if hasattr(tts, "prewarm"):
-                tts.prewarm()
+            prewarm_fn = getattr(tts, "prewarm", None)
+            if callable(prewarm_fn):
+                result = prewarm_fn()
+                # Sync prewarm hooks may return a coroutine before the job loop exists.
+                if asyncio.iscoroutine(result):
+                    try:
+                        asyncio.run(result)
+                    except RuntimeError:
+                        result.close()
+                        logger.info("TTS prewarm deferred (no loop) provider=%s", provider)
+                        continue
             proc.userdata["tts_prewarmed"] = True
             logger.info("TTS prewarmed provider=%s", provider)
         except Exception as err:  # noqa: BLE001

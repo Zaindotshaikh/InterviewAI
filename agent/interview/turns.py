@@ -23,6 +23,7 @@ from collections.abc import Callable
 from typing import Any
 
 from config import Settings
+from interview.language import native_script_reminder
 
 logger = logging.getLogger("interview-v2.turns")
 
@@ -138,12 +139,14 @@ class TurnWatchdog:
         interview_id: str,
         settings: Settings,
         is_listening_armed: Callable[[], bool] | None = None,
+        get_language: Callable[[], str] | None = None,
     ) -> None:
         self._session = session
         self._backend = backend
         self._interview_id = interview_id
         self._settings = settings
         self._is_listening_armed = is_listening_armed
+        self._get_language = get_language
         self._eou_delays: list[float] = []
         self._counters = {
             "transcription_timeouts": 0,
@@ -237,7 +240,12 @@ class TurnWatchdog:
         if not self._armed():
             return
         try:
-            self._session.generate_reply(instructions=REPEAT_DIRECTIVE)
+            instructions = REPEAT_DIRECTIVE
+            if self._get_language is not None:
+                lang = self._get_language()
+                if lang:
+                    instructions = f"{REPEAT_DIRECTIVE}\n{native_script_reminder(lang)}"
+            self._session.generate_reply(instructions=instructions)
             self._counters["repeat_prompts"] += 1
         except Exception:  # noqa: BLE001
             logger.exception("could not ask the candidate to repeat")

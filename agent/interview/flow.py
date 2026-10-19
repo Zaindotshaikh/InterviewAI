@@ -22,8 +22,10 @@ from interview.analysis import (
 )
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
+from interview.language import get_profile
 from interview.normalize import normalize_field, spoken_groups
 from interview.plan import InterviewPlan
+from interview.prompts import opening_seed
 
 NEGATIVE_STANCES = ("hesitant", "refuses")
 LOW_CONFIDENCE = 0.6
@@ -311,12 +313,20 @@ class InterviewFlow:
         st.stage = "screening"
         first = self._screening_next([])
         ask = first.directive.removesuffix(f"\n{STYLE_FOOTER}")
+        lang = (st.language or self.plan.language or "en-IN").strip()
+        profile = get_profile(lang)
+        seed_word = opening_seed(lang).replace("…", "").strip()
+        lang_note = (
+            f"Speak in everyday spoken {profile.label} (native script). Do NOT switch to Hindi."
+            if not lang.startswith("en")
+            else "Speak in clear Indian English."
+        )
         greeting = (
-            f"OPENING CONTINUATION — the greeting word (नमस्ते / नमस्कार / Hello) was ALREADY spoken aloud. "
+            f"OPENING CONTINUATION — the greeting word ({seed_word}) was ALREADY spoken aloud. "
             f"Do NOT say it again.\n"
             f"- Greet {name} by name and say you are {self.plan.interviewer_name} from "
             f"{self.plan.company_name} — one short sentence, then a pause.\n"
-            f"- Optional one short beat: Hindi/English/mix is fine. Do NOT say 'two-part chat', "
+            f"- {lang_note} Optional one short beat: {profile.label}/English mix is fine. Do NOT say 'two-part chat', "
             f"'no trick questions', or any long process explanation.\n"
             f"- Then ask ONLY this first question: {ask}\n"
             f"- Keep it SHORT and HUMAN: 2–3 very short sentences total (not one long paragraph). "

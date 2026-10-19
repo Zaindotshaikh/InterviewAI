@@ -85,3 +85,17 @@ export type V2Scorecard = {
     }[];
   };
 };
+
+export type V2TranscriptTurn = {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+};
+
+export type V2TranscriptResponse = {
+  id: string;
+  candidateName: string;
+  roleTitle: string;
+  language?: string;
+  turns: V2TranscriptTurn[];
+};

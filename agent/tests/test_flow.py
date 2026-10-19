@@ -25,10 +25,10 @@ def blueprint() -> Blueprint:
     return Blueprint.from_api(json.loads(BLUEPRINT_PATH.read_text(encoding="utf-8")))
 
 
-def make_plan(resume: str = "") -> InterviewPlan:
+def make_plan(resume: str = "", language: str = "hi-IN") -> InterviewPlan:
     return InterviewPlan(
         interview_id="t1",
-        language="hi-IN",
+        language=language,
         stt_mode="codemix",
         target_minutes=20,
         company_name="Kreeda Labs",
@@ -52,9 +52,9 @@ class Clock:
         return self.t
 
 
-def make_flow(blueprint, state=None, resume=""):
+def make_flow(blueprint, state=None, resume="", language: str = "hi-IN"):
     clock = Clock()
-    return InterviewFlow(make_plan(resume), blueprint, state, clock=clock), clock
+    return InterviewFlow(make_plan(resume, language=language), blueprint, state, clock=clock), clock
 
 
 def say(*updates: tuple[str, str], **kw) -> TurnAnalysis:
@@ -95,6 +95,16 @@ def test_opening_greets_and_asks_the_first_screening_question(blueprint):
     move = flow.opening()
     assert flow.stage == "screening"
     assert "Priya" in move.directive and "city" in move.directive.lower()
+
+
+def test_opening_gujarati_uses_gujarati_script_and_no_hindi(blueprint):
+    flow, _ = make_flow(blueprint, language="gu-IN")
+    move = flow.opening()
+    assert flow.stage == "screening"
+    assert "નમસ્તે" in move.directive
+    assert "Gujarati" in move.directive
+    assert "Hindi/English/mix is fine" not in move.directive
+    assert "नमस्ते" not in move.directive
 
 
 def test_short_answers_ready_by_focus_not_fixed_length(blueprint):

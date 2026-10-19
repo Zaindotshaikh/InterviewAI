@@ -371,6 +371,31 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+/** Full spoken transcript for download / review (candidate join routes). */
+router.get("/:id/transcript", async (req, res) => {
+  try {
+    const record = await getV2Interview(req.params.id);
+    if (!record) {
+      res.status(404).json({ error: "Interview not found" });
+      return;
+    }
+    res.json({
+      id: record.interview.id,
+      candidateName: record.interview.candidateName,
+      roleTitle: record.interview.roleTitle,
+      language: record.extras.language,
+      turns: record.interview.transcript.map((t) => ({
+        role: t.role,
+        text: t.text,
+        timestamp: t.timestamp,
+      })),
+    });
+  } catch (err) {
+    console.error("[v2] transcript error:", err);
+    res.status(500).json({ error: "Failed to load transcript" });
+  }
+});
+
 router.post("/:id/summary", async (req, res) => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {

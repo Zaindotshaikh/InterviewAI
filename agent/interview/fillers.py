@@ -50,12 +50,13 @@ ACKS_NEUTRAL: dict[str, list[str]] = {
 ACKS_EMPATHETIC: dict[str, list[str]] = {
     "hi-IN": ["कोई बात नहीं.", "समझ सकती हूँ.", "ठहरिए, कोई जल्दी नहीं.", "हाँ, ठीक है धीरे से."],
     "mr-IN": ["काही हरकत नाही.", "समजू शकते.", "हळूच सांगा.", "बरं, घाई नको."],
+    "gu-IN": ["કોઈ વાંધો નહીં.", "સમજી શકું છું.", "શાંતિથી કહો, કોઈ ઉતાવળ નથી.", "હા, બરાબર છે."],
     "en-IN": ["That's okay.", "No rush.", "I understand.", "Take your time."],
 }
 
 # Backward-compatible alias (neutral list).
 ACKS: dict[str, list[str]] = ACKS_NEUTRAL
-REVIEWED_FILLER_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN"})
+REVIEWED_FILLER_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN", "gu-IN"})
 
 MIN_WORDS_FOR_FILLER = 4
 MIN_VOICED_SECONDS = 0.15

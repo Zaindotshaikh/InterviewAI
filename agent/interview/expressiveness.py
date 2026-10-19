@@ -16,19 +16,21 @@ _SENTENCE_END = re.compile(r"(?<!\.)[.?!।॥](?!\.)[\"')\]]*\s+")
 _ANY_TAG = re.compile(r"\[[^\]]+\]")
 _ELLIPSIS = re.compile(r"\s*\.\.\.\s*")
 
-# Per-language forms. Only hi / mr / en marked reviewed; others fall back to hi/en.
-REVIEWED_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN"})
+# Per-language forms.
+REVIEWED_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN", "gu-IN"})
 
 _SIGH: dict[str, str] = {
     "hi-IN": "आह, ",
     "mr-IN": "अरे, ",
+    "gu-IN": "અરે, ",
     "en-IN": "[sighs] ",
 }
 
 _EMPATHY_WORDS = re.compile(
     r"\b(no|not|never|uncomfortable|scared|afraid|nervous|don'?t|cant|can'?t|"
     r"नहीं|नही|डरा|डर|परेशान|मुश्किल|"
-    r"नाही|नको|भीती|अवघड)\b",
+    r"नाही|नको|भीती|अवघड|"
+    r"નથી|બીક|ડર|મુશ્કેલ|ગભરાયેલ|ચિંતા)\b",
     re.I,
 )
 

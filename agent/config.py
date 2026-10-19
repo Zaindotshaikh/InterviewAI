@@ -77,9 +77,11 @@ class Settings(BaseSettings):
     # ElevenLabs (opt-in via /elevenlabs-interviewer or TTS_PROVIDER=elevenlabs)
     elevenlabs_api_key: str | None = None
     # Default English voice: Sarah (premade — works on free API).
-    elevenlabs_voice_id: str = "EXAVITQu4vr4xnSDxMaL"
-    # Indic languages: Alice (premade, free API). Sujata (4mCfn38CsM9hGLvDrPxv) needs a paid plan.
-    elevenlabs_voice_id_local: str = "Xb7hH8MSUJpSbSDYk0k2"
+    # Sujata for every language (EN + Indic) so the interviewer never switches voices mid-call.
+    elevenlabs_voice_id: str = "4mCfn38CsM9hGLvDrPxv"
+    elevenlabs_voice_id_local: str = "4mCfn38CsM9hGLvDrPxv"
+    # Optional per-language overrides only if you deliberately want to break the single-voice rule.
+    elevenlabs_voice_by_lang: str = ""
     # eleven_v4_turbo = realtime (~100ms); eleven_v4 = max quality (slower). Both support 90+ languages.
     elevenlabs_model: str = "eleven_v4_turbo"
     aic_sdk_license: str | None = None
@@ -127,7 +129,7 @@ class Settings(BaseSettings):
     reconnect_grace_seconds: int = 120
     silence_end_seconds: int = 90
     max_consecutive_noise: int = 3
-    vad_min_silence_ms: int = 400
+    vad_min_silence_ms: int = 280
     vad_min_speech_ms: int = 100
     vad_sot_threshold: float = 0.6
     # Words of real STT needed before barge-in (1 lets ward TV / door noise stop the agent).
@@ -143,12 +145,12 @@ class Settings(BaseSettings):
     # "dynamic" learns each candidate's own pause length during the call; "fixed" never adapts.
     endpointing_mode: Literal["fixed", "dynamic"] = "dynamic"
     # Floor (s) of silence before replying, for languages the end-of-turn model covers (Hindi, English).
-    endpointing_min_delay: float = 0.4
+    endpointing_min_delay: float = 0.25
     # Higher floor for languages it does not cover (Marathi, Tamil, Telugu, Kannada, Malayalam),
     # where silence is the only signal and candidates pause more to find words.
-    endpointing_min_delay_uncovered: float = 0.8
+    endpointing_min_delay_uncovered: float = 0.55
     # Longest silence (s) the agent will wait while the candidate still seems mid-thought.
-    endpointing_max_delay: float = 3.0
+    endpointing_max_delay: float = 2.3
     # Dynamic mode adaptation speed: lower learns the candidate's pauses faster (0 < alpha <= 1).
     endpointing_alpha: float = 0.7
     # "adaptive" tells "mm-hmm"/coughs from real interruptions; falls back to "vad" on its own if it errors.
@@ -163,7 +165,7 @@ class Settings(BaseSettings):
     # Block barge-in during the opening greeting so ambient noise cannot skip the intro.
     opening_block_interruptions: bool = True
     # After the greeting finishes, wait this long before accepting candidate answers (settle room noise).
-    opening_settle_seconds: float = 0.8
+    opening_settle_seconds: float = 0.35
 
     # Chance of a short native reaction ("बरं.", "अच्छा.") in the interview voice after the candidate finishes, 0 disables
     thinking_filler_probability: float = 0.6
@@ -241,6 +243,7 @@ def get_settings() -> Settings:
         "ELEVEN_API_KEY": "elevenlabs_api_key",
         "ELEVENLABS_VOICE_ID": "elevenlabs_voice_id",
         "ELEVENLABS_VOICE_ID_LOCAL": "elevenlabs_voice_id_local",
+        "ELEVENLABS_VOICE_BY_LANG": "elevenlabs_voice_by_lang",
         "ELEVENLABS_MODEL": "elevenlabs_model",
         "AIC_SDK_LICENSE": "aic_sdk_license",
         "BACKEND_URL": "backend_url",

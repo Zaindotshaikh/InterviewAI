@@ -16,3 +16,24 @@ def test_telugu_detection():
 def test_speaker_map():
     assert get_profile("ml-IN").tts_speaker == "pooja"
     assert get_profile("hi-IN").stt_mode == "codemix"
+    assert get_profile("gu-IN").label == "Gujarati"
+
+
+def test_gujarati_opening_seed():
+    from interview.prompts import opening_seed
+    assert "નમસ્તે" in opening_seed("gu-IN")
+    assert "નમસ્તે" in opening_seed("gu-IN", elevenlabs=True)
+    assert "[warmly]" in opening_seed("gu-IN", elevenlabs=True)
+    assert "नमस्ते" not in opening_seed("gu-IN")
+
+
+def test_elevenlabs_voice_is_sujata_for_every_language():
+    from config import Settings
+    from providers import elevenlabs_voice_for
+
+    sujata = "4mCfn38CsM9hGLvDrPxv"
+    s = Settings(elevenlabs_voice_id=sujata, elevenlabs_voice_id_local=sujata)
+    assert elevenlabs_voice_for("en-IN", s) == sujata
+    assert elevenlabs_voice_for("hi-IN", s) == sujata
+    assert elevenlabs_voice_for("gu-IN", s) == sujata
+    assert elevenlabs_voice_for("mr-IN", s) == sujata
