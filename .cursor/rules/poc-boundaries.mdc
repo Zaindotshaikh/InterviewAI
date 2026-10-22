@@ -1,0 +1,14 @@
+---
+description: Demo and score only /elevenlabs-interviewer. Director and InterviewFlow choose the next move. Language stays on LanguagePicker. No secrets. Do not re-plan the POC.
+alwaysApply: true
+---
+
+# POC boundaries
+
+- Demo and score /elevenlabs-interviewer only. Do not collect language, policy, or clinical feedback on /gpt-live-interviewer, v1 /i/:token, or /avatar-interviewer.
+- Director and InterviewFlow choose the next move. Scribe and ElevenLabs are the voice. Do not move policy into the voice model.
+- Language is the existing join-screen LanguagePicker. Do not detect language from hello and do not add a spoken language question in Phase 1.
+- No secrets in chat, docs, rules, skills, or commits. Name env vars only.
+- Deferred ideas are appended as short pointers in docs/future-scope.md.
+- Do not paste docs into chat. Status lives in docs/phase-1-tracker.md. Read docs/poc-implementation-plan.md only when planning. Read docs/voice-poc-approach.md only if a check failed or a provider might change.
+- Do not re-plan the whole POC unless asked.
