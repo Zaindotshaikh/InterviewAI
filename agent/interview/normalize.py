@@ -98,6 +98,91 @@ def _check_height(cm: int) -> Normalized:
     return Normalized(True, cm)
 
 
+_HEIGHT_UNIT = re.compile(
+    r"\b(?:cm|cms|centimet(?:er|re)s?|height)\b|सेंटीमीटर|सेन्टीमीटर|सेमी|कद|ऊंचाई|ऊँचाई",
+    re.IGNORECASE,
+)
+_WEIGHT_UNIT = re.compile(
+    r"\b(?:kg|kgs|kilo|kilos|kilograms?|weight)\b|किलो|किलोग्राम|वजन",
+    re.IGNORECASE,
+)
+_FEET_UNIT = re.compile(r"\b(?:feet|foot|ft)\b|फुट|फीट|'", re.IGNORECASE)
+_BODY_SPLIT = re.compile(r"\b(?:and|aur)\b|और|,|।", re.IGNORECASE)
+
+
+def _chunk_measure(chunk: str) -> tuple[str, int | None]:
+    """('height'|'weight'|'', number) from one part of a sentence."""
+    from interview.phone_speech import parse_spoken_phone
+
+    text = chunk.strip()
+    if not text:
+        return "", None
+    kind = "height" if _HEIGHT_UNIT.search(text) else "weight" if _WEIGHT_UNIT.search(text) else ""
+    if _FEET_UNIT.search(text):
+        height = normalize_height_cm(text)
+        if height.ok:
+            return "height", int(height.value)
+    spoken = parse_spoken_phone(text)
+    if spoken.isdigit() and 1 <= len(spoken) <= 3:
+        return kind, int(spoken)
+    nums = re.findall(r"\d+", text)
+    if len(nums) == 1:
+        return kind, int(nums[0])
+    return kind, None
+
+
+def _near_kind(text: str, start: int, end: int) -> str:
+    after = text[end : end + 18]
+    before = text[max(0, start - 18) : start]
+    if _HEIGHT_UNIT.search(after):
+        return "height"
+    if _WEIGHT_UNIT.search(after):
+        return "weight"
+    if _HEIGHT_UNIT.search(before):
+        return "height"
+    if _WEIGHT_UNIT.search(before):
+        return "weight"
+    return ""
+
+
+def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
+    """Pull height in cm and weight in kg out of one answer.
+
+    '50 kg and 144 cm' and '144 cm और 50 किलो' both come back as (144, 50).
+    A number is only stored when its unit or its range says which one it is.
+    """
+    raw = str(text or "")
+    height: int | None = None
+    weight: int | None = None
+    for match in re.finditer(r"\d{2,3}", raw):
+        number = int(match.group(0))
+        kind = _near_kind(raw, match.start(), match.end())
+        if kind == "height" and height is None and 120 <= number <= 210:
+            height = number
+        elif kind == "weight" and weight is None and 30 <= number <= 200:
+            weight = number
+    if height is not None and weight is not None:
+        return height, weight
+    bare: list[int] = []
+    parts = [p for p in _BODY_SPLIT.split(raw) if p.strip()] or [raw]
+    for part in parts:
+        kind, number = _chunk_measure(part)
+        if number is None:
+            continue
+        if kind == "height" and height is None and 120 <= number <= 210:
+            height = number
+        elif kind == "weight" and weight is None and 30 <= number <= 200:
+            weight = number
+        elif kind == "":
+            bare.append(number)
+    for number in bare:
+        if height is None and 120 <= number <= 210:
+            height = number
+        elif weight is None and 30 <= number < 120:
+            weight = number
+    return height, weight
+
+
 def normalize_weight_kg(raw: Any) -> Normalized:
     text = str(raw or "").lower()
     nums = re.findall(r"\d+(?:\.\d+)?", text)

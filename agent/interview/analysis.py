@@ -95,6 +95,8 @@ class TurnAnalysis:
     raw_utterance: str = ""
     # Digits resolved from speech (groups, mixed language, or a correction). Empty if unused.
     phone_resolved: str = ""
+    # Second hearing, used only when the word list missed part of a number.
+    phone_hint: str = ""
     source: str = "llm"  # llm | heuristic
     # Optional (DIRECTOR_EMPATHY_TONE=true): gentle | reassuring | "" — never required.
     empathy_tone: str = ""
@@ -297,8 +299,9 @@ nervousness.
 
 ## Consistency
 - new_claims: short factual claims the candidate makes now about their own background or experience.
-- contradictions: a new statement that conflicts with known_claims, known_facts or resume_summary (claim_a = earlier,
-  claim_b = now, note = why). Rounding or rephrasing is not a contradiction.
+- contradictions: only when this utterance conflicts with something the candidate already said in this call
+  (known_claims or known_facts). The resume is background, not something they said. Leave contradictions empty
+  unless both sides were spoken by them. Rounding or rephrasing is not a contradiction.
 
 If a section does not apply, return empty arrays, "none" or false for it."""
 
@@ -376,6 +379,13 @@ def looks_like_care_consent(text: str) -> bool:
         return False
     if _CARE_DOMAIN.search(t):
         return True
+    # "Yes, all of that" on the hands-on list is consent, even without naming each duty.
+    if _CARE_YES.search(t) and re.search(
+        r"\b(?:all|everything|these|those)\b|सब|सभी|सारे|सगळ|எல்லா|అన్నీ|ಎಲ್ಲ|എല്ലാ",
+        t,
+        re.IGNORECASE,
+    ):
+        return not _EXPERIENCE_DUMP.search(t)
     # Short clear yes/ready on a single-item persuasion is fine.
     if len(t) <= 48 and _CARE_YES.search(t) and not _EXPERIENCE_DUMP.search(t):
         return True
@@ -585,3 +595,40 @@ class TurnAnalyzer:
             self.failures += 1
             logger.warning("turn analysis failed (%s): %s", type(err).__name__, err)
             return fallback
+
+    async def hear_phone_digits(self, utterance: str) -> str:
+        """Digits they actually said. Empty when there is no number or the call fails.
+
+        Used when the sentence has words, in any language or grouping.
+        The model is told not to fill in digits that were not spoken.
+        """
+        text = (utterance or "").strip()
+        if not text or not self.available:
+            return ""
+        try:
+            resp = await asyncio.wait_for(
+                self._get_client().chat.completions.create(
+                    model=self._model,
+                    temperature=0,
+                    max_tokens=24,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "The person is saying a mobile number, in any language and any grouping. "
+                                "Return only the digits they actually said, in order, with no spaces. "
+                                "Examples: eighty-seven is 87, saade teen so is 350, chaar so chalees is 440, nauvad is 90. "
+                                "Do not add, complete, or guess missing digits. "
+                                "If they did not say a number, return nothing."
+                            ),
+                        },
+                        {"role": "user", "content": text[:400]},
+                    ],
+                ),
+                timeout=2.5,
+            )
+            raw = resp.choices[0].message.content or ""
+        except Exception:  # noqa: BLE001
+            logger.debug("phone digit check skipped", exc_info=True)
+            return ""
+        return re.sub(r"\D", "", raw)[:13]

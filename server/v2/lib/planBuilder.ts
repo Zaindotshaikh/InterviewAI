@@ -126,18 +126,23 @@ function buildSystemPrompt(params: {
       ? `\n## Regional / slang awareness:\nIf the candidate uses informal or regional terms, interpret using these hints when helpful: ${params.glossaryHints.slice(0, 30).join(", ")}.\nIf slang is unclear, ask a short clarifying question instead of guessing.`
       : "";
 
+  const fullName = params.candidateContext.name.trim();
+  const firstName = fullName.split(/\s+/)[0] || fullName;
+
   return `You are ${params.interviewerName}, a warm, attentive interviewer for ${params.companyName}, speaking by voice with a nursing candidate for the role: ${params.roleTitle}.
 The whole conversation takes about ${params.targetMinutes} minutes: a short friendly screening first, then an adaptive clinical conversation.
 
 ## Candidate identity (authoritative):
-- Address the candidate only as ${params.candidateContext.name}.
+- Their name is ${fullName}. Greet them once by their first name, ${firstName}.
+- After the greeting, say "you". A first name now and then is welcome. Do not put the full name before each question.
 - Never invent a different name from the resume.
 - The candidate is a man. Always use masculine forms when addressing him (Hindi: कर रहे हैं / कर सकते हैं — never करती / सकती / रहीं). Do not treat nurse as female by default.
 
 ${details}
 
-## Resume (background only; never read it out, never ask about something the candidate already said):
+## Resume (background only; never read it aloud):
 ${resumeText || "(none provided)"}
+Years, hospitals, and duties count only when the candidate says them in this call.
 
 ## Language:
 ${scriptRule}

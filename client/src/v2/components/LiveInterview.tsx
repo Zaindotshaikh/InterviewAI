@@ -236,7 +236,7 @@ export default function LiveInterview({
         }}
       />
 
-      <header className="relative z-10 flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-accent)]/15 bg-black/35 px-4 py-2.5 backdrop-blur-md sm:px-5">
+      <header className="relative z-10 flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-2.5 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <div className="grid h-8 w-8 place-items-center rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/15 text-[11px] font-bold tracking-wider text-[var(--color-accent)]">
             K
@@ -246,9 +246,9 @@ export default function LiveInterview({
               {COMPANY_NAME} · live link
             </p>
             <p className="truncate text-sm text-[var(--color-fg)]">{session.roleTitle}</p>
-            <p className="truncate text-[10px] text-white/70">
+            <p className="truncate text-[10px] text-[var(--color-muted)]">
               <span className="tracking-[0.14em] text-[var(--color-accent)] uppercase">Interview id </span>
-              <span className="select-all font-mono text-[11px] text-white/90">{session.id}</span>
+              <span className="select-all font-mono text-[11px] text-[var(--color-fg)]">{session.id}</span>
             </p>
           </div>
         </div>
@@ -263,7 +263,7 @@ export default function LiveInterview({
           <span className="hidden tabular-nums text-sm tracking-wider text-[var(--color-fg)]/85 sm:inline">
             {formatTime(elapsedSec)}
           </span>
-          <ThemeToggle className="border-[var(--color-accent)]/20 bg-black/40" />
+          <ThemeToggle />
         </div>
       </header>
 

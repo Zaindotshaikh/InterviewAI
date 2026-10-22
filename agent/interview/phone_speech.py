@@ -1,147 +1,32 @@
-"""Turn a spoken mobile number into digits.
+"""Turn what the candidate said into the digits to store.
 
-Candidates mix languages, say pairs (chappan baawan = 56 52), and use hundreds or
-thousands. This walks the utterance left to right and concatenates those groups.
+Digit characters are copied as spoken. Words, in any language or grouping, are
+not looked up in a spelling list. The hearing of that sentence is passed in
+and stored when it is the number they said.
 """
 
 from __future__ import annotations
 
 import re
 
-_DIGIT_CHARS = str.maketrans("०१२३४५६७८९", "0123456789")
 
-# Single digits. Ambiguous English words (do, be, so) are listed separately.
-_UNITS: dict[str, int] = {}
-for _word, _n in (
-    ("zero", 0), ("oh", 0), ("shunya", 0), ("shoonya", 0), ("sunna", 0), ("sonne", 0),
-    ("sifar", 0), ("poojyam", 0), ("shunno", 0), ("शून्य", 0), ("सुन्ना", 0),
-    ("one", 1), ("ek", 1), ("ikk", 1), ("okati", 1), ("ondu", 1), ("onnu", 1), ("onru", 1),
-    ("eka", 1), ("एक", 1), ("ఒకటి", 1),
-    ("two", 2), ("don", 2), ("rendu", 2), ("eradu", 2), ("randu", 2), ("irandu", 2),
-    ("dui", 2), ("दो", 2), ("दोन", 2),
-    ("three", 3), ("teen", 3), ("tin", 3), ("tinn", 3), ("tini", 3), ("moodu", 3),
-    ("mooru", 3), ("moonnu", 3), ("moondru", 3), ("tran", 3), ("तीन", 3), ("तीनि", 3),
-    ("four", 4), ("char", 4), ("chaar", 4), ("chari", 4), ("naalugu", 4), ("naalku", 4),
-    ("naalu", 4), ("naangu", 4), ("चार", 4),
-    ("five", 5), ("paanch", 5), ("panch", 5), ("paach", 5), ("pancha", 5), ("panj", 5),
-    ("aidu", 5), ("ainthu", 5), ("anchu", 5), ("पाँच", 5), ("पांच", 5), ("पाच", 5),
-    ("six", 6), ("chhe", 6), ("che", 6), ("chhah", 6), ("chha", 6), ("choy", 6), ("saha", 6),
-    ("aaru", 6), ("छह", 6), ("छे", 6),
-    ("seven", 7), ("saat", 7), ("sat", 7), ("satt", 7), ("sata", 7), ("edu", 7), ("elu", 7),
-    ("ezhu", 7), ("सात", 7),
-    ("eight", 8), ("aath", 8), ("aat", 8), ("ath", 8), ("atha", 8), ("enimidi", 8),
-    ("entu", 8), ("ettu", 8), ("आठ", 8),
-    ("nine", 9), ("nau", 9), ("nao", 9), ("nav", 9), ("naa", 9), ("noy", 9),
-    ("tommidi", 9), ("ombhattu", 9), ("onpathu", 9), ("नौ", 9),
-):
-    _UNITS[_word] = _n
+def _script_digits(start: int) -> str:
+    return "".join(chr(start + i) for i in range(10))
 
-# "do" / "be" are 2 in Hindi and Gujarati, and ordinary English words. Use them
-# only once the utterance already has another number.
-_AMBIGUOUS_UNITS = {"do": 2, "be": 2}
 
-# Two-digit words, value 10-99. Longest keys win because matching is by token.
-_TEENS: dict[str, int] = {}
-for _word, _n in (
-    ("ten", 10), ("das", 10), ("दस", 10),
-    ("eleven", 11), ("gyarah", 11), ("gyara", 11), ("ग्यारह", 11),
-    ("twelve", 12), ("barah", 12), ("bara", 12), ("बारह", 12),
-    ("thirteen", 13), ("terah", 13), ("tera", 13), ("तेरह", 13),
-    ("fourteen", 14), ("chaudah", 14), ("चौदह", 14),
-    ("fifteen", 15), ("pandrah", 15), ("pandra", 15), ("पंद्रह", 15), ("पन्द्रह", 15),
-    ("sixteen", 16), ("solah", 16), ("सोलह", 16),
-    ("seventeen", 17), ("satrah", 17), ("सत्रह", 17),
-    ("eighteen", 18), ("atharah", 18), ("athara", 18), ("अठारह", 18),
-    ("nineteen", 19), ("unnis", 19), ("उन्नीस", 19),
-    ("twenty", 20), ("bees", 20), ("बीस", 20),
-    ("thirty", 30), ("tees", 30), ("तीस", 30),
-    ("forty", 40), ("chalees", 40), ("chalis", 40), ("चालीस", 40),
-    ("fifty", 50), ("pachaas", 50), ("pachas", 50), ("पचास", 50),
-    ("sixty", 60), ("saath", 60), ("sath", 60), ("साठ", 60),
-    ("seventy", 70), ("sattar", 70), ("सत्तर", 70),
-    ("eighty", 80), ("assi", 80), ("अस्सी", 80),
-    ("ninety", 90), ("nabbe", 90), ("nabbay", 90), ("नब्बे", 90),
-    ("ikkees", 21), ("ikkis", 21), ("इक्कीस", 21),
-    ("baais", 22), ("baees", 22), ("बाईस", 22),
-    ("teis", 23), ("तेईस", 23),
-    ("chaubees", 24), ("चौबीस", 24),
-    ("pachees", 25), ("pachchees", 25), ("पच्चीस", 25),
-    ("chhabees", 26), ("छब्बीस", 26),
-    ("sattaees", 27), ("सत्ताईस", 27),
-    ("athaees", 28), ("atthais", 28), ("अट्ठाईस", 28),
-    ("unatees", 29), ("untees", 29), ("उनतीस", 29),
-    ("ikatees", 31), ("ikattis", 31), ("इकतीस", 31),
-    ("battees", 32), ("battis", 32), ("बत्तीस", 32),
-    ("taintees", 33), ("तैंतीस", 33),
-    ("chauntees", 34), ("चौंतीस", 34),
-    ("paintees", 35), ("paintis", 35), ("पैंतीस", 35),
-    ("chhattees", 36), ("छत्तीस", 36),
-    ("saintees", 37), ("सैंतीस", 37),
-    ("adtees", 38), ("artees", 38), ("अड़तीस", 38),
-    ("untalis", 39), ("untaalees", 39), ("उनतालीस", 39),
-    ("iktalis", 41), ("इकतालीस", 41),
-    ("bayalis", 42), ("bayaalees", 42), ("बयालीस", 42),
-    ("taintalis", 43), ("तैंतालीस", 43),
-    ("chauvalis", 44), ("चवालीस", 44),
-    ("paintalis", 45), ("पैंतालीस", 45),
-    ("chhiyalis", 46), ("छियालीस", 46),
-    ("saintalis", 47), ("सैंतालीस", 47),
-    ("adtalis", 48), ("अड़तालीस", 48),
-    ("unchaas", 49), ("उनचास", 49),
-    ("ikyavan", 51), ("ikyaavan", 51), ("इक्यावन", 51),
-    ("baawan", 52), ("bawan", 52), ("बावन", 52), ("बावन", 52),
-    ("tirpan", 53), ("tirapan", 53), ("तिरपन", 53),
-    ("chauwan", 54), ("चौवन", 54),
-    ("pachpan", 55), ("pachapan", 55), ("पचपन", 55),
-    ("chappan", 56), ("chhappan", 56), ("छप्पन", 56),
-    ("sattawan", 57), ("सत्तावन", 57),
-    ("athawan", 58), ("अठावन", 58),
-    ("unsath", 59), ("उनसठ", 59),
-    ("iksath", 61), ("इकसठ", 61),
-    ("basath", 62), ("बासठ", 62),
-    ("tirsath", 63), ("tirsathh", 63), ("तिरसठ", 63),
-    ("chausath", 64), ("चौंसठ", 64),
-    ("painsath", 65), ("पैंसठ", 65),
-    ("chhiyasath", 66), ("छियासठ", 66),
-    ("sarsath", 67), ("सड़सठ", 67),
-    ("adsath", 68), ("अड़सठ", 68),
-    ("unhattar", 69), ("उनहत्तर", 69),
-    ("ikhattar", 71), ("इकहत्तर", 71),
-    ("bahattar", 72), ("बहत्तर", 72),
-    ("tihattar", 73), ("तिहत्तर", 73),
-    ("chauhattar", 74), ("चौहत्तर", 74),
-    ("pachhattar", 75), ("पचहत्तर", 75),
-    ("chhihattar", 76), ("छिहत्तर", 76),
-    ("satattar", 77), ("सतहत्तर", 77),
-    ("athattar", 78), ("अठहत्तर", 78),
-    ("unasi", 79), ("उन्यासी", 79),
-    ("ikyasi", 81), ("इक्यासी", 81),
-    ("bayasi", 82), ("बयासी", 82),
-    ("tirasi", 83), ("तिरासी", 83),
-    ("chaurasi", 84), ("चौरासी", 84),
-    ("pachasi", 85), ("पचासी", 85),
-    ("chhiyasi", 86), ("छियासी", 86),
-    ("sataasi", 87), ("sataasi", 87), ("सतासी", 87),
-    ("athasi", 88), ("अठासी", 88),
-    ("navasi", 89), ("नवासी", 89),
-    ("ikyanve", 91), ("इक्यानवे", 91),
-    ("baanve", 92), ("बानवे", 92),
-    ("tiranve", 93), ("तिरानवे", 93),
-    ("chauranve", 94), ("चौरानवे", 94),
-    ("pachanve", 95), ("पचानवे", 95),
-    ("chhiyanve", 96), ("छियानवे", 96),
-    ("sattanve", 97), ("सत्तानवे", 97),
-    ("athanve", 98), ("अट्ठानवे", 98),
-    ("ninyanve", 99), ("ninyanave", 99), ("निन्यानवे", 99),
-):
-    _TEENS[_word] = _n
-
-_TENS_ONLY = {10, 20, 30, 40, 50, 60, 70, 80, 90}
-
-_HUNDRED = {"hundred", "sau", "sau", "so", "sho", "shambhar", "nooru", "nooru", "वन्दा", "सौ", "शंभर"}
-_THOUSAND = {"thousand", "hazar", "hazaar", "hajar", "aayiram", "saavira", "veyyi", "हजार", "हज़ार", "आयरम"}
-_DOUBLE = {"double", "dubble", "dabal", "डबल"}
-_TRIPLE = {"triple", "tribble", "तिब्बल"}
+# Digit characters only. These are the glyphs for 0-9, not names of numbers.
+_DIGIT_CHARS = str.maketrans(
+    _script_digits(0x0966)  # Devanagari
+    + _script_digits(0x09E6)  # Bengali
+    + _script_digits(0x0A66)  # Gurmukhi
+    + _script_digits(0x0AE6)  # Gujarati
+    + _script_digits(0x0B66)  # Odia
+    + "௦௧௨௩௪௫௬௭௮௯"  # Tamil
+    + _script_digits(0x0C66)  # Telugu
+    + _script_digits(0x0CE6)  # Kannada
+    + _script_digits(0x0D66),  # Malayalam
+    "0123456789" * 9,
+)
 
 _LAST = re.compile(
     r"\b(last|end|ending|akhiri|aakhri|aakhiri|आखिरी|आखरी|अंत)\b",
@@ -157,121 +42,93 @@ _NEG = re.compile(
 )
 
 
-def _tokens(text: str) -> list[str]:
-    cleaned = str(text or "").translate(_DIGIT_CHARS).lower()
-    cleaned = cleaned.replace("।", " ").replace(",", " ").replace("-", " ")
-    return [tok for tok in re.split(r"[^\w\u0900-\u0fff]+", cleaned) if tok]
+def _as_digits(text: str) -> str:
+    return str(text or "").translate(_DIGIT_CHARS)
 
 
-def _unit(token: str, *, allow_do: bool) -> int | None:
-    if token in _UNITS:
-        return _UNITS[token]
-    if allow_do and token in _AMBIGUOUS_UNITS:
-        return _AMBIGUOUS_UNITS[token]
-    if token.isdigit() and len(token) == 1:
-        return int(token)
-    return None
+def has_spoken_words(text: str) -> bool:
+    """True when the sentence has words the digit walk cannot read on its own."""
+    if _english_number_phrase(text) is not None:
+        return False
+    without_digits = re.sub(r"\d+", " ", _as_digits(text))
+    return bool(re.search(r"[^\W\d_]", without_digits, flags=re.UNICODE))
 
 
-def _is_tens_word(token: str) -> bool:
-    return _TEENS.get(token) in _TENS_ONLY
+def _bare_yes_no(text: str) -> bool:
+    """A yes or no, with no number in it."""
+    if parse_spoken_phone(text):
+        return False
+    from interview.indic_phrases import CONFIRM_NO_RE, CONFIRM_YES_RE
+
+    tokens = [t for t in re.split(r"[^\w]+", _as_digits(text).lower(), flags=re.UNICODE) if t]
+    if len(tokens) > 3:
+        return False
+    return bool(CONFIRM_YES_RE.search(text) or CONFIRM_NO_RE.search(text))
 
 
-def _small(tokens: list[str], i: int, *, allow_do: bool) -> tuple[int, int] | None:
-    """One number below 100, and the index after it."""
-    if i >= len(tokens):
+# English groups only: "eighty-seven" is 87, "eight seven" is 8 then 7.
+# Other languages stay with the hearing of the sentence.
+_EN_ONES = {
+    "zero": 0, "oh": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+}
+_EN_TEENS = {
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_EN_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_EN_SKIP = {"and", "uh", "um"}
+
+
+def _english_number_phrase(text: str) -> str | None:
+    """Digits when the phrase is only English number words. None if any other word is in it."""
+    tokens = re.findall(r"[a-z0-9]+", _as_digits(text).lower().replace("-", " "))
+    if not tokens:
         return None
-    tok = tokens[i]
-    if tok.isdigit() and 1 < len(tok) <= 2:
-        return int(tok), i + 1
-    if _is_tens_word(tok):
-        base = _TEENS[tok]
-        nxt = _unit(tokens[i + 1], allow_do=allow_do) if i + 1 < len(tokens) else None
-        if nxt is not None and 1 <= nxt <= 9:
-            return base + nxt, i + 2
-        return base, i + 1
-    if tok in _TEENS:
-        return _TEENS[tok], i + 1
-    unit = _unit(tok, allow_do=allow_do)
-    if unit is not None:
-        return unit, i + 1
-    return None
-
-
-def _compound(tokens: list[str], i: int, *, allow_do: bool) -> tuple[str, int] | None:
-    """A hundreds or thousands phrase. None when the next word is not a magnitude."""
-    head = _small(tokens, i, allow_do=allow_do)
-    if head is None:
-        return None
-    value, j = head
-    if j >= len(tokens) or value > 99 or tokens[j] not in _HUNDRED | _THOUSAND:
-        return None
-    mag = tokens[j]
-    k = j + 1
-    if mag in _THOUSAND:
-        total = value * 1000
-        if k < len(tokens):
-            hung = _small(tokens, k, allow_do=allow_do)
-            if hung and hung[1] < len(tokens) and tokens[hung[1]] in _HUNDRED and hung[0] < 10:
-                after = _small(tokens, hung[1] + 1, allow_do=allow_do)
-                if after and after[0] < 100:
-                    total += hung[0] * 100 + after[0]
-                    k = after[1]
-                else:
-                    total += hung[0] * 100
-                    k = hung[1] + 1
-            elif hung and hung[0] < 1000:
-                total += hung[0]
-                k = hung[1]
-        return str(total), k
-    total = value * 100
-    rest = _small(tokens, k, allow_do=allow_do)
-    if rest and rest[0] < 100 and tokens[k] not in _HUNDRED | _THOUSAND:
-        total += rest[0]
-        k = rest[1]
-    return str(total), k
-
-
-def digit_chunks(text: str) -> list[str]:
-    """Digit groups in spoken order. 'chappan baawan' → ['56', '52']."""
-    tokens = _tokens(text)
-    numberish = sum(
-        1
-        for tok in tokens
-        if tok.isdigit() or tok in _UNITS or tok in _TEENS or tok in _HUNDRED or tok in _THOUSAND
-    )
-    allow_do = numberish >= 2 or any(tok.isdigit() for tok in tokens)
-    chunks: list[str] = []
+    out: list[str] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        repeat = 2 if tok in _DOUBLE else 3 if tok in _TRIPLE else 0
-        if repeat and i + 1 < len(tokens):
-            unit = _unit(tokens[i + 1], allow_do=True)
-            if unit is not None:
-                chunks.append(str(unit) * repeat)
+        if tok in _EN_SKIP:
+            i += 1
+            continue
+        if tok.isdigit():
+            out.append(tok)
+            i += 1
+            continue
+        if tok in ("double", "triple") and i + 1 < len(tokens):
+            nxt = tokens[i + 1]
+            digit = _EN_ONES.get(nxt)
+            if digit is None and nxt.isdigit() and len(nxt) == 1:
+                digit = int(nxt)
+            if digit is None:
+                return None
+            out.append(str(digit) * (2 if tok == "double" else 3))
+            i += 2
+            continue
+        if tok in _EN_TENS:
+            value = _EN_TENS[tok]
+            if i + 1 < len(tokens) and tokens[i + 1] in _EN_ONES and _EN_ONES[tokens[i + 1]] != 0:
+                value += _EN_ONES[tokens[i + 1]]
                 i += 2
-                continue
-        compound = _compound(tokens, i, allow_do=allow_do)
-        if compound is not None:
-            chunks.append(compound[0])
-            i = compound[1]
+            else:
+                i += 1
+            out.append(str(value))
             continue
-        if tok.isdigit() and len(tok) > 2:
-            chunks.append(tok)
+        if tok in _EN_TEENS or tok in _EN_ONES:
+            out.append(str(_EN_TEENS[tok] if tok in _EN_TEENS else _EN_ONES[tok]))
             i += 1
             continue
-        small = _small(tokens, i, allow_do=allow_do)
-        if small is None:
-            i += 1
-            continue
-        value, nxt = small
-        if value >= 10:
-            chunks.append(f"{value:02d}")
-        else:
-            chunks.append(str(value))
-        i = nxt
-    return [c for c in chunks if c]
+        return None
+    return "".join(out)
+
+
+def digit_chunks(text: str) -> list[str]:
+    """Digit groups written in the transcript, in order. Words are left untouched."""
+    return re.findall(r"\d+", _as_digits(text))
 
 
 _PHRASE_SPLIT = re.compile(r"[.।!?॥？]+")
@@ -292,7 +149,28 @@ def _drop_repeated_phrase(text: str) -> str:
 
 
 def parse_spoken_phone(text: str) -> str:
-    return "".join(digit_chunks(_drop_repeated_phrase(text)))
+    """Digits written in the transcript, including English groups like eighty-seven."""
+    phrase = _drop_repeated_phrase(text)
+    folded = _english_number_phrase(phrase)
+    if folded is not None:
+        return folded
+    return "".join(digit_chunks(phrase))
+
+
+def heard_phone(text: str, heard: str = "") -> str:
+    """The digits to store from this utterance.
+
+    A sentence that is only digits is stored as those digits. When they used
+    words, `heard` is the reading of what they said, in any language or grouping.
+    A yes or no is not a number. A reading cannot replace a digits-only sentence.
+    """
+    literal = trunk_prefix(parse_spoken_phone(text))
+    heard_digits = trunk_prefix(re.sub(r"\D", "", heard or ""))
+    if len(heard_digits) > 13:
+        heard_digits = ""
+    if has_spoken_words(text) and heard_digits and not _bare_yes_no(text):
+        return heard_digits
+    return literal
 
 
 def trunk_prefix(digits: str) -> str:

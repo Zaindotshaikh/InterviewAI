@@ -1472,6 +1472,11 @@ class InterviewAgent(Agent):
         self._record_user_move(move, text, events)
 
         logger.info("move=%s stage=%s", move.kind, self.flow.state.stage)
+        if self._interrupted and move.kind not in ("repeat", "rephrase", "ask_repeat", "reask_invalid"):
+            move.directive += (
+                " They answered while you were still speaking. Acknowledge what they just said and ask only "
+                "what this directive says."
+            )
         if move.verbatim:
             # The mobile step is one fixed sentence. The dialogue model was adding the next
             # question ("what is your age?") in the same breath as the number read-back.

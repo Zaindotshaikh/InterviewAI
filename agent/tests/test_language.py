@@ -1,6 +1,7 @@
 """Language detection unit tests."""
 
-from interview.language import detect_script_language, get_profile
+from interview.language import detect_script_language, get_profile, native_script_reminder
+from interview.prompts import spoken_style
 
 
 def test_tamil_detection():
@@ -65,3 +66,14 @@ def test_odia_codes_and_per_language_voice():
     assert elevenlabs_voice_for("od-IN", s) == "odia-voice"
     assert elevenlabs_voice_for("or", s) == "odia-voice"
     assert elevenlabs_voice_for("te-IN", s) == "fallback"
+
+
+def test_english_call_does_not_teach_hindi_gender():
+    english = spoken_style("en-IN").lower()
+    assert "kar raha hoon" in english
+    assert "रहा हूँ" not in spoken_style("en-IN")
+    reminder = native_script_reminder("en-IN").lower()
+    assert "kar raha hoon" in reminder
+    assert "english only" in reminder or "english" in reminder
+    hindi = spoken_style("hi-IN")
+    assert "कर रहे हैं" in hindi

@@ -25,9 +25,10 @@ from interview.analysis import (
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
 from interview.language import get_profile
-from interview.normalize import normalize_field, plausible_city, spoken_groups
 from interview.phone_speech import (
     correct_phone,
+    has_spoken_words,
+    heard_phone,
     parse_spoken_phone,
     phone_again_line,
     phone_ask_line,
@@ -36,6 +37,7 @@ from interview.phone_speech import (
     trunk_prefix,
     valid_indian_mobile,
 )
+from interview.normalize import normalize_field, parse_height_and_weight, plausible_city, spoken_groups
 from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
 
@@ -219,7 +221,15 @@ class InterviewFlow:
                 if t in _PHONE_DIGIT_WORDS or any(ch.isdigit() for ch in t)
             )
             spoken = trunk_prefix(parse_spoken_phone(text))
-            return len(spoken) >= 10 or digit_chars >= 8 or digit_words >= 6
+            # English digit-words still wait for a fuller number. Words in another
+            # language are a number once several of them have been said.
+            other_words = sum(1 for t in tokens if t not in _PHONE_DIGIT_WORDS and not any(ch.isdigit() for ch in t))
+            return (
+                len(spoken) >= 10
+                or digit_chars >= 8
+                or digit_words >= 6
+                or other_words >= 4
+            )
 
         if verdict == "substantive":
             return True
@@ -328,7 +338,8 @@ class InterviewFlow:
         st = self.state
         if st.stage != "opening":
             return self.resume()
-        name = self.plan.candidate_name or "the candidate"
+        full = (self.plan.candidate_name or "").strip()
+        name = full.split()[0] if full else "there"
         st.screening_started_s = self.elapsed_s()
         st.stage = "screening"
         first = self._screening_next([])
@@ -344,7 +355,7 @@ class InterviewFlow:
         greeting = (
             f"OPENING CONTINUATION — the greeting word ({seed_word}) was ALREADY spoken aloud. "
             f"Do NOT say it again.\n"
-            f"- Greet {name} by name and say you are {self.plan.interviewer_name} from "
+            f"- Greet them once by their first name ({name}) and say you are {self.plan.interviewer_name} from "
             f"{self.plan.company_name} — one short sentence, then a pause.\n"
             f"- {lang_note} Optional one short beat: {profile.label}/English mix is fine. Do NOT say 'two-part chat', "
             f"'no trick questions', or any long process explanation.\n"
@@ -514,6 +525,7 @@ class InterviewFlow:
         self._invalid = {}
         self._invalid_heard = {}
         self._prepare_phone_turn(a)
+        self._prepare_body_turn(a)
 
         if st.stage == "ended":
             return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
@@ -649,7 +661,7 @@ class InterviewFlow:
             if spec is None:
                 return False
             if spec.kind == "phone":
-                return bool(parse_spoken_phone(raw))
+                return bool(parse_spoken_phone(raw) or a.phone_hint or (has_spoken_words(raw) and a.phone_resolved))
             return any(u.field == spec.id and str(u.value or "").strip() for u in a.slot_updates)
         if kind == "care":
             items = {str(i) for i in (focus.get("items") or [])}
@@ -788,8 +800,9 @@ class InterviewFlow:
         faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
         return self._move(
             "answer_question",
-            "The candidate asked you a question. Answer ONLY from this information: "
-            f"{faq}. If it is not covered, say honestly that the recruitment team will share it. Never invent details "
+            "The candidate asked you a question. Answer that question in one sentence, using only this: "
+            f"{faq}. If their question is not covered, say the recruitment team will follow up on it. "
+            "Bring up pay only when they asked about pay. Never invent details "
             "and never discuss their score or result. Then return to your last question in one short ask.",
         )
 
@@ -824,17 +837,28 @@ class InterviewFlow:
         if not a.contradictions or st.contradiction_probes >= lim.max_contradiction_probes:
             return None
         c = a.contradictions[0]
+        if not self._candidate_said(str(c.get("claim_a") or "")):
+            return None
         st.contradiction_probes += 1
         st.contradictions.append({**c, "turn": st.turns, "resolved": False, "resolution": ""})
         # What the answer was is remembered, so the interview carries on from it once the probe is answered.
         self._set_focus("contradiction", deferred_grade=deferred_grade, deferred_dont_know=dont_know)
         return self._move(
             "probe_contradiction",
-            f"Earlier the candidate said: \"{c['claim_a']}\". Just now they said: \"{c['claim_b']}\". Do not accuse "
-            "them. In a friendly way, say you want to note it down correctly and ask them to help you understand the "
-            "difference.",
+            f"Earlier the candidate said: \"{c['claim_a']}\". Just now they said: \"{c['claim_b']}\". "
+            "Mention only those two things they said. In a friendly way, ask them to help you note it correctly.",
             events=[("contradiction.detected", {"a": c["claim_a"], "b": c["claim_b"], "note": c["note"]})],
         )
+
+    def _candidate_said(self, claim: str) -> bool:
+        """A number in an 'earlier you said' line has to be one they actually gave."""
+        nums = re.findall(r"\d+", claim or "")
+        if not nums:
+            return True
+        blob = " ".join(self.state.claims)
+        for slot in self.state.slots.values():
+            blob += " " + str(slot.value or "")
+        return all(n in blob for n in nums)
 
     def _resolve_contradiction(self, a: TurnAnalysis) -> None:
         for c in reversed(self.state.contradictions):
@@ -851,9 +875,9 @@ class InterviewFlow:
     def _prepare_phone_turn(self, a: TurnAnalysis) -> None:
         """Catch a spoken mobile from the raw utterance, including a correction.
 
-        Groups, mixed languages, and hundreds/thousands are parsed here so a missed
-        analyst value cannot drop the number. A correction rewrites only the part
-        that changed and leaves the rest of the read-back in place.
+        Digits in the transcript are stored as spoken. Words, in any language, are
+        stored from the hearing of that sentence. A correction rewrites only the
+        part that changed and leaves the rest of the read-back in place.
         """
         pending = self.pending_confirmation()
         if pending:
@@ -866,7 +890,12 @@ class InterviewFlow:
             chosen = correct_phone(previous, raw) if raw else ""
             parsed = trunk_prefix(parse_spoken_phone(raw)) if raw else ""
             prev_digits = trunk_prefix(re.sub(r"\D", "", previous))
-            if parsed and parsed == prev_digits:
+            # Digits are a correction of the number already read back.
+            # Words, in any language, are a new hearing of the whole number.
+            heard = heard_phone(raw, a.phone_hint) if raw and has_spoken_words(raw) else ""
+            if heard and heard != prev_digits and (not chosen or chosen == prev_digits):
+                chosen = heard
+            if (parsed and parsed == prev_digits and heard in ("", parsed)) or (heard and heard == prev_digits):
                 # They said the same number again. Lock it instead of reading it back forever.
                 a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
                 a.confirmation = "confirmed"
@@ -889,7 +918,7 @@ class InterviewFlow:
         raw = (a.raw_utterance or "").strip()
         if not raw:
             return
-        parsed = trunk_prefix(parse_spoken_phone(raw))
+        parsed = heard_phone(raw, a.phone_hint)
         # They spoke, but it was not a number. Drop any phone the model filled in.
         if not parsed:
             a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
@@ -897,6 +926,25 @@ class InterviewFlow:
         a.phone_resolved = parsed
         a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
         a.slot_updates.append(SlotUpdate("phone", parsed, 0.9, raw[:80]))
+
+    def _prepare_body_turn(self, a: TurnAnalysis) -> None:
+        """Height and weight said in one sentence stay on the right field."""
+        focus = self.state.focus or {}
+        if focus.get("type") != "slots":
+            return
+        ids = {str(i) for i in (focus.get("ids") or [])}
+        if not ids & {"height_cm", "weight_kg"}:
+            return
+        raw = (a.raw_utterance or "").strip()
+        if not raw:
+            return
+        height, weight = parse_height_and_weight(raw)
+        if height is not None and "height_cm" in ids:
+            a.slot_updates = [u for u in a.slot_updates if u.field != "height_cm"]
+            a.slot_updates.append(SlotUpdate("height_cm", str(height), 0.9, raw[:80]))
+        if weight is not None and "weight_kg" in ids:
+            a.slot_updates = [u for u in a.slot_updates if u.field != "weight_kg"]
+            a.slot_updates.append(SlotUpdate("weight_kg", str(weight), 0.9, raw[:80]))
 
     def _absorb_slot_updates(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
         st = self.state
@@ -1045,7 +1093,7 @@ class InterviewFlow:
             return None
         if spec.kind == "phone":
             raw = a.raw_utterance or " ".join(str(u.value) for u in a.slot_updates if u.field == spec.id)
-            if parse_spoken_phone(raw):
+            if parse_spoken_phone(raw) or a.phone_hint or a.phone_resolved:
                 return None
         return spec
 
@@ -1227,13 +1275,17 @@ class InterviewFlow:
         if self._experience_captured() and not st.experience_dive_done:
             settings = st.slots.get("experience_settings")
             where = str(settings.value) if settings and settings.value else "that work"
-            self._set_focus("experience_dive")
-            return self._move(
-                "experience_dive",
-                f"They said they have experience in {where}. In one short question, ask what they actually did day to "
-                "day there — concrete duties, not hospital name again. Do not start clinical scenarios yet.",
-                events=events,
-            )
+            # They already described the work. Don't ask the same thing again.
+            if len(where.split()) >= 6:
+                st.experience_dive_done = True
+            else:
+                self._set_focus("experience_dive")
+                return self._move(
+                    "experience_dive",
+                    f"They said they have experience in {where}. In one short question, ask what they actually did day to "
+                    "day there — concrete duties, not hospital name again. Do not start clinical scenarios yet.",
+                    events=events,
+                )
 
         # 6. Comfort with hands-on care.
         care_move = self._care_questions(events)
@@ -1516,11 +1568,19 @@ class InterviewFlow:
         if a.intent == "candidate_question" and st.focus.get("asks", 0) < 2:
             self._set_focus("closing_qa", asks=st.focus.get("asks", 0) + 1)
             faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
-            return self._move(
-                "closing_answer",
-                f"Answer their question ONLY from this: {faq}. If not covered, say the recruitment team will share it. "
-                "Then ask if there is anything else.",
-            )
+            asked = (a.gist_en or "their question").strip()
+            if self._mentions_comp(a):
+                line = (
+                    "They asked about pay or benefits. Say the recruitment team will share that, without a figure. "
+                    "Then ask if there is anything else."
+                )
+            else:
+                line = (
+                    f"They asked: \"{asked}\". Answer that, in one sentence, from this list only: {faq}. "
+                    "If it is not on the list, say the team will follow up on what they asked. "
+                    "Then ask if there is anything else."
+                )
+            return self._move("closing_answer", line)
         return self._close(
             "completed",
             "Wish them well, tell them the team will review the conversation and contact them on the phone number "

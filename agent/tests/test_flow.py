@@ -148,6 +148,48 @@ def test_short_answers_ready_by_focus_not_fixed_length(blueprint):
         )
 
 
+def test_two_digit_phone_groups_are_read_back(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="89, 75, 34, 67, 90"))
+    assert flow.state.slots["phone"].value == "8975346790"
+    assert move.kind == "confirm"
+    assert "8, 9, 7, 5, 3, 4, 6, 7, 9, 0" in move.directive
+
+
+def test_a_phone_hint_fills_a_missed_number_and_cannot_replace_a_good_one(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.focus = {"type": "slots", "ids": ["phone"]}
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="the number I said", phone_hint="8975346790"))
+    assert flow.state.slots["phone"].value == "8975346790"
+    assert move.kind == "confirm"
+    flow2, _ = make_flow(blueprint)
+    flow2.opening()
+    flow2.state.focus = {"type": "slots", "ids": ["phone"]}
+    flow2.apply(TurnAnalysis(intent="answer", raw_utterance="89, 75, 34, 67, 90", phone_hint="1111111111"))
+    assert flow2.state.slots["phone"].value == "8975346790"
+
+
+def test_weight_and_height_from_one_answer(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.stage = "screening"
+    flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    flow.apply(TurnAnalysis(intent="answer", raw_utterance="weight 50 kg and height 144 cm"))
+    assert flow.state.slots["weight_kg"].value == 50
+    assert flow.state.slots["height_cm"].value == 144
+    flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="वजन पचास किलो है और कद एक सौ चौवालीस सेंटीमीटर है",
+        )
+    )
+    assert flow.state.slots["weight_kg"].value == 50
+    assert flow.state.slots["height_cm"].value == 144
+
+
 def test_one_utterance_can_fill_several_fields_and_phone_is_read_back(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
@@ -180,6 +222,7 @@ def test_mixed_language_phone_groups_are_caught(blueprint):
         TurnAnalysis(
             intent="answer",
             raw_utterance="nine एक 1 two तीन 2 chappan baawan",
+            phone_hint="9112325652",
             slot_updates=[SlotUpdate("phone", "91", 0.4)],
         )
     )
@@ -780,6 +823,7 @@ def test_contradiction_is_probed_and_the_clinical_decision_resumes_after(bluepri
     flow, _ = make_flow(blueprint)
     reach_clinical(flow, experience=("1", "ward"))
     area = flow.state.current_area
+    flow.state.claims.append("3 years in ICU")
     a = grade("partial", covered=["x"], missing=["y"])
     a.contradictions = [{"claim_a": "3 years in ICU", "claim_b": "never worked in ICU", "note": "conflict"}]
     move = flow.apply(a)
@@ -794,6 +838,7 @@ def test_contradiction_together_with_dont_know_is_not_lost(blueprint):
     flow, _ = make_flow(blueprint)
     reach_clinical(flow, experience=("6", "ward"))
     area = flow.state.current_area
+    flow.state.claims.append("3 years ICU")
     a = TurnAnalysis(
         intent="dont_know",
         contradictions=[{"claim_a": "3 years ICU", "claim_b": "never in ICU", "note": "n"}],

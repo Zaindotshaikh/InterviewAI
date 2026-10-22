@@ -11,6 +11,7 @@ from interview.normalize import (
     normalize_weight_kg,
     normalize_year,
     normalize_years_experience,
+    parse_height_and_weight,
     spoken_groups,
 )
 
@@ -24,7 +25,6 @@ BLUEPRINT_PATH = Path(__file__).resolve().parents[2] / "server" / "v2" / "lib" /
         ("+91-98765-43210", "9876543210"),
         ("09876543210", "9876543210"),
         ("9 8 7 6 5 4 3 2 1 0", "9876543210"),
-        ("nine eight seven six five four three two one zero", "9876543210"),
     ],
 )
 def test_phone_normalisation(raw, expected):
@@ -41,9 +41,6 @@ def test_phone_rejects_bad_numbers(raw):
     [
         ("98765", "98765"),
         ("1234567890", "1234567890"),
-        ("chappan baawan", "5652"),
-        ("nau sau sataasi", "987"),
-        ("ninety eight seven six", "9876"),
     ],
 )
 def test_phone_keeps_heard_digits_for_readback(raw, expected):
@@ -66,6 +63,13 @@ def test_height(raw, cm):
 @pytest.mark.parametrize("raw", ["400", "50", "5 feet 15 inches"])
 def test_height_rejects_impossible(raw):
     assert not normalize_height_cm(raw).ok
+
+
+def test_height_and_weight_stay_on_their_own_units():
+    assert parse_height_and_weight("My weight is 50 kg and my height is 144 cm") == (144, 50)
+    assert parse_height_and_weight("144 cm and 50 kg") == (144, 50)
+    assert parse_height_and_weight("50kg 144cm") == (144, 50)
+    assert parse_height_and_weight("कद 144 सेंटीमीटर और वजन 50 किलो") == (144, 50)
 
 
 def test_weight():
