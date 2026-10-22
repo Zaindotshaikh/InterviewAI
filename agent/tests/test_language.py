@@ -32,8 +32,36 @@ def test_elevenlabs_voice_is_sujata_for_every_language():
     from providers.elevenlabs_voices import elevenlabs_voice_for
 
     sujata = "4mCfn38CsM9hGLvDrPxv"
-    s = Settings(elevenlabs_voice_id=sujata, elevenlabs_voice_id_local=sujata)
+    s = Settings(
+        elevenlabs_voice_id=sujata,
+        elevenlabs_voice_id_local=sujata,
+        elevenlabs_voice_by_lang="",
+    )
     assert elevenlabs_voice_for("en-IN", s) == sujata
     assert elevenlabs_voice_for("hi-IN", s) == sujata
     assert elevenlabs_voice_for("gu-IN", s) == sujata
     assert elevenlabs_voice_for("mr-IN", s) == sujata
+
+
+def test_odia_codes_and_per_language_voice():
+    from config import Settings
+    from providers.elevenlabs_voices import elevenlabs_language, elevenlabs_voice_for, scribe_language_hints
+
+    assert elevenlabs_language("od-IN") == "or"
+    assert elevenlabs_language("hi-IN") == "hi"
+    assert elevenlabs_language("en-IN") == "en"
+    assert scribe_language_hints("od-IN") == ("or", ["en", "hi"])
+    assert scribe_language_hints("en-IN") == ("en", [])
+    assert scribe_language_hints("hi-IN") == ("hi", ["en"])
+    assert scribe_language_hints("te-IN") == ("te", ["en", "hi"])
+    assert scribe_language_hints("pa-IN") == ("pa", ["en", "hi"])
+
+    s = Settings(
+        elevenlabs_voice_id="fallback",
+        elevenlabs_voice_id_local="fallback",
+        elevenlabs_voice_by_lang="hi-IN:hindi-voice,od-IN:odia-voice",
+    )
+    assert elevenlabs_voice_for("hi-IN", s) == "hindi-voice"
+    assert elevenlabs_voice_for("od-IN", s) == "odia-voice"
+    assert elevenlabs_voice_for("or", s) == "odia-voice"
+    assert elevenlabs_voice_for("te-IN", s) == "fallback"

@@ -109,6 +109,7 @@ async function appendV2TranscriptUnlocked(
     timestamp: turn.timestamp,
     ...(turn.llmText != null ? { llmText: turn.llmText } : {}),
     ...(turn.interrupted != null ? { interrupted: turn.interrupted } : {}),
+    ...(turn.move ? { move: turn.move } : {}),
   });
 
   const extras = record.extras;

@@ -17,6 +17,8 @@ export default function PreflightCheck({ onDone, simple = false }: Props) {
     setStatus("measuring");
     setError(null);
     try {
+      // Permission probe only. Stop every track before onDone. The live room
+      // publishes its own mic with noiseSuppression false (Krisp runs on the agent).
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,

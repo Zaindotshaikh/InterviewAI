@@ -203,10 +203,12 @@ export default function ScorecardView({ scorecard }: { scorecard: V2Scorecard })
         </Section>
       )}
 
-      {!!scorecard.tier_evidence?.length && (
+      {!!scorecard.tier_evidence?.filter((e) => e.verified !== false).length && (
         <Section title="Evidence from the call">
           <ul className="space-y-3">
-            {scorecard.tier_evidence.map((e, i) => (
+            {scorecard.tier_evidence
+              .filter((e) => e.verified !== false)
+              .map((e, i) => (
               <li key={i}>
                 <p className="text-sm">
                   <span className="font-medium text-stone-800">{e.area}</span>

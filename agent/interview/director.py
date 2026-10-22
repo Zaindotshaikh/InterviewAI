@@ -135,6 +135,7 @@ class Director:
             if len(analysis.care_updates) > before:
                 logger.info("care stance recovered from utterance for items=%s", items)
 
+        analysis.raw_utterance = text
         logger.info(
             "analysis source=%s intent=%s clarity=%s stage=%s latency=%.0fms",
             analysis.source,

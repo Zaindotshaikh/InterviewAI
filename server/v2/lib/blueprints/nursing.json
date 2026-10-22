@@ -30,7 +30,7 @@
         "kind": "phone",
         "group": "phone",
         "confirm": true,
-        "ask": "Ask for their mobile number so the team can reach them. Say it is only for the recruitment team."
+        "ask": "Ask for their mobile number."
       },
       {
         "id": "qualification",

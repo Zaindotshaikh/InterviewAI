@@ -18,6 +18,10 @@ from interview.language import get_profile
 
 logger = logging.getLogger("interview-v2.providers")
 
+
+class SessionRefused(RuntimeError):
+    """Demo stack cannot start. Do not substitute another provider and greet."""
+
 _SARVAM_LLM_MODELS = {"gemma4", "sarvam-105b", "glm5.2", "sarvam-105b-conversations"}
 
 # Locales with Chirp 3 HD voices; Odia has none, so it falls back to Indian English
@@ -148,13 +152,9 @@ def build_llm(settings: Settings | None = None):
 
 def _scribe_language_hints(language: str) -> tuple[str, list[str]]:
     """Primary + secondary language codes for Scribe v2 realtime code-mix."""
-    primary = (language or "en-IN").split("-")[0].lower()
-    # Always allow English code-mix; Indic pairs get Hindi as a bridge when useful.
-    secondary = ["en"]
-    if primary not in ("en", "hi"):
-        secondary.append("hi")
-    secondary = [c for c in secondary if c != primary]
-    return primary, secondary
+    from providers.elevenlabs_voices import scribe_language_hints
+
+    return scribe_language_hints(language)
 
 
 def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: list[str] | None = None):
@@ -223,16 +223,13 @@ def build_stt(language: str, settings: Settings | None = None, keyterms: list[st
     if provider == "elevenlabs_scribe":
         try:
             return build_elevenlabs_scribe_stt(language, settings, keyterms)
-        except Exception as err:  # noqa: BLE001
-            fallback = settings.stt_scribe_fallback
-            logger.warning(
-                "elevenlabs_scribe STT failed (%s); fallback=%s",
-                err,
-                fallback,
-            )
-            if fallback == "openai":
-                return build_openai_stt(language, settings, keyterms)
+        except SessionRefused:
             raise
+        except Exception as err:  # noqa: BLE001
+            # Demo path: resolved_stt() == elevenlabs_scribe never substitutes OpenAI.
+            # STT_SCRIBE_FALLBACK stays in config for non-demo workers that do not select Scribe.
+            logger.error("Scribe STT required but failed; refusing session (%s)", err)
+            raise SessionRefused("Scribe STT required but failed") from err
 
     if provider == "sarvam":
         # Prefer realtime streaming class when available
@@ -294,8 +291,8 @@ def build_tts(language: str, settings: Settings | None = None, *, provider: str 
 
         api_key = settings.elevenlabs_api_key or os.environ.get("ELEVEN_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
         if not api_key:
-            logger.warning("TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY; falling back to OpenAI TTS")
-            provider = "openai"
+            logger.error("ElevenLabs TTS required but API key missing; refusing session")
+            raise SessionRefused("ElevenLabs TTS required but API key missing")
         else:
             voice_id = elevenlabs_voice_for(language, settings)
             logger.info(
@@ -385,13 +382,13 @@ def build_noise_cancellation(settings: Settings | None = None):
                 opts = noise_cancellation_plugin.BVC()
                 logger.info("noise cancellation: Krisp BVC (background voice + noise)")
                 return opts
-            if hasattr(noise_cancellation_plugin, "NC"):
-                opts = noise_cancellation_plugin.NC()
-                logger.warning("noise cancellation: Krisp NC only (no BVC in plugin — env noise, not other voices)")
-                return opts
+        except SessionRefused:
+            raise
         except Exception as err:  # noqa: BLE001
-            logger.warning("Krisp noise cancellation unavailable: %s", err)
-            return None
+            logger.error("Krisp BVC required but unavailable; refusing session (%s)", err)
+            raise SessionRefused("Krisp BVC required but unavailable") from err
+        logger.error("Krisp BVC required but unavailable; refusing session")
+        raise SessionRefused("Krisp BVC required but unavailable")
 
     if provider == "aicoustics":
         try:

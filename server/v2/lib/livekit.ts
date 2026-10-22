@@ -47,6 +47,8 @@ export async function createCandidateToken(opts: {
   avatar?: boolean;
   ttsProvider?: string;
   voiceProvider?: string;
+  /** First join dispatches the worker. Rejoin must omit this so a second agent is not summoned. */
+  dispatchAgent?: boolean;
 }): Promise<{ token: string; url: string; agentName: string }> {
   const cfg = getLiveKitConfig();
   if (!cfg) {
@@ -72,14 +74,16 @@ export async function createCandidateToken(opts: {
     canPublishData: true,
   });
 
-  at.roomConfig = new RoomConfiguration({
-    agents: [
-      new RoomAgentDispatch({
-        agentName: cfg.agentName,
-        metadata: JSON.stringify(jobMeta),
-      }),
-    ],
-  });
+  if (opts.dispatchAgent !== false) {
+    at.roomConfig = new RoomConfiguration({
+      agents: [
+        new RoomAgentDispatch({
+          agentName: cfg.agentName,
+          metadata: JSON.stringify(jobMeta),
+        }),
+      ],
+    });
+  }
 
   const token = await at.toJwt();
   return { token, url: cfg.url, agentName: cfg.agentName };

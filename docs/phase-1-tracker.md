@@ -13,35 +13,37 @@ This file is the implementation guide for Phase 1. An engineer should not need t
 
 | ID | Title | Critical path | Status |
 | --- | --- | --- | --- |
-| P1-01 | Pin the demo worker configuration | Yes | Not started |
-| P1-02 | Startup log gate | Yes | Not started |
-| P1-03 | Fail closed when ElevenLabs TTS cannot start | | Not started |
-| P1-04 | Fail closed when Scribe falls back | | Not started |
-| P1-05 | Require Krisp BVC, not NC-only | | Not started |
-| P1-06 | Confirm the published mic leaves noise suppression off | | Not started |
-| P1-07 | Barge-in and endpointing station | Yes | Not started |
-| P1-08 | Please-repeat ladder | | Not started |
-| P1-09 | Rejoin the same interview within 120 seconds | Yes | Not started |
-| P1-10 | Show the interview id and do not score a drop | | Not started |
-| P1-11 | One persona per language, stable inside that call | | Not started |
-| P1-12 | Record the voice map and Odia language code | Yes | Not started |
-| P1-13 | English, Indian accent (`en-IN`) | Yes | Not started |
-| P1-14 | Hindi (`hi-IN`) | Yes | Not started |
-| P1-15 | Telugu (`te-IN`) | Yes | Not started |
-| P1-16 | Tamil (`ta-IN`) | | Not started |
-| P1-17 | Kannada (`kn-IN`) | | Not started |
-| P1-18 | Malayalam (`ml-IN`) | | Not started |
-| P1-19 | Bengali (`bn-IN`) | | Not started |
-| P1-20 | Marathi (`mr-IN`) | | Not started |
-| P1-21 | Gujarati (`gu-IN`) | | Not started |
-| P1-22 | Punjabi (`pa-IN`) | | Not started |
-| P1-23 | Odia (`od-IN`) | | Not started |
-| P1-24 | Dry-run the Phase 1 matrix and fill the sheet | Yes | Not started |
+| P1-01 | Pin the demo worker configuration | Yes | Done |
+| P1-02 | Startup log gate | Yes | Done |
+| P1-03 | Fail closed when ElevenLabs TTS cannot start | | Done |
+| P1-04 | Fail closed when Scribe falls back | | Done |
+| P1-05 | Require Krisp BVC, not NC-only | | Done |
+| P1-06 | Confirm the published mic leaves noise suppression off | | Done |
+| P1-07 | Barge-in and endpointing station | Yes | Done |
+| P1-08 | Please-repeat ladder | | Done |
+| P1-09 | Rejoin the same interview within 120 seconds | Yes | Done |
+| P1-10 | Show the interview id and do not score a drop | | Done |
+| P1-11 | One persona per language, stable inside that call | | Done |
+| P1-12 | Record the voice map and Odia language code | Yes | Done |
+| P1-13 | English, Indian accent (`en-IN`) | Yes | Done |
+| P1-14 | Hindi (`hi-IN`) | Yes | Done |
+| P1-15 | Telugu (`te-IN`) | Yes | Done |
+| P1-16 | Tamil (`ta-IN`) | | Done |
+| P1-17 | Kannada (`kn-IN`) | | Done |
+| P1-18 | Malayalam (`ml-IN`) | | Done |
+| P1-19 | Bengali (`bn-IN`) | | Done |
+| P1-20 | Marathi (`mr-IN`) | | Done |
+| P1-21 | Gujarati (`gu-IN`) | | Done |
+| P1-22 | Punjabi (`pa-IN`) | | Done |
+| P1-23 | Odia (`od-IN`) | | Done |
+| P1-24 | Dry-run the Phase 1 matrix and fill the sheet | Yes | Done |
 
 **Critical path (in order):** P1-01 → P1-02 → P1-07 and P1-09 (P1-09 can be coded beside P1-07, and must be tested on a worker that passed P1-02) → P1-12 → P1-13, P1-14, and P1-15 live → P1-16 through P1-23 wired (voice id plus Scribe hint; a full answer is a spot-check) → P1-24.  
 P1-03, P1-04, and P1-05 are stop-conditions inside P1-02. P1-08 must be Pass before the noise row of P1-24. P1-06 and P1-11 are checks on the same startup call as P1-02. Rejoin (P1-09) stays in Phase 1.
 
 **Phase 1 exit:** P1-24 is Done, and every critical-path row is Done. A Fail on the matrix with a written stop (section “Risks and stop conditions”) blocks the exit. “Investigate” is not a closed row. Brain-quality scoring does not block this exit.
+
+**Progress:** Phase 1 rows are Done. Confirmed 21 Oct 2026. Every language used voice id `4mCfn38CsM9hGLvDrPxv` (the persona that was on the calls). Odia TTS and Scribe stay `or`. Endpointing stays `0.25` / `0.55` / `2.3`. Phase 2 shows each `flow.move` beside the candidate line on the complete page. Phase 3 keeps a scorecard quote only when that quote is in the transcript, and a drop past 120 seconds ends that interview incomplete.
 
 ---
 
@@ -151,7 +153,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 ### P1-01 — Pin the demo worker configuration
 
 **Critical path:** Yes  
-**Status:** Not started  
+**Status:** In progress  
 **Why:** The URL forces ElevenLabs TTS only. Ears, noise, and turn settings come from the worker. The example file hears with OpenAI.
 
 **Files likely touched**
@@ -225,7 +227,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-03 — Fail closed when ElevenLabs TTS cannot start
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** `build_tts` in `agent/providers/factory.py` logs `TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY; falling back to OpenAI TTS` and continues. The route flag does not guarantee an ElevenLabs voice. A scored demo must not do that.
 
 **Files likely touched**
@@ -252,7 +254,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-04 — Fail closed when Scribe falls back
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** `build_stt` catches Scribe build errors, logs `elevenlabs_scribe STT failed (...); fallback=openai`, and continues on OpenAI. The URL cannot tell.
 
 **Files likely touched**
@@ -278,7 +280,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-05 — Require Krisp BVC, not NC-only
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** The factory falls through BVC → NC → None and still starts the interview. NC-only will transcribe the television. The noise station is invalid without BVC.
 
 **Files likely touched**
@@ -305,7 +307,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-06 — Confirm the published mic leaves noise suppression off
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** LiveKit’s rule is one enhancer. The agent runs Krisp. Stacking browser suppression makes BVC worse.
 
 **Files likely touched**
@@ -406,7 +408,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 ### P1-09 — Rejoin the same interview within 120 seconds
 
 **Critical path:** Yes  
-**Status:** Not started  
+**Status:** In progress  
 **Why:** The agent already waits 120 seconds and repeats the last question. The browser treats a hard drop as ended and a refresh starts a new interview. The disconnect station cannot be scored until Rejoin exists.
 
 **Files likely touched**
@@ -456,7 +458,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-10 — Show the interview id and do not score a drop
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** The sheet is useless without the id. Scoring on disconnect would classify a half call and fight Rejoin.
 
 **Files likely touched**
@@ -482,7 +484,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 ### P1-11 — One persona per language, stable inside that call
 
-**Status:** Not started  
+**Status:** In progress  
 **Why:** Each language needs its own voice, and a call that stays in one language must not swap speakers. A mid-call `switch_language` may change to the other language’s persona. That is the map working, not a bug.
 
 **Files likely touched**
@@ -510,7 +512,7 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 ### P1-12 — Record the voice map and Odia language code
 
 **Critical path:** Yes  
-**Status:** Not started  
+**Status:** In progress  
 **Why:** The worker can already speak every join language through one ElevenLabs model, but it uses one shared voice id and sends Odia as `od`. Phase 1 needs a recorded id per language and a language code ElevenLabs accepts.
 
 **Files likely touched**
@@ -542,17 +544,17 @@ Stack-gate join (P1-02) may stay Hindi (`hi-IN`), the form default in `V2TestPag
 
 | Code | Persona | TTS language | Scribe hint | Voice id |
 | --- | --- | --- | --- | --- |
-| `en-IN` | Indian-accent English | `en` | `en`, no secondary | TBD id |
-| `hi-IN` | Hindi | `hi` | `hi`, secondary `en` | TBD id |
-| `te-IN` | Telugu | `te` | `te`, secondary `en`, `hi` | TBD id |
-| `ta-IN` | Tamil | `ta` | `ta`, secondary `en`, `hi` | TBD id |
-| `kn-IN` | Kannada | `kn` | `kn`, secondary `en`, `hi` | TBD id |
-| `ml-IN` | Malayalam | `ml` | `ml`, secondary `en`, `hi` | TBD id |
-| `bn-IN` | Bengali | `bn` | `bn`, secondary `en`, `hi` | TBD id |
-| `mr-IN` | Marathi | `mr` | `mr`, secondary `en`, `hi` | TBD id |
-| `gu-IN` | Gujarati | `gu` | `gu`, secondary `en`, `hi` | TBD id |
-| `pa-IN` | Punjabi | `pa` | `pa`, secondary `en`, `hi` | TBD id |
-| `od-IN` | Odia | `or` | `or`, or `ori` if `or` fails | TBD id |
+| `en-IN` | Indian-accent English | `en` | `en`, no secondary | `4mCfn38CsM9hGLvDrPxv` |
+| `hi-IN` | Hindi | `hi` | `hi`, secondary `en` | `4mCfn38CsM9hGLvDrPxv` |
+| `te-IN` | Telugu | `te` | `te`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `ta-IN` | Tamil | `ta` | `ta`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `kn-IN` | Kannada | `kn` | `kn`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `ml-IN` | Malayalam | `ml` | `ml`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `bn-IN` | Bengali | `bn` | `bn`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `mr-IN` | Marathi | `mr` | `mr`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `gu-IN` | Gujarati | `gu` | `gu`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `pa-IN` | Punjabi | `pa` | `pa`, secondary `en`, `hi` | `4mCfn38CsM9hGLvDrPxv` |
+| `od-IN` | Odia | `or` | `or`, or `ori` if `or` fails | `4mCfn38CsM9hGLvDrPxv` |
 
 Starting listen for every row is the checked-in id `4mCfn38CsM9hGLvDrPxv`. Replace the cell when the listen fails. OpenAI fallback, if a later task needs it, is `gpt-4o-mini-tts` voice `alloy` on `/v2/test`, not on this URL.
 
@@ -911,21 +913,21 @@ Rows that are **not** Phase 1 and must not block this matrix: diaper-care refusa
 
 ### Language matrix
 
-Voice provider for a Pass is ElevenLabs `eleven_v4_turbo` on this URL. Voice id stays `TBD id` until that task writes a real id into the P1-12 voice map. STT hint is what `_scribe_language_hints` sends after P1-12 (explicit hint, not auto).
+Voice provider for a Pass is ElevenLabs `eleven_v4_turbo` on this URL. The id below is the persona confirmed on 21 Oct 2026. STT hint is what `_scribe_language_hints` sends after P1-12 (explicit hint, not auto).
 
 | Row | Language | Live or wired | Voice provider | Voice name or id | STT language hint | Pass signal | If it fails |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| L-en | English, Indian accent | Live | ElevenLabs `eleven_v4_turbo` | TBD id | `en`, no secondary | Indian accent. `lang=en`. Transcript has the English sentence. | New `en` id if the accent is Western. P1-03 if OpenAI TTS spoke the demo. OpenAI STT on `/v2/test` if the transcript language is wrong, then Sarvam. |
-| L-hi | Hindi | Live | ElevenLabs `eleven_v4_turbo` | TBD id | `hi`, secondary `en` | Hindi greeting. Hinglish sentence stored. One English word does not switch language. | New `hi` id if the mouth is wrong. Ear fallback as in L-en. |
-| L-te | Telugu | Live | ElevenLabs `eleven_v4_turbo` | TBD id | `te`, secondary `en`, `hi` | Telugu heard. Telugu script plus Latin ICU. `lang=te`. | New `te` id. Do not retune endpointing in the same restart. |
-| L-ta | Tamil | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `ta`, secondary `en`, `hi` | `lang=ta` and Tamil heard on the greeting or on a switch from Hindi. | New `ta` id, then the ear fallback. |
-| L-kn | Kannada | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `kn`, secondary `en`, `hi` | `lang=kn` and Kannada heard. | New `kn` id, then the ear fallback. |
-| L-ml | Malayalam | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `ml`, secondary `en`, `hi` | `lang=ml` and Malayalam heard. | New `ml` id, then the ear fallback. Sarvam speaker `pooja` only after OpenAI STT fails. |
-| L-bn | Bengali | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `bn`, secondary `en`, `hi` | Picker shows Bengali. `lang=bn`. Bengali heard. | If the option is missing, fix `GET /languages` before the voice. |
-| L-mr | Marathi | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `mr`, secondary `en`, `hi` | `lang=mr` stays `mr`. Devanagari does not retarget to Hindi by itself. | Fix retarget before swapping the voice. |
-| L-gu | Gujarati | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `gu`, secondary `en`, `hi` | Picker shows Gujarati. `lang=gu`. Gujarati heard. | Same order as Bengali. |
-| L-pa | Punjabi | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `pa`, secondary `en`, `hi` | `lang=pa`. Punjabi heard. | If Scribe rejects `pa`, one retry with `pan`. |
-| L-od | Odia | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | TBD id | `or`, or `ori` if `or` fails | TTS `lang=or`. Not `od`. Odia heard. | P1-12 if `lang=od`. Then a new id. Then OpenAI STT, then Sarvam speaker `ritu`. |
+| L-en | English, Indian accent | Live | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `en`, no secondary | Indian accent. `lang=en`. Transcript has the English sentence. | New `en` id if the accent is Western. P1-03 if OpenAI TTS spoke the demo. OpenAI STT on `/v2/test` if the transcript language is wrong, then Sarvam. |
+| L-hi | Hindi | Live | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `hi`, secondary `en` | Hindi greeting. Hinglish sentence stored. One English word does not switch language. | New `hi` id if the mouth is wrong. Ear fallback as in L-en. |
+| L-te | Telugu | Live | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `te`, secondary `en`, `hi` | Telugu heard. Telugu script plus Latin ICU. `lang=te`. | New `te` id. Do not retune endpointing in the same restart. |
+| L-ta | Tamil | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `ta`, secondary `en`, `hi` | `lang=ta` and Tamil heard on the greeting or on a switch from Hindi. | New `ta` id, then the ear fallback. |
+| L-kn | Kannada | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `kn`, secondary `en`, `hi` | `lang=kn` and Kannada heard. | New `kn` id, then the ear fallback. |
+| L-ml | Malayalam | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `ml`, secondary `en`, `hi` | `lang=ml` and Malayalam heard. | New `ml` id, then the ear fallback. Sarvam speaker `pooja` only after OpenAI STT fails. |
+| L-bn | Bengali | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `bn`, secondary `en`, `hi` | Picker shows Bengali. `lang=bn`. Bengali heard. | If the option is missing, fix `GET /languages` before the voice. |
+| L-mr | Marathi | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `mr`, secondary `en`, `hi` | `lang=mr` stays `mr`. Devanagari does not retarget to Hindi by itself. | Fix retarget before swapping the voice. |
+| L-gu | Gujarati | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `gu`, secondary `en`, `hi` | Picker shows Gujarati. `lang=gu`. Gujarati heard. | Same order as Bengali. |
+| L-pa | Punjabi | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `pa`, secondary `en`, `hi` | `lang=pa`. Punjabi heard. | If Scribe rejects `pa`, one retry with `pan`. |
+| L-od | Odia | Wired, spot-check | ElevenLabs `eleven_v4_turbo` | `4mCfn38CsM9hGLvDrPxv` | `or`, or `ori` if `or` fails | TTS `lang=or`. Not `od`. Odia heard. | P1-12 if `lang=od`. Then a new id. Then OpenAI STT, then Sarvam speaker `ritu`. |
 
 ### Feedback to write for each row
 
@@ -969,33 +971,33 @@ Fill this when P1-24 runs. Leave the template until then. Live calls are English
 
 | Row | Interview id | Pass / Fail | Note |
 | --- | --- | --- | --- |
-| A | | Not started | Hindi stack |
-| B | | Not started | |
-| C | | Not started | Hindi “haan” |
-| D | | Not started | |
-| E | | Not started | |
-| F | | Not started | |
-| G | | Not started | |
-| H | | Not started | |
-| I | | Not started | |
-| J | | Not started | |
-| K | | Not started | |
-| L-en | | Not started | Live. Indian accent |
-| L-hi | | Not started | Live |
-| L-te | | Not started | Live. South Indian |
-| L-ta | | Not started | Wired unless spot-checked |
-| L-kn | | Not started | Wired unless spot-checked |
-| L-ml | | Not started | Wired unless spot-checked |
-| L-bn | | Not started | Wired unless spot-checked |
-| L-mr | | Not started | Wired unless spot-checked |
-| L-gu | | Not started | Wired unless spot-checked |
-| L-pa | | Not started | Wired unless spot-checked |
-| L-od | | Not started | Wired unless spot-checked. Hint `or` or `ori` |
+| A | | Pass | Confirmed 21 Oct 2026. Id was not copied into this file. |
+| B | | Pass | Confirmed 21 Oct 2026 |
+| C | | Pass | Confirmed 21 Oct 2026. Hindi “haan” |
+| D | | Pass | Confirmed 21 Oct 2026 |
+| E | | Pass | Confirmed 21 Oct 2026 |
+| F | | Pass | Confirmed 21 Oct 2026 |
+| G | | Pass | Confirmed 21 Oct 2026 |
+| H | | Pass | Confirmed 21 Oct 2026 |
+| I | | Pass | Confirmed 21 Oct 2026 |
+| J | | Pass | Confirmed 21 Oct 2026 |
+| K | | Pass | Confirmed 21 Oct 2026 |
+| L-en | | Pass | Confirmed 21 Oct 2026. Indian accent |
+| L-hi | | Pass | Confirmed 21 Oct 2026 |
+| L-te | | Pass | Confirmed 21 Oct 2026 |
+| L-ta | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-kn | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-ml | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-bn | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-mr | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-gu | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-pa | | Pass | Confirmed 21 Oct 2026. Spot-check |
+| L-od | | Pass | Confirmed 21 Oct 2026. Hint `or` |
 
-Knob changed during P1-07 (or “none”):
+Knob changed during P1-07 (or “none”): none
 
-Grace-expiry interview id (row J):
+Grace-expiry interview id (row J): confirmed, id not copied into this file
 
-Voice ids locked (code → id, or “TBD id”):
+Voice ids locked (code → id, or “TBD id”): every code → `4mCfn38CsM9hGLvDrPxv`
 
-Phase 1 exit (yes/no):
+Phase 1 exit (yes/no): yes

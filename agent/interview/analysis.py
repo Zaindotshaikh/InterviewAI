@@ -92,6 +92,9 @@ class TurnAnalysis:
     new_claims: list[str] = field(default_factory=list)
     contradictions: list[dict[str, str]] = field(default_factory=list)
     gist_en: str = ""
+    raw_utterance: str = ""
+    # Digits resolved from speech (groups, mixed language, or a correction). Empty if unused.
+    phone_resolved: str = ""
     source: str = "llm"  # llm | heuristic
     # Optional (DIRECTOR_EMPATHY_TONE=true): gentle | reassuring | "" — never required.
     empathy_tone: str = ""
@@ -255,11 +258,13 @@ nervous = true ONLY when they explicitly say they are nervous, scared or anxious
 nervousness.
 
 ## Screening extraction
-- slot_updates: only values the candidate stated in THIS utterance. Convert spoken numbers to digits: phone as 10 digits,
-  years as 4 digits, height in centimetres (convert feet and inches), weight in kilograms, experience in years.
-  Never infer from the resume.
+- slot_updates: only values the candidate stated in THIS utterance. Do not invent or complete a phone
+  number. Years as 4 digits, height in centimetres (convert feet and inches), weight in kilograms, experience
+  in years. Never infer from the resume.
+  If a city (or other place) was not heard — garbled audio such as "location" with no place name — set
+  intelligibility to "unclear" and do not invent a city.
 - confirmation: if pending_confirmation is set, say whether they confirmed or denied it. If they deny and give the
-  right value, also add it to slot_updates.
+  right value, or correct one part of a number in any order, also add that to slot_updates.
 - care_updates: when they express comfort about a care item. A plain yes or no to a question that listed several items
   applies to the listed items. Stances: comfortable | willing_with_training (clearly will do it if shown or trained) |
   hesitant (uncomfortable, unsure, avoids, idk / not sure / never done it, or "I can do other care but not this") |
@@ -401,6 +406,10 @@ def infer_care_accept(text: str) -> str | None:
             return "willing_with_training"
         return "comfortable"
     if no and not yes:
+        # "ज्यादा कुछ नहीं, मैं दवाई देता हूँ" is about the last question, not a diaper refusal.
+        # A short no, or a no that names the care duty, still counts.
+        if not _CARE_DOMAIN.search(t) and len(t) > 48:
+            return None
         return "refuses"
     return None
 
@@ -467,9 +476,11 @@ def heuristic_analysis(text: str, *, pending_field: str = "", pending_value: str
         a.intent = "dont_know"
     elif _OFF_TOPIC_RE.search(blob):
         a.intent = "off_topic"
-    digits = re.sub(r"\D", "", t)
-    if len(digits) == 10:
-        a.slot_updates.append(SlotUpdate("phone", digits, 0.55, raw[:80]))
+    from interview.phone_speech import parse_spoken_phone, trunk_prefix, valid_indian_mobile
+
+    parsed = trunk_prefix(parse_spoken_phone(raw))
+    if parsed and (pending_field == "phone" or valid_indian_mobile(parsed)):
+        a.slot_updates.append(SlotUpdate("phone", parsed, 0.55, raw[:80]))
         if a.intent not in (
             "wants_to_stop",
             "refusal",

@@ -4,10 +4,26 @@ import PreflightCheck from "./components/PreflightCheck";
 import LiveInterview from "./components/LiveInterview";
 import ScorecardView from "./components/ScorecardView";
 import { useLiveKitInterview } from "./hooks/useLiveKitInterview";
+import {
+  clearRejoin,
+  noteRefreshDrop,
+  readRejoin,
+  rejoinLeftMs,
+  requestRejoin,
+  writeRejoin,
+  type ElevenlabsRejoin,
+} from "./rejoin";
 import type { V2Scorecard, V2StartResponse, V2TranscriptResponse } from "./types";
 import { COMPANY_NAME } from "../config/brand";
 import type { IntegrityReport } from "../lib/integrity";
 import { saveIntegrityReport } from "../lib/saveIntegrity";
+
+function formatLeft(ms: number) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
 
 function downloadTranscriptTxt(data: V2TranscriptResponse) {
   const lines = [
@@ -25,6 +41,7 @@ function downloadTranscriptTxt(data: V2TranscriptResponse) {
     const who = turn.role === "assistant" ? "Interviewer" : "Candidate";
     lines.push(`${who}:`);
     lines.push(turn.text.trim() || "(empty)");
+    if (turn.role === "user" && turn.move) lines.push(`Move: ${turn.move}`);
     lines.push("");
   }
 
@@ -52,7 +69,6 @@ type Props = {
 
 /** Realistic Staff Nurse resume used on EL / GPT-Live join screens (editable). */
 const NURSE_RESUME_PREFILL = `Registered Nurse (Staff Nurse) | 28 years
-Mobile: 98765 43210 | Email: nurse.candidate@email.com
 City: Pune, Maharashtra | Willing to relocate: Mumbai, Hyderabad, Bangalore
 
 PROFESSIONAL SUMMARY
@@ -120,6 +136,8 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   const [transcript, setTranscript] = useState<V2TranscriptResponse | null>(null);
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
+  const [rejoin, setRejoin] = useState<ElevenlabsRejoin | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const lk = useLiveKitInterview();
 
   const roleTitle = roles.find((r) => r.id === roleId)?.title || "Staff Nurse";
@@ -140,6 +158,19 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         .catch(() => undefined);
     }
   }, [candidateJoin]);
+
+  useEffect(() => {
+    if (!eleven) return;
+    const now = Date.now();
+    setClock(now);
+    setRejoin(noteRefreshDrop(now));
+  }, [eleven]);
+
+  useEffect(() => {
+    if (!eleven || rejoin?.droppedAt == null) return;
+    const id = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [eleven, rejoin?.droppedAt]);
 
   const start = useCallback(async () => {
     setBusy(true);
@@ -169,6 +200,21 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         throw new Error(err.error || "Failed to start interview");
       }
       const started = (await startRes.json()) as V2StartResponse;
+      if (eleven && started.livekit) {
+        const record: ElevenlabsRejoin = {
+          interviewId: started.id,
+          candidateName: started.candidateName,
+          roleTitle: started.roleTitle,
+          language: started.language,
+          interviewerName: started.interviewerName,
+          interviewerTitle: started.interviewerTitle,
+          livekitUrl: started.livekit.url,
+          token: started.livekit.token,
+          droppedAt: null,
+        };
+        writeRejoin(record);
+        setRejoin(record);
+      }
       setSession(started);
       setPhase("live");
     } catch (err) {
@@ -188,11 +234,16 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
     ttsProvider,
     voiceProvider,
     candidateJoin,
+    eleven,
   ]);
 
   const endAndScore = useCallback(
     async (integrity?: IntegrityReport) => {
       if (!session) return;
+      if (eleven) {
+        clearRejoin();
+        setRejoin(null);
+      }
       setBusy(true);
       try {
         if (integrity) {
@@ -217,8 +268,94 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         setBusy(false);
       }
     },
-    [session],
+    [session, eleven],
   );
+
+  const onDropped = useCallback(() => {
+    if (!eleven || !session) return;
+    setRejoin((prev) => {
+      const base = prev?.interviewId === session.id ? prev : readRejoin();
+      if (!base || base.interviewId !== session.id || base.droppedAt != null) return base;
+      const next = { ...base, droppedAt: Date.now() };
+      writeRejoin(next);
+      return next;
+    });
+  }, [eleven, session]);
+
+  const onRejoined = useCallback((livekit: { url: string; token: string }) => {
+    setRejoin((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, droppedAt: null, livekitUrl: livekit.url, token: livekit.token };
+      writeRejoin(next);
+      return next;
+    });
+    setSession((prev) =>
+      prev?.livekit
+        ? { ...prev, livekit: { ...prev.livekit, url: livekit.url, token: livekit.token } }
+        : prev,
+    );
+  }, []);
+
+  const abandonRejoin = useCallback(() => {
+    clearRejoin();
+    setRejoin(null);
+    setError(null);
+    setSession(null);
+    setScorecard(null);
+    setTranscript(null);
+    setPhase("setup");
+    if (candidateJoin) {
+      setMicReady(false);
+      setRecordingConsent(false);
+    }
+  }, [candidateJoin]);
+
+  const resumeStored = useCallback(async () => {
+    const current = readRejoin();
+    if (!current) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const livekit = await requestRejoin(current.interviewId);
+      const next = { ...current, droppedAt: null, livekitUrl: livekit.url, token: livekit.token };
+      writeRejoin(next);
+      setRejoin(next);
+      setSession({
+        id: current.interviewId,
+        pipeline: "v2",
+        candidateName: current.candidateName,
+        roleTitle: current.roleTitle,
+        language: current.language as V2StartResponse["language"],
+        questions: [],
+        interviewerName: current.interviewerName,
+        interviewerTitle: current.interviewerTitle,
+        targetMinutes: 0,
+        roomName: `interview-v2-${current.interviewId}`,
+        livekit: { url: livekit.url, token: livekit.token, agentName: "" },
+        livekitConfigured: true,
+        providerMode: "",
+        ttsProvider: "elevenlabs",
+        planStepCount: 0,
+      });
+      setPhase("live");
+    } catch (err) {
+      const closed = err instanceof Error && err.message === "rejoin_window_closed";
+      if (closed) {
+        const expired = { ...current, droppedAt: Date.now() - 121_000 };
+        writeRejoin(expired);
+        setRejoin(expired);
+      }
+      setError(
+        closed
+          ? "This interview can no longer be rejoined. Start a new interview."
+          : err instanceof Error
+            ? err.message
+            : "Could not rejoin",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   const onDownloadTranscript = useCallback(async () => {
     if (!session) return;
@@ -257,6 +394,11 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         }}
         lk={lk}
         showAvatar={avatar}
+        allowRejoin={eleven}
+        rejoinLeftMs={rejoinLeftMs(rejoin, clock)}
+        onDropped={onDropped}
+        onRejoined={onRejoined}
+        onAbandon={abandonRejoin}
         onEnded={(integrity) => void endAndScore(integrity)}
       />
     );
@@ -282,6 +424,25 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         </div>
 
         {error && <p className="text-sm text-red-600">{error}</p>}
+
+        {transcript?.turns.some((t) => t.role === "user" && t.move) && (
+          <section className="rounded-xl border border-stone-200 bg-white p-4">
+            <h2 className="text-sm font-semibold text-stone-900">What happened next</h2>
+            <p className="mt-1 text-xs text-stone-500">
+              Each candidate line is shown with the move that followed it.
+            </p>
+            <ul className="mt-3 space-y-3">
+              {transcript.turns
+                .filter((t) => t.role === "user" && t.move)
+                .map((t, i) => (
+                  <li key={`${t.timestamp}-${i}`} className="border-b border-stone-100 pb-3 last:border-0">
+                    <p className="text-sm text-stone-800">{t.text}</p>
+                    <p className="mt-1 font-mono text-xs text-stone-500">Move: {t.move}</p>
+                  </li>
+                ))}
+            </ul>
+          </section>
+        )}
 
         <div>
           <h2 className="text-sm font-semibold text-stone-900">Results</h2>
@@ -329,6 +490,71 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   }
 
   if (candidateJoin) {
+    const left = eleven ? rejoinLeftMs(rejoin, clock) : null;
+    const rejoinPending = Boolean(eleven && rejoin?.droppedAt != null);
+    const rejoinOpen = rejoinPending && (left ?? 0) > 0;
+
+    if (rejoinPending && rejoin) {
+      return (
+        <div className="mx-auto max-w-lg space-y-5 px-4 py-10">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-stone-500">{COMPANY_NAME}</p>
+            <h1 className="text-2xl font-semibold text-stone-900">
+              {rejoinOpen ? "Rejoin your interview" : "Interview ended"}
+            </h1>
+            <p className="mt-1 text-sm text-stone-600">
+              {rejoinOpen
+                ? "A refresh or a dropped link stays on the same interview for 2 minutes."
+                : "The 2 minute window has closed. This interview ended incomplete and was not scored. Start a new one when you are ready."}
+            </p>
+          </div>
+          <p className="text-sm text-stone-700">
+            <span className="font-medium">Interview id </span>
+            <span className="select-all font-mono text-xs">{rejoin.interviewId}</span>
+          </p>
+          {rejoin.candidateName ? (
+            <p className="text-sm text-stone-600">
+              {rejoin.candidateName}
+              {rejoin.roleTitle ? ` · ${rejoin.roleTitle}` : ""}
+            </p>
+          ) : null}
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          {rejoinOpen ? (
+            <>
+              <p className="text-sm font-medium text-stone-800">{formatLeft(left ?? 0)} left</p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void resumeStored()}
+                className="w-full rounded-lg bg-stone-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {busy ? "Rejoining…" : "Rejoin"}
+              </button>
+              <button
+                type="button"
+                onClick={abandonRejoin}
+                className="w-full rounded-lg border border-stone-300 px-4 py-2.5 text-sm text-stone-700"
+              >
+                Start a new interview
+              </button>
+              <p className="text-xs text-stone-500">
+                Starting a new interview abandons {rejoin.interviewId}. The answers already given stay on that id and
+                are not copied over.
+              </p>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={abandonRejoin}
+              className="w-full rounded-lg bg-stone-900 px-4 py-3 text-sm font-medium text-white"
+            >
+              Start a new interview
+            </button>
+          )}
+        </div>
+      );
+    }
+
     const canJoin =
       Boolean(roleId) && name.trim().length > 0 && recordingConsent && micReady && !busy;
 
