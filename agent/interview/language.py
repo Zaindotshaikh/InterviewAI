@@ -116,10 +116,10 @@ def detect_script_language(text: str) -> str | None:
 def native_script_reminder(language: str) -> str:
     profile = get_profile(language)
     if language == "en-IN":
-        return "Respond in clear Indian English."
+        return "Respond in clear Indian English. Keep this same voice for the whole call."
     return (
         f"Respond in everyday spoken {profile.label}, not formal written {profile.label}. "
-        f"Write {profile.label} words in native script; "
-        "keep common English words (hospital, ICU, ward, medicine) in Latin script. "
-        "Never fully romanize Indic sentences."
+        f"Write the whole reply in {profile.label} script, including English words such as diaper, comfortable, ICU and hospital. "
+        "Do not leave those words in Latin letters — that switches the voice. "
+        f"Stay on {profile.label} for the whole call."
     )

@@ -13,10 +13,13 @@ from typing import Any
 
 _DIGITS = re.compile(r"\d+")
 
-# Spoken digit words the STT sometimes leaves unconverted (English only; the analyst converts the rest).
-_WORD_DIGITS = {
-    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+# Words that are not a city. "उन्हें location." is a failed hearing, not a place.
+_CITY_NOISE = {
+    "location", "city", "place", "the", "a", "an", "my", "is", "in", "at", "for",
+    "to", "of", "and", "work", "working", "apply", "applying", "hai", "hoon", "ji",
+    "mein", "me", "wala", "wali", "शहर", "उन्हें", "उन्हे", "उन्होंने", "उनका",
+    "उनकी", "उनके", "unhe", "unka", "unki", "unke", "में", "का", "की", "के", "है",
+    "हूँ", "जी", "लोकेशन", "लोकैशन", "location.", "यहाँ", "वहाँ", "वहा", "यहा",
 }
 
 
@@ -32,26 +35,36 @@ def _fail(reason: str) -> Normalized:
 
 
 def normalize_phone(raw: Any) -> Normalized:
-    text = str(raw or "").lower()
-    for word, digit in _WORD_DIGITS.items():
-        text = re.sub(rf"\b{word}\b", digit, text)
-    digits = "".join(_DIGITS.findall(text))
-    if digits.startswith("0091"):
-        digits = digits[4:]
-    elif digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    elif digits.startswith("0") and len(digits) == 11:
-        digits = digits[1:]
-    if len(digits) != 10:
+    """Keep the digits that were heard, including a short or not-yet-valid mobile.
+
+    A 10-digit number starting 6-9 is a real mobile. Shorter hearings are still
+    returned so the interviewer can read them back and reject them after a yes.
+    """
+    from interview.phone_speech import parse_spoken_phone, trunk_prefix
+
+    digits = trunk_prefix(parse_spoken_phone(str(raw or "")))
+    if not digits:
+        return _fail("no digits heard")
+    if len(digits) > 13:
         return _fail(f"heard {len(digits)} digits, need 10")
-    if digits[0] not in "6789":
-        return _fail("Indian mobile numbers start with 6, 7, 8 or 9")
     return Normalized(True, digits)
 
 
 def spoken_groups(phone: str) -> str:
-    """98765 43210 -> '98765, 43210' so the voice reads it in two breaths."""
-    return f"{phone[:5]}, {phone[5:]}"
+    """9876543210 -> '9, 8, 7, 6, 5, 4, 3, 2, 1, 0'. One digit at a time, nothing added."""
+    digits = "".join(_DIGITS.findall(str(phone or "")))
+    return ", ".join(digits)
+
+
+def plausible_city(raw: Any) -> tuple[bool, str]:
+    """True when the text names a place. Failed hearings like 'उन्हें location.' are not."""
+    text = " ".join(str(raw or "").replace("।", " ").replace(".", " ").split())
+    words = [w.strip(".,।!?;:'\"") for w in text.split()]
+    content = [w for w in words if w and w.casefold() not in _CITY_NOISE and w not in _CITY_NOISE]
+    cleaned = " ".join(content)[:160]
+    if len(cleaned) < 2:
+        return False, ""
+    return True, cleaned
 
 
 def normalize_height_cm(raw: Any) -> Normalized:

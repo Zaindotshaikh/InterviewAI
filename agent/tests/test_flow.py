@@ -154,16 +154,209 @@ def test_one_utterance_can_fill_several_fields_and_phone_is_read_back(blueprint)
     move = flow.apply(say(("city", "Pune"), ("phone", "+91 98765 43210")))
     assert flow.state.slots["city"].value == "Pune"
     assert flow.state.slots["phone"].value == "9876543210"
-    assert move.kind == "confirm" and "98765, 43210" in move.directive
+    assert move.kind == "confirm" and "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.directive
 
 
-def test_misheard_phone_is_asked_again_not_stored(blueprint):
+def test_short_phone_is_read_back_then_rejected_after_they_agree(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     flow.apply(say(("city", "Pune")))
     move = flow.apply(say(("phone", "98765 432")))
+    assert move.kind == "confirm"
+    assert flow.state.slots["phone"].value == "98765432"
+    move = flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed", raw_utterance="yes"))
+    assert move.kind == "reask_invalid"
+    assert "9, 8, 7, 6, 5, 4, 3, 2" in move.directive
+    assert "not a complete mobile" in move.directive
+    assert flow.state.slots["phone"].status == "empty"
+    assert "only for the recruitment" not in move.directive.lower()
+
+
+def test_mixed_language_phone_groups_are_caught(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="nine एक 1 two तीन 2 chappan baawan",
+            slot_updates=[SlotUpdate("phone", "91", 0.4)],
+        )
+    )
+    assert flow.state.slots["phone"].value == "9112325652"
+    assert move.kind == "confirm"
+    assert "9, 1, 1, 2, 3, 2, 5, 6, 5, 2" in move.directive
+
+
+def test_phone_correction_splices_the_changed_part_in_any_order(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9112323549")))
+    move = flow.apply(
+        TurnAnalysis(
+            confirmation_field="phone",
+            confirmation="denied",
+            raw_utterance="3550 hai, 3549 nahi",
+        )
+    )
+    assert flow.state.slots["phone"].value == "9112323550"
+    assert move.kind == "confirm"
+    assert "9, 1, 1, 2, 3, 2, 3, 5, 5, 0" in move.directive
+
+    move = flow.apply(
+        TurnAnalysis(
+            confirmation_field="phone",
+            confirmation="denied",
+            raw_utterance="last four 3549",
+        )
+    )
+    assert flow.state.slots["phone"].value == "9112323549"
+    assert move.kind == "confirm"
+
+
+def test_repeating_the_same_grouped_number_confirms_once_then_moves_on(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    said = "911, 23, 23, 5, 4, 9."
+    first = flow.apply(TurnAnalysis(intent="answer", raw_utterance=said, slot_updates=[]))
+    assert first.kind == "confirm"
+    assert flow.state.slots["phone"].value == "9112323549"
+    assert "9, 1, 1, 2, 3, 2, 3, 5, 4, 9" in first.directive
+    second = flow.apply(TurnAnalysis(intent="answer", raw_utterance=said, slot_updates=[]))
+    assert flow.state.slots["phone"].status == "confirmed"
+    assert second.kind == "ask_field"
+    assert "qualification" in second.directive.lower()
+
+
+def test_same_digits_after_no_are_accepted(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9112323549")))
+    move = flow.apply(
+        TurnAnalysis(
+            confirmation_field="phone",
+            confirmation="denied",
+            raw_utterance="nahi, number hai 9112323549",
+        )
+    )
+    assert flow.state.slots["phone"].value == "9112323549"
+    assert flow.state.slots["phone"].status == "confirmed"
+    assert move.kind == "ask_field"
+    assert "qualification" in move.directive.lower()
+
+
+def test_city_tail_does_not_pretend_the_number_was_missed(blueprint):
+    """The rest of the city answer must not be scored as a failed first ask for the mobile number."""
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="पुणे, पुणे और बैंगलोर, ब",
+            slot_updates=[SlotUpdate("city", "पुणे", 0.9)],
+        )
+    )
+    assert move.kind == "ask_field"
+    assert flow.state.slots["phone"].attempts == 1
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="पुणे, पुणे और बांग्लादेश।",
+            slot_updates=[SlotUpdate("city", "पुणे और बांग्लादेश", 0.9)],
+        )
+    )
+    assert "you could not hear their" not in move.directive.lower()
+    assert "do not say you could not hear" in move.directive.lower()
+    assert move.kind == "ask_field"
+    assert "mobile number" in move.directive.lower()
+    assert flow.state.slots["phone"].status == "empty"
+    assert flow.state.slots["phone"].attempts == 1
+    assert flow.state.slots["city"].value == "पुणे और बांग्लादेश"
+
+
+def test_repeated_phone_phrase_is_read_back_and_not_skipped(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(
+        TurnAnalysis(intent="answer", raw_utterance="911, 2323. 911, 2323.", slot_updates=[])
+    )
+    assert flow.state.slots["phone"].value == "9112323"
+    assert move.kind == "confirm"
+    assert "qualification" not in move.directive.lower()
+    assert "9, 1, 1, 2, 3, 2, 3" in move.directive
+
+
+def test_the_rest_of_a_short_number_is_read_back(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    first = flow.apply(TurnAnalysis(intent="answer", raw_utterance="911, 2323.", slot_updates=[]))
+    assert first.kind == "confirm"
+    assert flow.state.slots["phone"].value == "9112323"
+    second = flow.apply(TurnAnalysis(intent="answer", raw_utterance="540", slot_updates=[]))
+    assert flow.state.slots["phone"].value == "9112323540"
+    assert second.kind == "confirm"
+    assert "qualification" not in second.directive.lower()
+
+
+def test_a_too_long_number_stays_on_the_phone_question(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    flow.state.slots["phone"].attempts = 3
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="123456789012345", slot_updates=[]))
     assert move.kind == "reask_invalid"
     assert flow.state.slots["phone"].status == "empty"
+    assert "qualification" not in move.directive.lower()
+    assert "mobile number" in move.directive.lower()
+
+
+def test_start_correction_keeps_the_rest_and_asks_only_that(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    first = flow.apply(TurnAnalysis(intent="answer", raw_utterance="111-2323-549.", slot_updates=[]))
+    assert flow.state.slots["phone"].value == "1112323549"
+    assert first.verbatim == "मैंने सुना 1, 1, 1, 2, 3, 2, 3, 5, 4, 9. क्या यह सही है?"
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            confirmation="denied",
+            raw_utterance="नहीं, नहीं, start में 911, बाकी का सही है।",
+            slot_updates=[],
+        )
+    )
+    assert flow.state.slots["phone"].value == "9112323549"
+    assert move.kind == "confirm"
+    assert move.verbatim == "मैंने सुना 9, 1, 1, 2, 3, 2, 3, 5, 4, 9. क्या यह सही है?"
+    assert move.verbatim.count("?") == 1
+    age = flow.apply(TurnAnalysis(intent="answer", raw_utterance="28", slot_updates=[]))
+    assert flow.state.slots["phone"].value == "9112323549"
+    assert flow.state.slots["phone"].status == "captured"
+    assert age.kind == "confirm"
+    assert "2, 8" not in age.verbatim
+
+
+def test_garbled_city_says_it_could_not_hear_then_asks_again(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            gist_en="location",
+            raw_utterance="उन्हें location.",
+            slot_updates=[SlotUpdate("city", "उन्हें location.", 0.8)],
+        )
+    )
+    assert flow.state.slots["city"].status == "empty"
+    assert move.kind == "ask_repeat"
+    assert "could not hear" in move.directive.lower()
+    assert "which city" in move.directive.lower()
+    move = flow.apply(say(("city", "Pune")))
+    assert flow.state.slots["city"].value == "Pune"
+    assert move.kind == "ask_field"
 
 
 def test_denied_readback_clears_the_number_and_asks_again(blueprint):
@@ -346,6 +539,13 @@ def test_infer_care_accept_ready_phrases():
     assert infer_care_accept("I can do it with training") == "willing_with_training"
     assert infer_care_accept("मैं ये काम नहीं करूँगा") == "refuses"
     assert infer_care_accept("I won't do diaper care") == "refuses"
+    # "nothing much, I give medicines" is the previous answer, not a diaper no.
+    assert (
+        infer_care_accept(
+            "ज्यादा कुछ नहीं, सबको दवाई-ववाई देने का, सलाइन चढ़ाने का, उतारने का सब करता हूँ।"
+        )
+        is None
+    )
     assert infer_care_accept("Actually मैंने कभी किया नहीं है क्या ये ज़रूरी है") is None
     # Demo bug: हाँ about ICU experience is not care consent.
     assert (
@@ -367,6 +567,28 @@ def test_infer_care_accept_ready_phrases():
         item_ids=["diaper_care", "hygiene_bathing", "toileting_bedpan", "lifting_repositioning"],
     )
     assert multi_icu.care_updates == []
+
+
+def test_one_diaper_no_persuades_and_does_not_end(blueprint):
+    """Saying they are not comfortable once explains the duty. It does not end the interview."""
+    from interview.analysis import recover_care_updates
+
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    earlier = "ज्यादा कुछ नहीं, सबको दवाई-ववाई देने का, सलाइन चढ़ाने का, उतारने का सब करता हूँ।"
+    items = [str(i) for i in flow.state.focus["items"]]
+    move = flow.apply(
+        recover_care_updates(TurnAnalysis(intent="answer", raw_utterance=earlier), text=earlier, item_ids=items)
+    )
+    assert move.kind != "gate_failed"
+    assert flow.state.care["diaper_care"].persuasions == 0
+    said = "अ, नहीं, नहीं, diaper care से मैं ज्यादा comfortable नहीं हूँ।"
+    move = flow.apply(
+        recover_care_updates(TurnAnalysis(intent="answer", raw_utterance=said), text=said, item_ids=["diaper_care"])
+    )
+    assert move.kind == "persuade"
+    assert flow.state.gate_failed is None
+    assert flow.state.care["diaper_care"].persuasions == 1
 
 
 def test_care_intro_short_yes_skips_per_item_diaper_reask(blueprint):
@@ -664,7 +886,7 @@ def test_partial_intelligibility_forces_phone_confirm(blueprint):
     assert flow.state.slots["city"].confidence >= 0.6  # partial must not clamp non-confirm fields
     assert flow.state.slots["phone"].status == "captured"
     assert flow.state.slots["phone"].confidence < 0.6
-    assert move.kind == "confirm" and "98765" in move.directive
+    assert move.kind == "confirm" and "9, 8, 7, 6" in move.directive
 
 
 def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):

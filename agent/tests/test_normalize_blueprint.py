@@ -31,13 +31,27 @@ def test_phone_normalisation(raw, expected):
     assert normalize_phone(raw).value == expected
 
 
-@pytest.mark.parametrize("raw", ["98765", "1234567890", "", "98765432101234"])
+@pytest.mark.parametrize("raw", ["", "98765432101234"])
 def test_phone_rejects_bad_numbers(raw):
     assert not normalize_phone(raw).ok
 
 
-def test_phone_is_read_in_two_groups():
-    assert spoken_groups("9876543210") == "98765, 43210"
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("98765", "98765"),
+        ("1234567890", "1234567890"),
+        ("chappan baawan", "5652"),
+        ("nau sau sataasi", "987"),
+        ("ninety eight seven six", "9876"),
+    ],
+)
+def test_phone_keeps_heard_digits_for_readback(raw, expected):
+    assert normalize_phone(raw).value == expected
+
+
+def test_phone_is_read_as_single_digits():
+    assert spoken_groups("9876543210") == "9, 8, 7, 6, 5, 4, 3, 2, 1, 0"
 
 
 @pytest.mark.parametrize(

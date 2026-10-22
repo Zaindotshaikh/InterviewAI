@@ -77,10 +77,10 @@ class Settings(BaseSettings):
     # ElevenLabs (opt-in via /elevenlabs-interviewer or TTS_PROVIDER=elevenlabs)
     elevenlabs_api_key: str | None = None
     # Default English voice: Sarah (premade — works on free API).
-    # Sujata for every language (EN + Indic) so the interviewer never switches voices mid-call.
+    # Shared fallback when a language key is missing. Phase 1 starts every language on this id.
     elevenlabs_voice_id: str = "4mCfn38CsM9hGLvDrPxv"
     elevenlabs_voice_id_local: str = "4mCfn38CsM9hGLvDrPxv"
-    # Optional per-language overrides only if you deliberately want to break the single-voice rule.
+    # Comma list code:voiceId (en-IN or en). One id per language. Do not invent ids here.
     elevenlabs_voice_by_lang: str = ""
     # eleven_v4_turbo = realtime (~100ms); eleven_v4 = max quality (slower). Both support 90+ languages.
     elevenlabs_model: str = "eleven_v4_turbo"

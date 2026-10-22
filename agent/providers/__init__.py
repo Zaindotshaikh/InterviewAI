@@ -20,6 +20,7 @@ __all__ = [
     "build_stt",
     "build_tts",
     "build_vad",
+    "SessionRefused",
     "google_voice_for",
     "openai_stt_languages",
     "uses_gemini_tts",

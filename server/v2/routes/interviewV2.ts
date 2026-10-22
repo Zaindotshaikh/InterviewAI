@@ -15,6 +15,7 @@ import {
   precheck,
   screeningFacts,
   summarizeAreas,
+  verifyEvidence,
 } from "../lib/classification.js";
 import {
   createCandidateToken,
@@ -31,6 +32,7 @@ import {
 import { withV2StartSlot } from "../lib/concurrency.js";
 import { startInterviewRecording } from "../lib/recording.js";
 import { SUPPORTED_LANGUAGES, type InterviewLanguageCode } from "../lib/types.js";
+import { turnsForReview } from "../lib/transcriptReview.js";
 
 const router = Router();
 
@@ -346,6 +348,51 @@ router.post("/start", async (req, res) => {
   }
 });
 
+/** Same interview, new candidate token, no second agent. 409 when the call is already closed. */
+router.post("/:id/rejoin", async (req, res) => {
+  try {
+    const record = await getV2Interview(req.params.id);
+    if (!record) {
+      res.status(404).json({ error: "Interview not found" });
+      return;
+    }
+    if (record.extras.controller.completed) {
+      res.status(409).json({ error: "rejoin_window_closed" });
+      return;
+    }
+    if (!isLiveKitConfigured()) {
+      res.status(503).json({ error: "LiveKit is not configured" });
+      return;
+    }
+
+    const interviewId = record.interview.id;
+    const roomName = record.extras.roomName || roomNameForInterview(interviewId);
+    const tok = await createCandidateToken({
+      roomName,
+      identity: `candidate-${interviewId.slice(0, 8)}`,
+      interviewId,
+      avatar: Boolean(record.extras.avatar),
+      ttsProvider: record.extras.ttsProvider,
+      voiceProvider: record.extras.voiceProvider,
+      dispatchAgent: false,
+      metadata: {
+        language: record.extras.language,
+        recordingConsent: Boolean(record.extras.controller.recordingConsent),
+        rejoin: true,
+      },
+    });
+    console.info(`[v2] rejoin interview=${interviewId} room=${roomName} dispatch=false`);
+    res.json({
+      id: interviewId,
+      roomName,
+      livekit: { url: tok.url, token: tok.token, agentName: tok.agentName },
+    });
+  } catch (err) {
+    console.error("[v2] rejoin error:", err);
+    res.status(500).json({ error: "Failed to rejoin interview" });
+  }
+});
+
 router.get("/:id", async (req, res) => {
   try {
     const record = await getV2Interview(req.params.id);
@@ -384,11 +431,7 @@ router.get("/:id/transcript", async (req, res) => {
       candidateName: record.interview.candidateName,
       roleTitle: record.interview.roleTitle,
       language: record.extras.language,
-      turns: record.interview.transcript.map((t) => ({
-        role: t.role,
-        text: t.text,
-        timestamp: t.timestamp,
-      })),
+      turns: turnsForReview(record.interview.transcript, record.extras.events),
     });
   } catch (err) {
     console.error("[v2] transcript error:", err);
@@ -455,6 +498,7 @@ router.post("/:id/summary", async (req, res) => {
     const flow = record.extras.controller.flow;
     if (flow && record.extras.plan.version >= 2) {
       const bp = record.extras.plan.blueprint ?? (await loadBlueprint());
+      const haystacks = [...transcript.map((t) => t.text), ...scoringTranscript.map((t) => t.text)];
       let tier = precheck(flow, bp);
       let model: Record<string, unknown> = {};
       if (!tier) {
@@ -480,17 +524,19 @@ router.post("/:id/summary", async (req, res) => {
           ],
         });
         model = JSON.parse(completion.choices[0]?.message?.content ?? "{}") as Record<string, unknown>;
-        const haystacks = [
-          ...transcript.map((t) => t.text),
-          ...scoringTranscript.map((t) => t.text),
-          ...Object.values(flow.areas ?? {}).flatMap((a) =>
-            (a.evidence ?? []).flatMap((e) => [e.quote ?? "", e.summary ?? ""]),
-          ),
-        ];
         tier = finalizeModelTier(model, flow, bp, haystacks);
       }
 
-      const areas = summarizeAreas(flow, bp);
+      const areas = summarizeAreas(flow, bp).map((a) => ({
+        ...a,
+        evidence: a.evidence.map((e) => {
+          const quote = e.quote ?? "";
+          const ok = quote
+            ? verifyEvidence([{ area: a.title, point: e.quality, quote }], haystacks)[0]?.verified === true
+            : false;
+          return { ...e, quote: ok ? quote : "" };
+        }),
+      }));
       const scoreByTier: Record<string, number | null> = {
         tier_1: 9,
         tier_2: 7,
@@ -519,7 +565,7 @@ router.post("/:id/summary", async (req, res) => {
         tier_confidence: tier.confidence,
         tier_reasoning: tier.reasoning,
         tier_method: tier.method,
-        tier_evidence: tier.evidence,
+        tier_evidence: tier.evidence.filter((e) => e.verified),
         flags: tier.flags,
         screening: screeningFacts(flow),
         clinical_areas: areas,

@@ -86,6 +86,7 @@ class BackendClient:
         timestamp: str | None = None,
         llm_text: str | None = None,
         interrupted: bool | None = None,
+        move: str | None = None,
     ) -> None:
         body: dict[str, Any] = {"role": role, "text": text}
         if turn_index is not None:
@@ -96,6 +97,8 @@ class BackendClient:
             body["llmText"] = llm_text
         if interrupted is not None:
             body["interrupted"] = bool(interrupted)
+        if move:
+            body["move"] = move
         try:
             await self._request("POST", f"/api/v2/internal/interviews/{interview_id}/transcript", body)
         except Exception as err:  # noqa: BLE001

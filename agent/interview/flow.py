@@ -9,6 +9,7 @@ Stages: opening -> screening -> clinical -> closing -> ended.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from typing import Any
 
 from interview.analysis import (
     ClinicalGrade,
+    SlotUpdate,
     TurnAnalysis,
     build_user_payload,
     looks_like_care_consent,
@@ -23,7 +25,17 @@ from interview.analysis import (
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
 from interview.language import get_profile
-from interview.normalize import normalize_field, spoken_groups
+from interview.normalize import normalize_field, plausible_city, spoken_groups
+from interview.phone_speech import (
+    correct_phone,
+    parse_spoken_phone,
+    phone_again_line,
+    phone_ask_line,
+    phone_confirm_line,
+    phone_invalid_line,
+    trunk_prefix,
+    valid_indian_mobile,
+)
 from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
 
@@ -37,6 +49,8 @@ _TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
     "homecare": ("home", "private duty", "caregiver", "care giver", "elderly", "attendant", "domiciliary"),
     "ward": ("ward", "general", "opd", "ot ", "operation", "clinic", "hospital", "nursing home"),
 }
+
+PHONE_ASK = "Ask for their mobile number."
 
 STYLE_FOOTER = (
     "Reply in 1-2 short spoken sentences, like a recruiter on a phone. Ask only ONE question. "
@@ -78,6 +92,8 @@ class Move:
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     # Set outside InterviewFlow (agent layer). Never used for policy.
     tone: str | None = None
+    # Spoken as-is. One sentence, so the voice model cannot add a second question.
+    verbatim: str | None = None
 
 
 class InterviewFlow:
@@ -96,6 +112,9 @@ class InterviewFlow:
         self._t0 = clock()
         self._base_elapsed = self.state.elapsed_s
         self._invalid: dict[str, str] = {}
+        self._invalid_heard: dict[str, str] = {}
+        self._phone_agree_rejects = 0
+        self._last_user = ""
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -199,7 +218,8 @@ class InterviewFlow:
                 for t in tokens
                 if t in _PHONE_DIGIT_WORDS or any(ch.isdigit() for ch in t)
             )
-            return digit_chars >= 8 or digit_words >= 6
+            spoken = trunk_prefix(parse_spoken_phone(text))
+            return len(spoken) >= 10 or digit_chars >= 8 or digit_words >= 6
 
         if verdict == "substantive":
             return True
@@ -388,10 +408,12 @@ class InterviewFlow:
                 "phone, or using earphones. Then ask your last question again, simply.",
                 events=[("audio.noise_help", {"stage": st.stage, "total": st.unclear_total})],
             )
+        last = f" Then ask this once: {st.last_question}" if st.last_question else " Then ask your last question once."
         return self._move(
             "ask_repeat",
-            "You could not hear that clearly. Say sorry, name the part you missed if you know it (for example 'I "
-            "didn't catch your answer'), and ask them to say it once more. Do not guess what they said.",
+            "You could not hear that properly. Your FIRST sentence must say, in their language, that you could not "
+            "hear it properly. Do not guess what they said and do not ask it as if it were a new question."
+            + last,
             events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
         )
 
@@ -490,6 +512,8 @@ class InterviewFlow:
         st.silence_level = 0
         st.elapsed_s = self.elapsed_s()
         self._invalid = {}
+        self._invalid_heard = {}
+        self._prepare_phone_turn(a)
 
         if st.stage == "ended":
             return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
@@ -570,6 +594,17 @@ class InterviewFlow:
                     return self._wrap(skip, a.nervous)
                 return self._wrap(self._redirect(a), a.nervous)
 
+        raw_now = (a.raw_utterance or "").strip()
+        if a.intent == "answer" and raw_now:
+            previous = self._last_user
+            self._last_user = raw_now
+            if st.stage in ("screening", "clinical") and self._revises_previous(previous, raw_now):
+                if not self._turn_answers_focus(a):
+                    self._keep_fuller_known_text(a)
+                    return self._wrap(self._restate_current_question(), a.nervous)
+        elif raw_now:
+            self._last_user = raw_now
+
         if st.stage == "screening":
             move = self._screening(a)
         elif st.stage == "clinical":
@@ -579,6 +614,127 @@ class InterviewFlow:
         else:
             move = self._screening(a)
         return self._wrap(move, a.nervous)
+
+    def _revises_previous(self, previous: str, current: str) -> bool:
+        """True when this turn is the rest of the answer we just took, not a new one.
+
+        The transcriber commits a partial ('पुणे, पुणे और बैंगलोर') and then the
+        full sentence. That tail must not be graded as the next question.
+        """
+        a = re.sub(r"[\s.,।!?॥？]+", " ", previous or "").strip().casefold()
+        b = re.sub(r"[\s.,।!?॥？]+", " ", current or "").strip().casefold()
+        if len(a) < 4 or len(b) < 4:
+            return False
+        if a == b or b.startswith(a) or a.startswith(b):
+            return True
+        shared = 0
+        for left, right in zip(a, b):
+            if left != right:
+                break
+            shared += 1
+        return shared >= 8
+
+    def _turn_answers_focus(self, a: TurnAnalysis) -> bool:
+        """The current question actually got an answer in this utterance."""
+        focus = self.state.focus or {}
+        kind = focus.get("type")
+        raw = a.raw_utterance or ""
+        if kind == "confirm":
+            if a.confirmation != "none":
+                return True
+            return bool(parse_spoken_phone(raw))
+        if kind == "slots":
+            ids = [str(i) for i in (focus.get("ids") or [])]
+            spec = self.bp.field_spec(ids[0]) if ids else None
+            if spec is None:
+                return False
+            if spec.kind == "phone":
+                return bool(parse_spoken_phone(raw))
+            return any(u.field == spec.id and str(u.value or "").strip() for u in a.slot_updates)
+        if kind == "care":
+            items = {str(i) for i in (focus.get("items") or [])}
+            return any(u.item in items for u in a.care_updates)
+        if kind == "clinical":
+            return a.clinical is not None
+        return False
+
+    def _keep_fuller_known_text(self, a: TurnAnalysis) -> None:
+        """A late full transcript can replace a truncated city. It must not invent a phone."""
+        for u in a.slot_updates:
+            spec = self.bp.field_spec(u.field)
+            if spec is None or spec.kind == "phone":
+                continue
+            slot = self.state.slot(spec.id)
+            if slot.status not in ("captured", "confirmed"):
+                continue
+            norm = normalize_field(spec.kind, u.value)
+            if spec.id == "city" and norm.ok:
+                ok, cleaned = plausible_city(norm.value)
+                if not ok:
+                    continue
+                norm = type(norm)(True, cleaned, "")
+            if not norm.ok or norm.value is None:
+                continue
+            newer = str(norm.value).strip()
+            if len(newer) > len(str(slot.value or "")):
+                slot.value = newer
+
+    def _restate_current_question(self) -> Move:
+        """Ask the question that is already on the table. Do not apologise for a mis-hear."""
+        st = self.state
+        focus = st.focus or {}
+        kind = focus.get("type")
+        if kind == "slots":
+            ids = [str(i) for i in (focus.get("ids") or [])]
+            spec = self.bp.field_spec(ids[0]) if ids else None
+            if spec is not None:
+                ask = PHONE_ASK if spec.kind == "phone" else spec.ask
+                self._set_focus("slots", ids=[spec.id])
+                move = self._move(
+                    "ask_field",
+                    "They were still finishing their previous answer. Do not say you could not hear them. "
+                    f"Ask only this, once: {ask}",
+                )
+                if spec.kind == "phone":
+                    move.verbatim = phone_ask_line(self.state.language)
+                return move
+        if kind == "confirm":
+            field_id = str(focus.get("field") or "")
+            spec = self.bp.field_spec(field_id)
+            slot = st.slots.get(field_id)
+            if spec is not None and slot is not None and slot.value is not None:
+                shown = spoken_groups(str(slot.value)) if spec.kind == "phone" else str(slot.value)
+                move = self._move("confirm", f"Say exactly: I heard {shown}. Is that correct?")
+                if spec.kind == "phone":
+                    move.verbatim = phone_confirm_line(self.state.language, shown)
+                return move
+        if kind == "care":
+            items = [str(i) for i in (focus.get("items") or [])]
+            if len(items) > 1 and self.bp.care_intro:
+                return self._move("ask_care", self.bp.care_intro)
+            if items:
+                item = self.bp.care_item(items[0])
+                if item is not None:
+                    return self._move("ask_care_item", item.ask)
+        if kind == "clinical":
+            question = str(focus.get("question") or st.last_question or "the same clinical question")
+            return self._move(
+                "clinical_question",
+                "They were still finishing their previous answer. Ask the same clinical question once. "
+                f"Do not say you could not hear them. Question: {question}",
+            )
+        if kind == "experience_dive":
+            return self._move(
+                "experience_dive",
+                "They were still finishing their answer. Ask once what they actually did day to day. "
+                "Do not say you could not hear them and do not move on.",
+            )
+        if st.last_question:
+            return self._move(
+                "ask_field",
+                f"Ask this once. Do not say you could not hear them: {st.last_question}",
+            )
+        return self._move("ask_field", "Ask your last question once. Do not say you could not hear them.")
 
     # ------------------------------------------------------------------------------------- generic behaviours
 
@@ -692,13 +848,69 @@ class InterviewFlow:
     def _slots_done(self) -> bool:
         return all(self.state.slots.get(f.id) and self.state.slots[f.id].status != "empty" for f in self.bp.fields)
 
+    def _prepare_phone_turn(self, a: TurnAnalysis) -> None:
+        """Catch a spoken mobile from the raw utterance, including a correction.
+
+        Groups, mixed languages, and hundreds/thousands are parsed here so a missed
+        analyst value cannot drop the number. A correction rewrites only the part
+        that changed and leaves the rest of the read-back in place.
+        """
+        pending = self.pending_confirmation()
+        if pending:
+            spec = self.bp.field_spec(pending[0])
+            if spec is None or spec.kind != "phone":
+                return
+            previous = str(self.state.slot(spec.id).value or "")
+            raw = (a.raw_utterance or "").strip()
+            # Only the words they just said. A model-written number is not a second source.
+            chosen = correct_phone(previous, raw) if raw else ""
+            parsed = trunk_prefix(parse_spoken_phone(raw)) if raw else ""
+            prev_digits = trunk_prefix(re.sub(r"\D", "", previous))
+            if parsed and parsed == prev_digits:
+                # They said the same number again. Lock it instead of reading it back forever.
+                a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
+                a.confirmation = "confirmed"
+                a.confirmation_field = spec.id
+                return
+            if not chosen or chosen == prev_digits:
+                # "28" or any other short reply is not a correction and not a yes.
+                a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
+                return
+            a.phone_resolved = chosen
+            a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
+            a.slot_updates.append(SlotUpdate(spec.id, chosen, 0.9, raw[:80]))
+            if a.confirmation == "confirmed":
+                a.confirmation = "none"
+            return
+
+        focus = self.state.focus or {}
+        if focus.get("type") != "slots" or "phone" not in (focus.get("ids") or []):
+            return
+        raw = (a.raw_utterance or "").strip()
+        if not raw:
+            return
+        parsed = trunk_prefix(parse_spoken_phone(raw))
+        # They spoke, but it was not a number. Drop any phone the model filled in.
+        if not parsed:
+            a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
+            return
+        a.phone_resolved = parsed
+        a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
+        a.slot_updates.append(SlotUpdate("phone", parsed, 0.9, raw[:80]))
+
     def _absorb_slot_updates(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
         st = self.state
         for u in a.slot_updates:
             spec = self.bp.field_spec(u.field)
             if spec is None:
                 continue
-            norm = normalize_field(spec.kind, u.value)
+            source = a.phone_resolved if spec.kind == "phone" and a.phone_resolved else u.value
+            norm = normalize_field(spec.kind, source)
+            if spec.id == "city" and norm.ok:
+                ok, cleaned = plausible_city(norm.value)
+                if not ok:
+                    continue
+                norm = type(norm)(True, cleaned)
             slot = st.slot(spec.id)
             if not norm.ok:
                 self._invalid[spec.id] = norm.reason
@@ -722,7 +934,18 @@ class InterviewFlow:
             return
         field_id = pending[0]
         slot = self.state.slot(field_id)
+        spec = self.bp.field_spec(field_id)
         if a.confirmation == "confirmed":
+            if spec is not None and spec.kind == "phone" and not valid_indian_mobile(str(slot.value or "")):
+                heard = str(slot.value or "")
+                self._phone_agree_rejects += 1
+                slot.status, slot.value = "empty", None
+                if self._phone_agree_rejects < 2 and heard:
+                    self._invalid[field_id] = "not a 10-digit mobile"
+                    self._invalid_heard[field_id] = heard
+                else:
+                    slot.status = "unknown"
+                return
             slot.status = "confirmed"
         elif a.confirmation == "denied":
             fresh = any(u.field == field_id for u in a.slot_updates)
@@ -800,7 +1023,50 @@ class InterviewFlow:
             if move:
                 move.events = events + move.events
                 return move
+        missed = self._unheard_slot(a)
+        if missed is not None:
+            heard = self._could_not_hear(missed, events)
+            if heard is not None:
+                return heard
         return self._screening_next(events)
+
+    def _unheard_slot(self, a: TurnAnalysis) -> FieldSpec | None:
+        """The focused fact is still empty after an answer that was not a real value."""
+        if a.intent != "answer" or a.confirmation != "none":
+            return None
+        focus = self.state.focus or {}
+        if focus.get("type") != "slots":
+            return None
+        ids = [str(i) for i in (focus.get("ids") or [])]
+        if not ids:
+            return None
+        spec = self.bp.field_spec(ids[0])
+        if spec is None or self.state.slot(spec.id).status != "empty":
+            return None
+        if spec.kind == "phone":
+            raw = a.raw_utterance or " ".join(str(u.value) for u in a.slot_updates if u.field == spec.id)
+            if parse_spoken_phone(raw):
+                return None
+        return spec
+
+    def _could_not_hear(self, spec: FieldSpec, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
+        slot = self.state.slot(spec.id)
+        if slot.attempts >= self.bp.limits.max_field_attempts:
+            slot.status = "unknown"
+            return None
+        slot.attempts += 1
+        self._set_focus("slots", ids=[spec.id])
+        ask = PHONE_ASK if spec.kind == "phone" else spec.ask
+        move = self._move(
+            "ask_repeat",
+            f"You could not hear their {spec.label} properly. Your FIRST sentence must say, in their language, "
+            "that you could not hear it properly. Then ask this once, and only this: "
+            f"{ask} Do not guess a value and do not ask it as if they had not spoken.",
+            events=events + [("audio.unheard", {"field": spec.id})],
+        )
+        if spec.kind == "phone":
+            move.verbatim = phone_again_line(self.state.language)
+        return move
 
     def _experience_captured(self) -> bool:
         """True once experience years/settings are no longer waiting to be asked."""
@@ -892,18 +1158,42 @@ class InterviewFlow:
             value = slot.value
             shown = spoken_groups(str(value)) if spec.kind == "phone" else str(value)
             self._set_focus("confirm", field=spec.id, ids=[spec.id])
-            return self._move(
+            move = self._move(
                 "confirm",
-                f"Read back what you heard for their {spec.label}: {shown}. For numbers read in small groups, slowly. "
-                "Ask if that is correct. Do not ask anything else.",
+                f"Say exactly: I heard {shown}. Is that correct?",
                 events=events,
             )
+            if spec.kind == "phone":
+                move.verbatim = phone_confirm_line(st.language, shown)
+            return move
 
         # 3. Something was heard but looked wrong: ask again.
         if self._invalid:
             fid, reason = next(iter(self._invalid.items()))
             spec2 = self.bp.field_spec(fid)
             if spec2 is not None:
+                heard = self._invalid_heard.get(fid, "")
+                if spec2.kind == "phone" and heard:
+                    shown = spoken_groups(heard)
+                    self._set_focus("slots", ids=[fid])
+                    move = self._move(
+                        "reask_invalid",
+                        f"Say exactly: {shown} is not a complete mobile number. Please say the number again.",
+                        events=events,
+                    )
+                    move.verbatim = phone_invalid_line(st.language, shown)
+                    return move
+                if spec2.kind == "phone":
+                    # A too-long or messy hearing is not a reason to skip the number.
+                    self._set_focus("slots", ids=[fid])
+                    move = self._move(
+                        "reask_invalid",
+                        "You did not catch a complete mobile number. Ask them to say the full mobile number once, "
+                        "slowly. Stay on the mobile number. Do not move on to another question.",
+                        events=events,
+                    )
+                    move.verbatim = phone_again_line(st.language)
+                    return move
                 slot = st.slot(fid)
                 slot.attempts += 1
                 if slot.attempts < lim.max_field_attempts:
@@ -925,8 +1215,13 @@ class InterviewFlow:
             ids = [s.id for s in group]
             self._set_focus("slots", ids=ids)
             ask = group[0].ask  # the first missing field's wording already covers its group
+            if group[0].kind == "phone":
+                ask = PHONE_ASK
             prefix = "They did not answer that yet. " if asked_before else ""
-            return self._move("ask_field", f"{prefix}{ask}", events=events)
+            move = self._move("ask_field", f"{prefix}{ask}", events=events)
+            if group[0].kind == "phone":
+                move.verbatim = phone_ask_line(st.language)
+            return move
 
         # 5. What did they actually do in those settings (depth before care / clinical).
         if self._experience_captured() and not st.experience_dive_done:

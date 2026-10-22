@@ -61,6 +61,7 @@ from interview import (
     spoken_style,
 )
 from interview.director import Director
+from interview.listen import ListenFloor, is_candidate_speech
 from interview.early_filler import EarlyFiller
 from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_text
 from interview.latency import LatencyTracker
@@ -68,6 +69,7 @@ from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
 from interview.voice_tone import tone_for_kind
 from providers import (
+    SessionRefused,
     build_fallback_stt,
     build_llm,
     build_noise_cancellation,
@@ -79,6 +81,18 @@ from providers import (
 )
 
 logger = logging.getLogger("interview-v2")
+
+
+async def _abort_refused_session(ctx: JobContext, backend: BackendClient) -> None:
+    """Leave before session.start so the room never greets on the wrong stack."""
+    try:
+        await ctx.room.disconnect()
+    except Exception:  # noqa: BLE001
+        logger.exception("disconnect after refused session failed")
+    try:
+        await backend.aclose()
+    except Exception:  # noqa: BLE001
+        logger.exception("backend close after refused session failed")
 
 
 async def _iter_joined(chunks: list[str]):
@@ -174,6 +188,11 @@ _GPT_LIVE_LISTEN_HOLD = (
 
 def _gpt_live_commentary(move: Move, language: str) -> str:
     """Commentary the voice model paraphrases; keep under the ~500-token append cap."""
+    if move.verbatim:
+        return (
+            "Say only this one sentence, then stop. Do not add a name, a reaction, or a second question:\n"
+            f"{move.verbatim}"
+        )
     lead = ""
     if move.kind == "opening":
         lead = (
@@ -344,8 +363,9 @@ class InterviewAgent(Agent):
         # Set when a pre-rendered reaction was just played, so the reply's first sentence gets no um.
         self._suppress_lead = False
         self._greeting_pending = True
-        # False until the opening greeting finishes — ambient STT must not advance the interview.
+        # False until the opening greeting finishes — candidate audio is kept, but not acted on.
         self._listening_armed = False
+        self._floor = ListenFloor()
         self.latency: LatencyTracker | None = None
         self._current_tone = "neutral"
         self._empathy_hint = False
@@ -370,6 +390,7 @@ class InterviewAgent(Agent):
         self._gpt_live_open_dep_id: str | None = None
         self._gpt_live_ignore_until: float = 0.0
         self._gpt_live_held_voice: bool = False
+        self._floor_watch_started = False
 
     def is_listening_armed(self) -> bool:
         return bool(self._listening_armed)
@@ -409,7 +430,13 @@ class InterviewAgent(Agent):
             logger.exception("candidate mic toggle failed reason=%s", reason)
 
     def _gate_opening_input(self) -> None:
-        """Mute + clear any in-flight user turn so opening speech starts immediately."""
+        """Mute + clear any in-flight user turn so opening speech starts immediately.
+
+        The candidate's published microphone stays in the room recording. This only
+        stops the agent from treating that audio as a turn until the greeting is done.
+        """
+        if self._listening_armed:
+            return
         self._set_candidate_mic(False, reason="opening_guard")
         session: AgentSession | None = self.session_ref.get("session")
         if session is None:
@@ -481,8 +508,18 @@ class InterviewAgent(Agent):
         settle = float(get_settings().opening_settle_seconds or 0.0)
         if settle > 0:
             await asyncio.sleep(settle)
+        # Drop whatever the room did during the greeting so it cannot become the first answer.
+        self._floor.note_agent_busy()
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is not None:
+            try:
+                clear = getattr(session, "clear_user_turn", None)
+                if callable(clear):
+                    clear()
+            except Exception:  # noqa: BLE001
+                logger.debug("clear_user_turn before arm failed", exc_info=True)
         self._listening_armed = True
-        # Opening used a mic mute; reopen only after settle so residual noise is ignored.
+        # Opening used a mic mute; reopen only after the greeting so listening can start.
         self._set_candidate_mic(True, reason=reason)
         # Ignore echo / residual opening audio so we do not treat it as the candidate answering.
         # Keep this short so a real answer is not dropped; answer debounce stays in _gpt_live_settle_s.
@@ -499,6 +536,72 @@ class InterviewAgent(Agent):
                 {"reason": reason, "settle_s": settle},
             )
         )
+
+    async def _hold_opening_floor(self) -> None:
+        """While the greeting plays, keep clearing candidate turns so noise cannot take the floor."""
+        while not self._listening_armed and not self.flow.done:
+            await asyncio.sleep(0.25)
+            if self._listening_armed or self.flow.done:
+                return
+            self._gate_opening_input()
+
+    async def _watch_listen_floor(self) -> None:
+        """After the greeting, close the turn when words stop. Noise alone does not keep it open."""
+        if self._floor_watch_started:
+            return
+        self._floor_watch_started = True
+        from interview.turns import detector_covers
+
+        settings = get_settings()
+        while not self.flow.done:
+            await asyncio.sleep(0.2)
+            if not self._listening_armed or self._gpt_live:
+                continue
+            session: AgentSession | None = self.session_ref.get("session")
+            if session is None:
+                continue
+            if getattr(session, "agent_state", None) in ("speaking", "thinking"):
+                self._floor.note_agent_busy()
+                continue
+            try:
+                now = asyncio.get_running_loop().time()
+            except RuntimeError:
+                return
+            lang = self.flow.state.language or ""
+            covered = bool(settings.turn_detector_enabled) and detector_covers(lang)
+            min_hold = (
+                settings.endpointing_min_delay if covered else settings.endpointing_min_delay_uncovered
+            )
+            max_hold = max(float(settings.endpointing_max_delay), min_hold)
+            speaking = getattr(session, "user_state", None) == "speaking"
+            decision = self._floor.decide(
+                now,
+                user_speaking=speaking,
+                min_hold=min_hold,
+                max_hold=max_hold,
+            )
+            if decision == "wait":
+                continue
+            self._floor.take()
+            if decision == "release":
+                logger.info("listen release — background noise, no words")
+                try:
+                    session.clear_user_turn()
+                except Exception:  # noqa: BLE001
+                    logger.debug("clear after noise release failed", exc_info=True)
+                self.spawn(
+                    self.backend.post_event(
+                        self.plan.interview_id,
+                        "audio.noise_released",
+                        {},
+                    )
+                )
+                continue
+            logger.info("candidate words stopped; closing the turn")
+            try:
+                session.commit_user_turn(transcript_timeout=1.0, stt_flush_duration=0.4)
+            except Exception:  # noqa: BLE001
+                logger.exception("commit after words stopped failed")
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001
         tts = self.session.tts
@@ -573,11 +676,29 @@ class InterviewAgent(Agent):
                 self._last_spoken = self._engine.spoken_for_transcript(self._last_spoken)
 
     async def switch_language(self, language_code: str) -> str:
-        """Switch interview language mid-call. language_code must be like hi-IN, ta-IN, te-IN, kn-IN, ml-IN, en-IN."""
+        """Switch the whole interview language only when the candidate clearly asks to change language.
+
+        Do not call this because their answer contains English words. language_code is en-IN, hi-IN, te-IN, ta-IN, kn-IN, ml-IN, bn-IN, mr-IN, gu-IN, pa-IN, or od-IN.
+        """
         profile = get_profile(language_code)
+        current = self.flow.state.language
+        if profile.code == current:
+            return f"Already on {profile.label}. Keep this same voice."
+        last_user = ""
+        for turn in reversed(self.director.recent):
+            if turn.get("role") == "user":
+                last_user = turn.get("text") or ""
+                break
+        spoken = detect_script_language(last_user)
+        # A Hindi sentence with a few English words is still Hindi. Do not change the voice.
+        if spoken and spoken != profile.code:
+            return (
+                f"Stay on {current}. Their answer is still that language. "
+                "Do not switch voice for English words."
+            )
         session: AgentSession | None = self.session_ref.get("session")
         if session is None:
-            return f"Unable to switch; stay on {self.flow.state.language}"
+            return f"Unable to switch; stay on {current}"
 
         settings = get_settings()
         try:
@@ -608,6 +729,34 @@ class InterviewAgent(Agent):
         task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _record_user_move(self, move: Move, utterance: str, events: list[tuple[str, dict[str, Any]]]) -> None:
+        """Store the candidate line with the move it caused, so a reviewer can see both."""
+        self.spawn(
+            self.backend.post_transcript(
+                self.plan.interview_id,
+                role="user",
+                text=utterance,
+                turn_index=self._turn_index,
+                move=move.kind,
+            )
+        )
+        self.spawn(
+            self._persist(
+                [
+                    (
+                        "flow.move",
+                        {
+                            "kind": move.kind,
+                            "stage": self.flow.state.stage,
+                            "utterance": utterance[:400],
+                        },
+                    ),
+                    *events,
+                    *move.events,
+                ]
+            )
+        )
 
     async def _persist(self, events: list[tuple[str, dict[str, Any]]] | None = None) -> None:
         """Save flow state and events; ordered, off the critical path, never raises."""
@@ -756,7 +905,13 @@ class InterviewAgent(Agent):
         text = sanitize_candidate_text(str(raw)).strip()
         if not text or text in {"\ufffd", "…", "..."} or set(text) <= {"\ufffd", " ", ".", "…"}:
             return
+        # Noise must not reset the end-of-turn timer or get glued onto the answer.
+        if not is_candidate_speech(text):
+            return
+        before = (self._gpt_live_last_user or "").strip()
         joined = self._gpt_live_coalesce_transcript(text, now=now)
+        if joined == before:
+            return
         logger.info("GPT-Live user transcript stashed chars=%d text=%s", len(joined), joined[:80])
         # Always re-arm debounce on every scrap — do not commit while they are still talking.
         self._gpt_live_schedule_drive(source="transcript")
@@ -961,7 +1116,7 @@ class InterviewAgent(Agent):
         self._gpt_live_buf_started = 0.0
         self._gpt_live_drive_gen += 1  # cancel pending debounce
 
-        if not joined.strip():
+        if not joined.strip() or not is_candidate_speech(joined):
             self._gpt_live_append(
                 "No clear candidate speech yet. Keep listening — do not ask a new interview question.",
                 delegation_id=delegation_id,
@@ -1021,12 +1176,7 @@ class InterviewAgent(Agent):
         self._interrupted = False
         self.director.note_user(joined)
 
-        self.spawn(
-            self.backend.post_transcript(
-                self.plan.interview_id, role="user", text=joined, turn_index=self._turn_index
-            )
-        )
-        self.spawn(self._persist(events + move.events))
+        self._record_user_move(move, joined, events)
         logger.info(
             "gpt_live move=%s stage=%s director_ms=%.0f source=%s joined_chars=%d text=%s",
             move.kind,
@@ -1148,8 +1298,11 @@ class InterviewAgent(Agent):
                     self.director.note_user(turn["text"])
             await self._rehydrate()
         else:
-            # Drop ambient STT/VAD so ward noise cannot delay or barge the greeting.
+            # Drop in-flight noise so it cannot delay the greeting. The published mic
+            # stays in the room recording; this only stops the agent acting on it.
             self._gate_opening_input()
+            self.spawn(self._hold_opening_floor())
+        self.spawn(self._watch_listen_floor())
         move = self.flow.resume() if resuming else self.flow.opening()
         # Don't block first audio on analytics — speak immediately.
         self.spawn(
@@ -1176,8 +1329,6 @@ class InterviewAgent(Agent):
         # GPT-Live: same Flow as cascade — drive Director from the user turn.
         # Do not wait for model delegation (it often freestyles without ever delegating).
         if self._gpt_live:
-            if text.strip():
-                self._gpt_live_last_user = text.strip()
             if not self._listening_armed:
                 logger.info("gpt_live discard pre-arm user audio (%d chars): %s", len(text), text[:80])
                 self.spawn(
@@ -1207,6 +1358,9 @@ class InterviewAgent(Agent):
                     self.director._cancel_early()
                     self.director._finals = []
                     raise StopResponse()
+            if text.strip() and not is_candidate_speech(text):
+                logger.info("gpt_live ignoring non-word audio (%d chars): %s", len(text), text[:80])
+                raise StopResponse()
             if text.strip():
                 try:
                     now = asyncio.get_running_loop().time()
@@ -1214,7 +1368,10 @@ class InterviewAgent(Agent):
                     now = 0.0
                 if now < self._gpt_live_ignore_until:
                     raise StopResponse()
+                before = (self._gpt_live_last_user or "").strip()
                 joined = self._gpt_live_coalesce_transcript(text.strip(), now=now)
+                if joined == before:
+                    raise StopResponse()
                 # Still debounce — turn_completed can fire on a mid-answer STT segment.
                 self._gpt_live_schedule_drive(source="user_turn")
                 logger.info(
@@ -1232,6 +1389,19 @@ class InterviewAgent(Agent):
                 self.backend.post_event(
                     self.plan.interview_id,
                     "audio.preamble_discard",
+                    {"text": text[:160], "chars": len(text)},
+                )
+            )
+            raise StopResponse()
+
+        # A cough, a hum, "uh" — not an answer. Stay on the question and do not ask them to repeat.
+        if not is_candidate_speech(text):
+            logger.info("ignoring non-word audio (%d chars): %s", len(text), text[:80])
+            self._floor.note_agent_busy()
+            self.spawn(
+                self.backend.post_event(
+                    self.plan.interview_id,
+                    "audio.noise_ignored",
                     {"text": text[:160], "chars": len(text)},
                 )
             )
@@ -1299,14 +1469,18 @@ class InterviewAgent(Agent):
         self._interrupted = False
         self.director.note_user(text)
 
-        self.spawn(
-            self.backend.post_transcript(
-                self.plan.interview_id, role="user", text=text, turn_index=self._turn_index
-            )
-        )
-        self.spawn(self._persist(events + move.events))
+        self._record_user_move(move, text, events)
 
         logger.info("move=%s stage=%s", move.kind, self.flow.state.stage)
+        if move.verbatim:
+            # The mobile step is one fixed sentence. The dialogue model was adding the next
+            # question ("what is your age?") in the same breath as the number read-back.
+            self.director.note_assistant(move.verbatim)
+            self.session.say(move.verbatim, allow_interruptions=True)
+            if self.latency is not None:
+                self.latency.on_hook_end()
+            self._finish_if_needed(move)
+            raise StopResponse()
         turn_ctx.add_message(
             role="system",
             content=(
@@ -1328,7 +1502,7 @@ class CascadeInterviewAgent(InterviewAgent):
 
     @function_tool()
     async def switch_language(self, language_code: str) -> str:
-        """Switch interview language mid-call. language_code must be like hi-IN, ta-IN, te-IN, kn-IN, ml-IN, en-IN."""
+        """Switch interview language mid-call. language_code is en-IN, hi-IN, te-IN, ta-IN, kn-IN, ml-IN, bn-IN, mr-IN, gu-IN, pa-IN, or od-IN."""
         return await super().switch_language(language_code)
 
 
@@ -1347,7 +1521,11 @@ async def _run_gpt_live_session(
     """Full-duplex GPT-Live path: model owns STT+voice; Director/Flow via client delegation."""
     from livekit.plugins.openai.realtime import GPTLiveModel
 
-    noise = build_noise_cancellation(settings)
+    try:
+        noise = build_noise_cancellation(settings)
+    except SessionRefused:
+        await _abort_refused_session(ctx, backend)
+        return
     gpt_voice = settings.gpt_live_voice_for(language)
     gpt_voice_label = (
         f"custom:{gpt_voice.get('id', '?')}" if isinstance(gpt_voice, dict) else str(gpt_voice)
@@ -1477,14 +1655,28 @@ async def _run_gpt_live_session(
 
     @session.on("user_state_changed")
     def _on_user_barge(ev):  # noqa: ANN001
-        if getattr(ev, "new_state", None) == "speaking" and getattr(session, "agent_state", None) == "speaking":
+        if getattr(ev, "new_state", None) != "speaking":
+            return
+        # Opening: the mic is recorded, but noise must not count as a barge-in.
+        if not agent.is_listening_armed():
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        agent._floor.note_speech_start(now)
+        if getattr(session, "agent_state", None) == "speaking":
             agent._interrupted = True
 
     from livekit.agents.voice import room_io
 
     room_kwargs: dict[str, Any] = {"close_on_disconnect": False}
+    # Do not replay mic audio from before the interviewer is ready. That buffer is room
+    # noise, and feeding it in makes the first turn happen before the greeting.
+    audio_kwargs: dict[str, Any] = {"pre_connect_audio": False}
     if noise is not None:
-        room_kwargs["audio_input"] = room_io.AudioInputOptions(noise_cancellation=noise)
+        audio_kwargs["noise_cancellation"] = noise
+    room_kwargs["audio_input"] = room_io.AudioInputOptions(**audio_kwargs)
     start_kwargs: dict[str, Any] = {
         "agent": agent,
         "room": ctx.room,
@@ -1586,7 +1778,11 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     llm = build_llm(settings)
-    stt = build_stt(language, settings, keyterms=plan.keyterms)
+    try:
+        stt = build_stt(language, settings, keyterms=plan.keyterms)
+    except SessionRefused:
+        await _abort_refused_session(ctx, backend)
+        return
     stt_caps = getattr(stt, "capabilities", None)
     stt_aligned = getattr(stt_caps, "aligned_transcript", False) if stt_caps else False
     logger.info(
@@ -1596,7 +1792,16 @@ async def entrypoint(ctx: JobContext) -> None:
         stt_aligned,
         settings.interruption_mode,
     )
-    tts = build_tts(language, settings, provider=tts_override)
+    try:
+        tts = build_tts(language, settings, provider=tts_override)
+    except SessionRefused:
+        await _abort_refused_session(ctx, backend)
+        return
+    mouth = tts_override or settings.resolved_tts()
+    if mouth == "elevenlabs" and "elevenlabs" not in type(tts).__module__.lower():
+        logger.error("ElevenLabs TTS required but API key missing; refusing session")
+        await _abort_refused_session(ctx, backend)
+        return
     _tts_opts = getattr(tts, "_opts", None)
     logger.info(
         "TTS ready provider=%s class=%s voice=%s model=%s",
@@ -1613,20 +1818,27 @@ async def entrypoint(ctx: JobContext) -> None:
     if settings.resolved_stt() != "sarvam":
         vad = ctx.proc.userdata.get("vad") or build_vad(settings)
 
-    # Fallback adapter when available
+    # Scribe on this worker must not swap to OpenAI mid-call. Other STT providers may.
+    if settings.resolved_stt() == "elevenlabs_scribe":
+        logger.info("Scribe STT required; OpenAI STT fallback not attached")
+    else:
+        try:
+            from livekit.agents.stt import FallbackAdapter
+
+            secondary = build_fallback_stt(settings)
+            primary_is_fallback_model = (
+                settings.resolved_stt() == "openai" and settings.openai_stt_model == "gpt-4o-mini-transcribe"
+            )
+            if secondary is not None and settings.resolved_stt() != "mock" and not primary_is_fallback_model:
+                stt = FallbackAdapter([stt, secondary])
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
-        from livekit.agents.stt import FallbackAdapter
-
-        secondary = build_fallback_stt(settings)
-        primary_is_fallback_model = (
-            settings.resolved_stt() == "openai" and settings.openai_stt_model == "gpt-4o-mini-transcribe"
-        )
-        if secondary is not None and settings.resolved_stt() != "mock" and not primary_is_fallback_model:
-            stt = FallbackAdapter([stt, secondary])
-    except Exception:  # noqa: BLE001
-        pass
-
-    noise = build_noise_cancellation(settings)
+        noise = build_noise_cancellation(settings)
+    except SessionRefused:
+        await _abort_refused_session(ctx, backend)
+        return
     logger.info(
         "inbound audio noise_cancellation=%s provider=%s",
         "on" if noise is not None else "off",
@@ -1812,18 +2024,37 @@ async def entrypoint(ctx: JobContext) -> None:
     # Approximate barge-in: user starts speaking while agent speaks.
     @session.on("user_state_changed")
     def _on_user_barge(ev):  # noqa: ANN001
-        if getattr(ev, "new_state", None) == "speaking" and getattr(session, "agent_state", None) == "speaking":
-            agent._interrupted = True
-
-    # Start analysing as soon as the speech-to-text commits a sentence; the turn is confirmed a little later.
-    @session.on("user_input_transcribed")
-    def _on_transcribed(ev):  # noqa: ANN001
-        if not (getattr(ev, "is_final", False) and ev.transcript):
+        if getattr(ev, "new_state", None) != "speaking":
+            return
+        # Opening: the mic is recorded, but noise must not count as a barge-in.
+        if not agent.is_listening_armed():
             return
         try:
             now = asyncio.get_running_loop().time()
         except RuntimeError:
             now = 0.0
+        agent._floor.note_speech_start(now)
+        if getattr(session, "agent_state", None) == "speaking":
+            agent._interrupted = True
+
+    # Start analysing as soon as the speech-to-text commits a sentence; the turn is confirmed a little later.
+    @session.on("user_input_transcribed")
+    def _on_transcribed(ev):  # noqa: ANN001
+        text = str(getattr(ev, "transcript", "") or "")
+        if not text.strip():
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        # Greeting still playing: keep the audio, do not start an answer from it.
+        if not agent.is_listening_armed():
+            return
+        agent._floor.note_transcript(text, now)
+        if not getattr(ev, "is_final", False):
+            return
+        if not is_candidate_speech(text):
+            return
         # Ambient barge-in while interviewer was talking — don't start Director on junk.
         if now < agent._discard_user_until:
             return
@@ -1833,8 +2064,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # A network drop must not end the interview: stay in the room and let the candidate come back.
     room_kwargs: dict[str, Any] = {"close_on_disconnect": False}
+    # Do not replay mic audio from before the interviewer is ready. That buffer is room
+    # noise, and feeding it in makes the first turn happen before the greeting.
+    audio_kwargs: dict[str, Any] = {"pre_connect_audio": False}
     if noise is not None:
-        room_kwargs["audio_input"] = room_io.AudioInputOptions(noise_cancellation=noise)
+        audio_kwargs["noise_cancellation"] = noise
+    room_kwargs["audio_input"] = room_io.AudioInputOptions(**audio_kwargs)
     start_kwargs: dict[str, Any] = {
         "agent": agent,
         "room": ctx.room,

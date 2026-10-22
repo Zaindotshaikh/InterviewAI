@@ -22,6 +22,8 @@ type Options = {
   token: string;
   /** Must be called from a user gesture on iOS before connect. */
   unlockAudio?: boolean;
+  /** Same-page rejoin keeps the captions already on screen. */
+  keepCaptions?: boolean;
 };
 
 export function useLiveKitInterview() {
@@ -53,7 +55,14 @@ export function useLiveKitInterview() {
   const connect = useCallback(async (opts: Options) => {
     setError(null);
     setPhase("connecting");
-    setCaptions([]);
+    if (!opts.keepCaptions) setCaptions([]);
+
+    const previous = roomRef.current;
+    if (previous) {
+      previous.removeAllListeners();
+      roomRef.current = null;
+      await previous.disconnect().catch(() => undefined);
+    }
 
     const room = new Room({
       adaptiveStream: true,

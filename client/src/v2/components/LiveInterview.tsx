@@ -7,6 +7,7 @@ import ThemeToggle from "../../components/ThemeToggle";
 import { useIntegrityMonitor } from "../../hooks/useIntegrityMonitor";
 import type { IntegrityEvent, IntegrityReport } from "../../lib/integrity";
 import type { useLiveKitInterview } from "../hooks/useLiveKitInterview";
+import { requestRejoin } from "../rejoin";
 
 type Hook = ReturnType<typeof useLiveKitInterview>;
 
@@ -23,6 +24,13 @@ type Props = {
   lk: Hook;
   onEnded: (integrity: IntegrityReport) => void;
   showAvatar?: boolean;
+  /** Cascade demo: hard drop offers Rejoin and must not open the scorecard. */
+  allowRejoin?: boolean;
+  /** Milliseconds left in the 120s window. Null until the drop is recorded. */
+  rejoinLeftMs?: number | null;
+  onDropped?: () => void;
+  onRejoined?: (livekit: { url: string; token: string }) => void;
+  onAbandon?: () => void;
 };
 
 function formatTime(sec: number) {
@@ -45,11 +53,26 @@ function HudCorners() {
   );
 }
 
-export default function LiveInterview({ session, lk, onEnded, showAvatar = false }: Props) {
+export default function LiveInterview({
+  session,
+  lk,
+  onEnded,
+  showAvatar = false,
+  allowRejoin = false,
+  rejoinLeftMs = null,
+  onDropped,
+  onRejoined,
+  onAbandon,
+}: Props) {
   const started = useRef(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
   const [ending, setEnding] = useState(false);
+  const [rejoining, setRejoining] = useState(false);
+  const [rejoinNote, setRejoinNote] = useState<string | null>(null);
+  const [windowClosed, setWindowClosed] = useState(false);
+  const droppedNotified = useRef(false);
+  const endingRef = useRef(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
 
@@ -124,6 +147,45 @@ export default function LiveInterview({ session, lk, onEnded, showAvatar = false
     return () => window.clearInterval(id);
   }, [lk.phase]);
 
+  useEffect(() => {
+    if (!allowRejoin || ending || endingRef.current) return;
+    if (lk.phase !== "ended") {
+      droppedNotified.current = false;
+      return;
+    }
+    if (droppedNotified.current) return;
+    droppedNotified.current = true;
+    onDropped?.();
+  }, [allowRejoin, ending, lk.phase, onDropped]);
+
+  async function rejoinInterview() {
+    if (rejoining || ending) return;
+    setRejoining(true);
+    setRejoinNote(null);
+    try {
+      const livekit = await requestRejoin(session.id);
+      await lk.connect({
+        url: livekit.url,
+        token: livekit.token,
+        unlockAudio: true,
+        keepCaptions: true,
+      });
+      onRejoined?.(livekit);
+    } catch (err) {
+      const closed = err instanceof Error && err.message === "rejoin_window_closed";
+      if (closed) setWindowClosed(true);
+      setRejoinNote(
+        closed
+          ? "This interview can no longer be rejoined. Start a new interview."
+          : err instanceof Error
+            ? err.message
+            : "Could not rejoin this interview",
+      );
+    } finally {
+      setRejoining(false);
+    }
+  }
+
   const presenceMode: PresenceMode = useMemo(() => {
     if (lk.phase === "connecting" || lk.phase === "reconnecting") return "connecting";
     if (lk.phase === "idle" || lk.phase === "error" || lk.phase === "ended") return "idle";
@@ -133,10 +195,20 @@ export default function LiveInterview({ session, lk, onEnded, showAvatar = false
   }, [lk.phase, agentSpeaking]);
 
   const live = lk.phase === "live";
+  const dropped = allowRejoin && lk.phase === "ended" && !ending;
+  const rejoinOpen = dropped && !windowClosed && (rejoinLeftMs == null || rejoinLeftMs > 0);
   const interviewer = session.interviewerName ?? "Interviewer";
+  const phaseLabel = live
+    ? "Live"
+    : lk.phase === "connecting" || lk.phase === "reconnecting"
+      ? "Linking"
+      : dropped
+        ? "Dropped"
+        : lk.phase;
 
   async function endInterview() {
-    if (ending) return;
+    if (ending || endingRef.current) return;
+    endingRef.current = true;
     setEnding(true);
     const events: IntegrityEvent[] = getEvents();
     const integrity: IntegrityReport = {
@@ -174,6 +246,10 @@ export default function LiveInterview({ session, lk, onEnded, showAvatar = false
               {COMPANY_NAME} · live link
             </p>
             <p className="truncate text-sm text-[var(--color-fg)]">{session.roleTitle}</p>
+            <p className="truncate text-[10px] text-white/70">
+              <span className="tracking-[0.14em] text-[var(--color-accent)] uppercase">Interview id </span>
+              <span className="select-all font-mono text-[11px] text-white/90">{session.id}</span>
+            </p>
           </div>
         </div>
 
@@ -182,11 +258,7 @@ export default function LiveInterview({ session, lk, onEnded, showAvatar = false
             <span
               className={`h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] ${live ? "hud-rec" : ""}`}
             />
-            {live
-              ? "Live"
-              : lk.phase === "connecting" || lk.phase === "reconnecting"
-                ? "Linking"
-                : lk.phase}
+            {phaseLabel}
           </span>
           <span className="hidden tabular-nums text-sm tracking-wider text-[var(--color-fg)]/85 sm:inline">
             {formatTime(elapsedSec)}
@@ -339,7 +411,40 @@ export default function LiveInterview({ session, lk, onEnded, showAvatar = false
 
       <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
-      <div className="relative z-10 flex shrink-0 justify-center border-t border-[var(--color-accent)]/10 bg-black/40 py-3">
+      <div className="relative z-10 flex shrink-0 flex-col items-center gap-2 border-t border-[var(--color-accent)]/10 bg-black/40 px-4 py-3">
+        {dropped && (
+          <div className="flex max-w-lg flex-col items-center gap-2 text-center">
+            {rejoinOpen ? (
+              <>
+                <p className="text-xs text-white/70">
+                  Same interview
+                  {rejoinLeftMs != null ? ` · ${Math.ceil(rejoinLeftMs / 1000)}s left to rejoin` : ""}. Ending is
+                  separate and opens the result.
+                </p>
+                <button
+                  type="button"
+                  disabled={rejoining}
+                  onClick={() => void rejoinInterview()}
+                  className="rounded-full bg-[var(--color-accent)] px-5 py-2 text-[10px] font-semibold tracking-[0.2em] text-black uppercase disabled:opacity-50"
+                >
+                  {rejoining ? "Rejoining…" : "Rejoin"}
+                </button>
+              </>
+            ) : (
+              <p className="text-xs text-white/70">
+                {rejoinNote || "This interview can no longer be rejoined. Start a new interview."}
+              </p>
+            )}
+            {rejoinNote && rejoinOpen && <p className="text-xs text-amber-200">{rejoinNote}</p>}
+            <button
+              type="button"
+              onClick={() => onAbandon?.()}
+              className="text-[10px] font-semibold tracking-[0.16em] text-white/45 uppercase hover:text-white"
+            >
+              Start a new interview
+            </button>
+          </div>
+        )}
         <button
           type="button"
           disabled={ending}

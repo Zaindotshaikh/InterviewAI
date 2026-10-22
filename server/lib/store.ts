@@ -25,6 +25,8 @@ export type TranscriptTurn = {
   llmText?: string;
   /** True when the agent was interrupted mid-utterance. */
   interrupted?: boolean;
+  /** Flow move caused by this candidate line (user turns only). */
+  move?: string;
 };
 
 /** Pipeline candidate saved from TA "Add Candidate" form. */

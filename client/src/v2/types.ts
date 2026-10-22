@@ -90,6 +90,8 @@ export type V2TranscriptTurn = {
   role: "user" | "assistant";
   text: string;
   timestamp: string;
+  /** Flow move caused by this candidate line. */
+  move?: string;
 };
 
 export type V2TranscriptResponse = {
