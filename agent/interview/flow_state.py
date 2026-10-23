@@ -57,6 +57,7 @@ class FlowState:
     gate_failed: str | None = None
     care_intro_done: bool = False
     experience_dive_done: bool = False  # asked what they actually did in those settings
+    resume_crosscheck_done: bool = False  # one check when spoken experience conflicts with the resume
     experience_level: str = "unknown"  # fresher | junior | experienced | unknown
     areas: dict[str, AreaProgress] = field(default_factory=dict)
     area_order: list[str] = field(default_factory=list)

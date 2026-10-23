@@ -36,6 +36,8 @@ _KIND_TONE: dict[str, Tone] = {
     "confirm_stop": "matter_of_fact",
     "persuade": "gentle",
     "experience_dive": "curious",
+    "resume_check": "curious",
+    "aside": "warm",
     "goodbye": "warm",
     "ended": "warm",
     "resume": "warm",

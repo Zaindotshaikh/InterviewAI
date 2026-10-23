@@ -114,6 +114,7 @@ class InterviewFlow:
         self._invalid_heard: dict[str, str] = {}
         self._phone_agree_rejects = 0
         self._last_user = ""
+        self._pending_aside = ""
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -148,6 +149,20 @@ class InterviewFlow:
         return f"\nWhat you already know about the candidate (do not ask again): {shown}."
 
     def _wrap(self, move: Move, nervous: bool) -> Move:
+        aside = (self._pending_aside or "").strip()
+        self._pending_aside = ""
+        if aside and move.verbatim:
+            move.directive = (
+                f"They also said something that is not the answer: {aside}. "
+                "Reply to that in one short sentence. Then say exactly this and nothing more: "
+                f"{move.verbatim}"
+            )
+            move.verbatim = None
+        elif aside and move.kind not in ("aside", "salary_holdout"):
+            move.directive = (
+                f"They also said something that is not the answer: {aside}. "
+                "Reply to that in one short sentence first. Then do only what follows. "
+            ) + move.directive
         if nervous:
             self.state.nervous_events += 1
             move.directive = (
@@ -275,6 +290,8 @@ class InterviewFlow:
             )
         if ftype == "experience_dive":
             return f"stage={stage} focus=experience_dive"
+        if ftype == "resume_check":
+            return f"stage={stage} focus=resume_check"
         if ftype == "contradiction":
             return f"stage={stage} focus=contradiction"
         if ftype == "closing_qa":
@@ -464,6 +481,8 @@ class InterviewFlow:
         if focus_type == "experience_dive":
             st.experience_dive_done = True
             return self._screening_next(events)
+        if focus_type == "resume_check":
+            return self._screening_next(events)
         if focus_type == "clinical" and st.current_area:
             area = self.bp.area(st.current_area)
             if area is not None:
@@ -521,6 +540,7 @@ class InterviewFlow:
         st.elapsed_s = self.elapsed_s()
         self._invalid = {}
         self._invalid_heard = {}
+        self._pending_aside = "" if a.intent == "off_topic" else (a.aside or "").strip()[:200]
         self._prepare_phone_turn(a)
         self._prepare_body_turn(a)
 
@@ -580,13 +600,16 @@ class InterviewFlow:
         if a.intent == "wants_to_stop":
             return self._wrap(self._handle_stop(), a.nervous)
         if a.intent == "off_topic":
-            # Ambient TV / hallway chatter often looks like fluent "off topic" STT.
-            # Only redirect when we also extracted screening facts; otherwise treat as unclear
-            # so we do not invent the next ask from resume noise.
+            # A clear side remark gets a short reply, then the same question. Unclear audio stays a hearing problem.
             pre = self._preabsorb_screening_facts(a)
+            gist = (a.gist_en or "").strip()
             has_facts = bool(a.slot_updates or a.care_updates or a.confirmation != "none")
-            move = self._redirect(a) if has_facts else self._unclear()
-            extra = [] if has_facts else [("audio.off_topic_as_noise", {"stage": st.stage})]
+            if a.intelligibility != "unclear" and gist:
+                move = self._aside(gist)
+                extra: list[tuple[str, dict[str, Any]]] = []
+            else:
+                move = self._redirect(a) if has_facts else self._unclear()
+                extra = [] if has_facts else [("audio.off_topic_as_noise", {"stage": st.stage})]
             move.events = pre + extra + list(move.events)
             return self._wrap(move, a.nervous)
         if a.intent == "refusal":
@@ -697,7 +720,7 @@ class InterviewFlow:
             ids = [str(i) for i in (focus.get("ids") or [])]
             spec = self.bp.field_spec(ids[0]) if ids else None
             if spec is not None:
-                ask = PHONE_ASK if spec.kind == "phone" else spec.ask
+                ask = self._field_ask(spec)
                 self._set_focus("slots", ids=[spec.id])
                 move = self._move(
                     "ask_field",
@@ -772,6 +795,57 @@ class InterviewFlow:
             )
         ) or any(w in (a.gist_en or "").lower() for w in ("salary", "pay", "ctc"))
 
+    def _field_ask(self, spec: FieldSpec) -> str:
+        if spec.kind == "phone":
+            return PHONE_ASK
+        if spec.id in ("experience_years", "experience_settings"):
+            return self._experience_ask()
+        return spec.ask
+
+    def _experience_ask(self) -> str:
+        resume = " ".join((getattr(self.plan, "resume_text", "") or "").split())
+        if not resume:
+            return (
+                "Ask about their nursing experience: how many years, and where they worked. "
+                "If they are a fresher, ask about hospital postings or internship instead. One question."
+            )
+        return (
+            "Ask ONE question about their nursing experience, using the resume as the starting point. "
+            "Pick one concrete fact from it (role, hospital, ward, or years) and ask them to tell you about that work. "
+            "Do not read the resume aloud. Do not ask anything else in this turn. "
+            f"Resume: {resume[:500]}"
+        )
+
+    def _about_experience(self, a: TurnAnalysis) -> bool:
+        focus = self.state.focus or {}
+        if focus.get("type") == "experience_dive":
+            return True
+        if focus.get("type") == "resume_check":
+            return False
+        ids = {str(i) for i in (focus.get("ids") or [])}
+        if ids & {"experience_years", "experience_settings"}:
+            return True
+        return any(u.field in ("experience_years", "experience_settings") for u in a.slot_updates)
+
+    def _resume_crosscheck(self, a: TurnAnalysis) -> Move | None:
+        """One friendly check when spoken experience conflicts with the resume, then the interview moves on."""
+        note = " ".join((a.resume_mismatch or "").split())[:240]
+        if not note or self.state.resume_crosscheck_done:
+            return None
+        if not (getattr(self.plan, "resume_text", "") or "").strip():
+            return None
+        if not self._about_experience(a):
+            return None
+        self.state.resume_crosscheck_done = True
+        self._set_focus("resume_check")
+        return self._move(
+            "resume_check",
+            "What they just said about their experience does not match the resume. "
+            "In one friendly sentence, mention only this and ask which to note: "
+            f"{note}. Do not ask a second question.",
+            events=[("resume.mismatch", {"note": note})],
+        )
+
     def _redirect(self, a: TurnAnalysis | None = None) -> Move:
         if a is not None and self._mentions_comp(a):
             return self._salary_or_holdout(a)
@@ -779,6 +853,27 @@ class InterviewFlow:
             "redirect",
             "They went off topic. Acknowledge in a few words, then gently bring them back by asking your last "
             "question again in other words.",
+        )
+
+    def _aside(self, gist: str) -> Move:
+        """Answer a clear side remark, then return to the question already in progress."""
+        note = " ".join(gist.split())[:200]
+        heard = TurnAnalysis(gist_en=note)
+        if self._mentions_comp(heard):
+            return self._salary_or_holdout(heard)
+        last = (
+            f" Then ask this once: {self.state.last_question}"
+            if self.state.last_question
+            else " Then ask your last question once."
+        )
+        return self._move(
+            "aside",
+            f"They said something that is not the answer to your question: {note}. "
+            "Reply to it in one short, natural sentence. Do not ignore it. "
+            "Do not extend it into a new topic, give medical advice, or quote salary or a result. "
+            "Then return to the interview."
+            + last,
+            events=[("turn.aside", {"gist": note})],
         )
 
     def _salary_or_holdout(self, a: TurnAnalysis) -> Move:
@@ -1058,6 +1153,10 @@ class InterviewFlow:
             self._give_up_focus_slots(hard_kinds=(), refusal=True, force=True)
 
         if focus_type != "contradiction":
+            check = self._resume_crosscheck(a)
+            if check is not None:
+                check.events = events + check.events
+                return check
             move = self._contradiction_move(a, None)
             if move:
                 move.events = events + move.events
@@ -1095,7 +1194,7 @@ class InterviewFlow:
             return None
         slot.attempts += 1
         self._set_focus("slots", ids=[spec.id])
-        ask = PHONE_ASK if spec.kind == "phone" else spec.ask
+        ask = self._field_ask(spec)
         move = self._move(
             "ask_repeat",
             f"You could not hear their {spec.label} properly. Your FIRST sentence must say, in their language, "
@@ -1253,9 +1352,7 @@ class InterviewFlow:
             asked_before = any(st.slot(s.id).attempts > 1 for s in group)
             ids = [s.id for s in group]
             self._set_focus("slots", ids=ids)
-            ask = group[0].ask  # the first missing field's wording already covers its group
-            if group[0].kind == "phone":
-                ask = PHONE_ASK
+            ask = self._field_ask(group[0])
             prefix = "They did not answer that yet. " if asked_before else ""
             move = self._move("ask_field", f"{prefix}{ask}", events=events)
             if group[0].kind == "phone":
@@ -1266,15 +1363,17 @@ class InterviewFlow:
         if self._experience_captured() and not st.experience_dive_done:
             settings = st.slots.get("experience_settings")
             where = str(settings.value) if settings and settings.value else "that work"
-            # They already described the work. Don't ask the same thing again.
+            # A long answer already described the duties. Move on to care instead of another background question.
             if len(where.split()) >= 6:
                 st.experience_dive_done = True
             else:
                 self._set_focus("experience_dive")
                 return self._move(
                     "experience_dive",
-                    f"They said they have experience in {where}. In one short question, ask what they actually did day to "
-                    "day there — concrete duties, not hospital name again. Do not start clinical scenarios yet.",
+                    f"They said they have experience in {where}. Ask ONE short nursing question about what they "
+                    "actually did with patients there, such as vitals, medicines, or ward work. "
+                    "Do not mention the resume or ask where they worked again. "
+                    "Do not start the scored clinical scenarios yet.",
                     events=events,
                 )
 

@@ -1003,10 +1003,58 @@ def test_factless_off_topic_is_treated_as_noise_not_progress(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     before = dict(flow.state.focus)
-    move = flow.apply(TurnAnalysis(intent="off_topic", intelligibility="clear", gist_en="going somewhere outside"))
+    move = flow.apply(TurnAnalysis(intent="off_topic", intelligibility="clear"))
     assert move.kind == "ask_repeat"
     assert any(e[0] == "audio.off_topic_as_noise" for e in move.events)
     assert flow.state.focus.get("type") == before.get("type")
+
+
+def test_a_clear_side_remark_is_answered_then_the_question_returns(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.last_question = "Which city are you applying for?"
+    before = dict(flow.state.focus)
+    move = flow.apply(
+        TurnAnalysis(intent="off_topic", intelligibility="clear", gist_en="the fan in this room is too loud")
+    )
+    assert move.kind == "aside"
+    assert "fan" in move.directive
+    assert "Which city" in move.directive
+    assert flow.state.focus.get("type") == before.get("type")
+    assert flow.state.slots["city"].status == "empty"
+
+
+def test_an_answer_that_includes_a_side_remark_is_acknowledged(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(say(("city", "Pune"), aside="the room is very cold"))
+    assert "room is very cold" in move.directive
+    assert flow.state.slots["city"].value == "Pune"
+
+
+def test_experience_question_starts_from_the_resume_then_moves_to_nursing(blueprint):
+    flow, _ = make_flow(blueprint, resume="Staff nurse, 3 years ICU, Apollo Hospital Pune")
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
+    asked = flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    assert asked.kind == "ask_field"
+    assert "Apollo" in asked.directive
+    assert "ONE question" in asked.directive
+    mismatch = say(("experience_years", "1"), ("experience_settings", "ward"))
+    mismatch.resume_mismatch = "resume says 3 years ICU at Apollo; they said 1 year on a ward"
+    check = flow.apply(mismatch)
+    assert check.kind == "resume_check"
+    assert "Apollo" in check.directive
+    assert flow.state.resume_crosscheck_done
+    clarified = flow.apply(TurnAnalysis(intent="answer", gist_en="The resume is old. I work on a ward now."))
+    assert clarified.kind == "experience_dive"
+    assert "resume" in clarified.directive.lower()
+    nursing = flow.apply(TurnAnalysis(intent="answer", gist_en="I check vitals and give medicines", resume_mismatch="still conflicts"))
+    assert nursing.kind != "resume_check"
+    assert flow.state.experience_dive_done
+    assert nursing.kind in ("ask_care", "ask_care_item")
 
 
 def test_answers_to_candidate_questions_come_from_the_faq_only(blueprint):
