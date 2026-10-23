@@ -26,14 +26,11 @@ from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
 from interview.language import get_profile
 from interview.phone_speech import (
-    correct_phone,
-    has_spoken_words,
-    heard_phone,
-    parse_spoken_phone,
     phone_again_line,
     phone_ask_line,
     phone_confirm_line,
     phone_invalid_line,
+    store_phone,
     trunk_prefix,
     valid_indian_mobile,
 )
@@ -220,15 +217,15 @@ class InterviewFlow:
                 for t in tokens
                 if t in _PHONE_DIGIT_WORDS or any(ch.isdigit() for ch in t)
             )
-            spoken = trunk_prefix(parse_spoken_phone(text))
-            # English digit-words still wait for a fuller number. Words in another
-            # language are a number once several of them have been said.
+            spoken = trunk_prefix(store_phone(text))
+            # Digit-by-digit still waits for a fuller number. A short wording
+            # such as "saade paach she" is already the whole phrase.
             other_words = sum(1 for t in tokens if t not in _PHONE_DIGIT_WORDS and not any(ch.isdigit() for ch in t))
             return (
                 len(spoken) >= 10
                 or digit_chars >= 8
                 or digit_words >= 6
-                or other_words >= 4
+                or other_words >= 2
             )
 
         if verdict == "substantive":
@@ -654,14 +651,14 @@ class InterviewFlow:
         if kind == "confirm":
             if a.confirmation != "none":
                 return True
-            return bool(parse_spoken_phone(raw))
+            return bool(store_phone(raw, a.phone_hint))
         if kind == "slots":
             ids = [str(i) for i in (focus.get("ids") or [])]
             spec = self.bp.field_spec(ids[0]) if ids else None
             if spec is None:
                 return False
             if spec.kind == "phone":
-                return bool(parse_spoken_phone(raw) or a.phone_hint or (has_spoken_words(raw) and a.phone_resolved))
+                return bool(store_phone(raw, a.phone_hint) or a.phone_resolved)
             return any(u.field == spec.id and str(u.value or "").strip() for u in a.slot_updates)
         if kind == "care":
             items = {str(i) for i in (focus.get("items") or [])}
@@ -873,11 +870,12 @@ class InterviewFlow:
         return all(self.state.slots.get(f.id) and self.state.slots[f.id].status != "empty" for f in self.bp.fields)
 
     def _prepare_phone_turn(self, a: TurnAnalysis) -> None:
-        """Catch a spoken mobile from the raw utterance, including a correction.
+        """Store the number they just said, in whatever wording they used.
 
-        Digits in the transcript are stored as spoken. Words, in any language, are
-        stored from the hearing of that sentence. A correction rewrites only the
-        part that changed and leaves the rest of the read-back in place.
+        The hearing supplies digits for words. A full number replaces the one
+        we read back. The same number locks it. A scrap does not rewrite part
+        of a number already read back. A short number can still be finished
+        with the next group.
         """
         pending = self.pending_confirmation()
         if pending:
@@ -886,28 +884,22 @@ class InterviewFlow:
                 return
             previous = str(self.state.slot(spec.id).value or "")
             raw = (a.raw_utterance or "").strip()
-            # Only the words they just said. A model-written number is not a second source.
-            chosen = correct_phone(previous, raw) if raw else ""
-            parsed = trunk_prefix(parse_spoken_phone(raw)) if raw else ""
             prev_digits = trunk_prefix(re.sub(r"\D", "", previous))
-            # Digits are a correction of the number already read back.
-            # Words, in any language, are a new hearing of the whole number.
-            heard = heard_phone(raw, a.phone_hint) if raw and has_spoken_words(raw) else ""
-            if heard and heard != prev_digits and (not chosen or chosen == prev_digits):
-                chosen = heard
-            if (parsed and parsed == prev_digits and heard in ("", parsed)) or (heard and heard == prev_digits):
-                # They said the same number again. Lock it instead of reading it back forever.
+            heard = store_phone(raw, a.phone_hint) if raw else ""
+            if heard and len(prev_digits) < 10 and len(heard) < 10 and heard not in prev_digits:
+                if len(prev_digits) + len(heard) <= 13:
+                    heard = prev_digits + heard
+            if heard and heard == prev_digits:
                 a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
                 a.confirmation = "confirmed"
                 a.confirmation_field = spec.id
                 return
-            if not chosen or chosen == prev_digits:
-                # "28" or any other short reply is not a correction and not a yes.
+            if not heard or (len(heard) < 10 and len(prev_digits) >= 10):
                 a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
                 return
-            a.phone_resolved = chosen
+            a.phone_resolved = heard
             a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
-            a.slot_updates.append(SlotUpdate(spec.id, chosen, 0.9, raw[:80]))
+            a.slot_updates.append(SlotUpdate(spec.id, heard, 0.9, raw[:80]))
             if a.confirmation == "confirmed":
                 a.confirmation = "none"
             return
@@ -918,8 +910,7 @@ class InterviewFlow:
         raw = (a.raw_utterance or "").strip()
         if not raw:
             return
-        parsed = heard_phone(raw, a.phone_hint)
-        # They spoke, but it was not a number. Drop any phone the model filled in.
+        parsed = store_phone(raw, a.phone_hint)
         if not parsed:
             a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
             return
@@ -1093,7 +1084,7 @@ class InterviewFlow:
             return None
         if spec.kind == "phone":
             raw = a.raw_utterance or " ".join(str(u.value) for u in a.slot_updates if u.field == spec.id)
-            if parse_spoken_phone(raw) or a.phone_hint or a.phone_resolved:
+            if store_phone(raw, a.phone_hint) or a.phone_resolved:
                 return None
         return spec
 

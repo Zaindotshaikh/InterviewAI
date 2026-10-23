@@ -179,7 +179,7 @@ class Director:
         return move
 
     def _needs_phone_check(self, text: str) -> bool:
-        """Hear a sentence that uses words. Digits alone are already the number."""
+        """Hear number-words. Digits alone are already the number."""
         if not has_spoken_words(text):
             return False
         focus = self.flow.state.focus or {}

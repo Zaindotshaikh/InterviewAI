@@ -1,15 +1,6 @@
 """Spoken mobiles: digits are copied, words are stored from the hearing."""
 
-from interview.phone_speech import correct_phone, heard_phone, parse_spoken_phone, trunk_prefix
-
-
-def test_english_groups_and_single_digits():
-    assert parse_spoken_phone("eighty-seven") == "87"
-    assert parse_spoken_phone("eighty seven") == "87"
-    assert parse_spoken_phone("eight, seven") == "87"
-    assert parse_spoken_phone("nine eight eighty-seven six") == "98876"
-    assert parse_spoken_phone("double nine") == "99"
-    assert parse_spoken_phone("chaar so chalees") == ""
+from interview.phone_speech import parse_spoken_phone, store_phone, trunk_prefix
 
 
 def test_digits_are_copied_in_order():
@@ -20,29 +11,27 @@ def test_digits_are_copied_in_order():
     assert parse_spoken_phone("८९ ७५") == "8975"
 
 
-def test_number_words_are_not_guessed_from_a_spelling_list():
-    assert parse_spoken_phone("chappan baawan") == ""
-    assert parse_spoken_phone("नवासी पचहत्तर चौंतीस सड़सठ नब्बे") == ""
-    assert parse_spoken_phone("eighty nine seventy five") == "8975"
+def test_words_are_stored_from_the_hearing():
+    assert store_phone("saade paach she", "550") == "550"
+    assert store_phone("साडे पाचशे", "550") == "550"
+    assert store_phone("chaar so chalees", "440") == "440"
+    assert store_phone("eighty-seven", "87") == "87"
+    assert store_phone("eight, seven", "87") == "87"
+    assert store_phone("double nine", "99") == "99"
+    assert store_phone("chappan baawan", "5652") == "5652"
+    assert store_phone("नवासी पचहत्तर चौंतीस सड़सठ नब्बे", "8975346790") == "8975346790"
+    assert store_phone("nine एक 1 two तीन 2 chappan baawan", "9112325652") == "9112325652"
 
 
-def test_a_hearing_stores_words_and_cannot_replace_plain_digits():
-    assert heard_phone("नवासी पचहत्तर चौंतीस सड़सठ नब्बे", "8975346790") == "8975346790"
-    assert heard_phone("eighty nine, seventy five", "8975") == "8975"
-    assert heard_phone("89, 75, 34, 67, 90", "1111111111") == "8975346790"
-    assert heard_phone("yes", "9876543210") == ""
-    assert heard_phone("haan", "9876543210") == ""
+def test_a_hearing_cannot_replace_plain_digits_or_invent_a_mobile():
+    assert store_phone("89, 75, 34, 67, 90", "1111111111") == "8975346790"
+    assert store_phone("the number I said", "8975346790") == ""
+    assert store_phone("saade paach she", "9876543210") == ""
+    assert store_phone("yes", "9876543210") == ""
+    assert store_phone("haan", "9876543210") == ""
+    assert store_phone("my number is 9876543210", "1111111111") == "9876543210"
 
 
-def test_correction_replaces_only_the_named_part():
-    prev = "9112323549"
-    assert correct_phone(prev, "3549 nahi 3550") == "9112323550"
-    assert correct_phone(prev, "3550 hai, 3549 nahi") == "9112323550"
-    assert correct_phone(prev, "last four 3550") == "9112323550"
-    assert correct_phone(prev, "3550 last") == "9112323550"
-    assert correct_phone(prev, "nahi, number hai 9112323549") == prev
-    assert correct_phone(prev, "nahi") == ""
-    assert correct_phone("9112323", "540") == "9112323540"
-    assert correct_phone("1112323549", "नहीं, नहीं, start में 911, बाकी का सही है।") == "9112323549"
-    assert correct_phone("911", "28") == "911"
-    assert correct_phone(prev, "pehli char 9811") == "9811323549"
+def test_two_groups_with_talk_between_them_are_not_glued_together():
+    assert store_phone("3550 hai, 3549 nahi") == ""
+    assert store_phone("nahi, number hai 9112323549") == "9112323549"

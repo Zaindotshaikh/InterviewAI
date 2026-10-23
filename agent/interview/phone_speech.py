@@ -1,8 +1,9 @@
-"""Turn what the candidate said into the digits to store.
+"""Store the mobile digits the candidate said.
 
-Digit characters are copied as spoken. Words, in any language or grouping, are
-not looked up in a spelling list. The hearing of that sentence is passed in
-and stored when it is the number they said.
+Digits written in the transcript are copied, in any script. Words, in any
+language or grouping, are stored from the hearing of that sentence. A hearing
+may not replace a digits-only sentence, and it may not turn a short phrase
+into a 10-digit number they did not say.
 """
 
 from __future__ import annotations
@@ -28,17 +29,14 @@ _DIGIT_CHARS = str.maketrans(
     "0123456789" * 9,
 )
 
-_LAST = re.compile(
-    r"\b(last|end|ending|akhiri|aakhri|aakhiri|आखिरी|आखरी|अंत)\b",
-    re.IGNORECASE,
-)
-_FIRST = re.compile(
-    r"(first|start|starting|pehla|pehli|shuru|शुरुआत|शुरु|शुरू|पहले)",
-    re.IGNORECASE,
-)
-_NEG = re.compile(
-    r"(nahi|nahin|naahi|not|wrong|galat|गलत|नहीं|नही|नाही|काय नाही)",
-    re.IGNORECASE,
+# Talk around a number. Not a list of number-words.
+_NOT_NUMBER = frozenset(
+    {
+        "a", "an", "the", "is", "my", "me", "i", "it", "that", "this", "please", "again",
+        "number", "mobile", "phone", "nambar", "said",
+        "hai", "hain", "mera", "meri", "mere", "aapka", "apka", "tumcha", "tumhara",
+        "ji", "aur", "and", "ka", "ki", "ke", "ko", "mein", "me", "main",
+    }
 )
 
 
@@ -47,9 +45,7 @@ def _as_digits(text: str) -> str:
 
 
 def has_spoken_words(text: str) -> bool:
-    """True when the sentence has words the digit walk cannot read on its own."""
-    if _english_number_phrase(text) is not None:
-        return False
+    """True when the sentence has words, not only digits."""
     without_digits = re.sub(r"\d+", " ", _as_digits(text))
     return bool(re.search(r"[^\W\d_]", without_digits, flags=re.UNICODE))
 
@@ -66,68 +62,8 @@ def _bare_yes_no(text: str) -> bool:
     return bool(CONFIRM_YES_RE.search(text) or CONFIRM_NO_RE.search(text))
 
 
-# English groups only: "eighty-seven" is 87, "eight seven" is 8 then 7.
-# Other languages stay with the hearing of the sentence.
-_EN_ONES = {
-    "zero": 0, "oh": 0, "one": 1, "two": 2, "three": 3, "four": 4,
-    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
-}
-_EN_TEENS = {
-    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
-    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
-}
-_EN_TENS = {
-    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
-}
-_EN_SKIP = {"and", "uh", "um"}
-
-
-def _english_number_phrase(text: str) -> str | None:
-    """Digits when the phrase is only English number words. None if any other word is in it."""
-    tokens = re.findall(r"[a-z0-9]+", _as_digits(text).lower().replace("-", " "))
-    if not tokens:
-        return None
-    out: list[str] = []
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in _EN_SKIP:
-            i += 1
-            continue
-        if tok.isdigit():
-            out.append(tok)
-            i += 1
-            continue
-        if tok in ("double", "triple") and i + 1 < len(tokens):
-            nxt = tokens[i + 1]
-            digit = _EN_ONES.get(nxt)
-            if digit is None and nxt.isdigit() and len(nxt) == 1:
-                digit = int(nxt)
-            if digit is None:
-                return None
-            out.append(str(digit) * (2 if tok == "double" else 3))
-            i += 2
-            continue
-        if tok in _EN_TENS:
-            value = _EN_TENS[tok]
-            if i + 1 < len(tokens) and tokens[i + 1] in _EN_ONES and _EN_ONES[tokens[i + 1]] != 0:
-                value += _EN_ONES[tokens[i + 1]]
-                i += 2
-            else:
-                i += 1
-            out.append(str(value))
-            continue
-        if tok in _EN_TEENS or tok in _EN_ONES:
-            out.append(str(_EN_TEENS[tok] if tok in _EN_TEENS else _EN_ONES[tok]))
-            i += 1
-            continue
-        return None
-    return "".join(out)
-
-
 def digit_chunks(text: str) -> list[str]:
-    """Digit groups written in the transcript, in order. Words are left untouched."""
+    """Digit groups written in the transcript, in order."""
     return re.findall(r"\d+", _as_digits(text))
 
 
@@ -135,10 +71,7 @@ _PHRASE_SPLIT = re.compile(r"[.।!?॥？]+")
 
 
 def _drop_repeated_phrase(text: str) -> str:
-    """STT often finalizes the same phrase twice: '911, 2323. 911, 2323.'
-
-    That must stay one number. Two different groups ('98765. 43210') are kept.
-    """
+    """STT often finalizes the same phrase twice: '911, 2323. 911, 2323.'"""
     parts = [p.strip(" ,;:") for p in _PHRASE_SPLIT.split(text or "") if p.strip(" ,;:")]
     if len(parts) < 2:
         return text
@@ -148,27 +81,56 @@ def _drop_repeated_phrase(text: str) -> str:
     return text
 
 
+def _number_words(text: str) -> int:
+    tokens = re.findall(r"[^\W\d_]+", _as_digits(text), flags=re.UNICODE)
+    return sum(1 for token in tokens if token.casefold() not in _NOT_NUMBER)
+
+
 def parse_spoken_phone(text: str) -> str:
-    """Digits written in the transcript, including English groups like eighty-seven."""
+    """Digits written in the transcript. Words are left for the hearing."""
+    return "".join(digit_chunks(_drop_repeated_phrase(text)))
+
+
+def _literal_number(text: str) -> str:
+    """Join digit groups when they are the whole number.
+
+    A sentence that also has words keeps one long digit run ('my number is
+    9876543210'). Two groups with talk between them are not glued together.
+    """
     phrase = _drop_repeated_phrase(text)
-    folded = _english_number_phrase(phrase)
-    if folded is not None:
-        return folded
-    return "".join(digit_chunks(phrase))
+    chunks = digit_chunks(phrase)
+    if not has_spoken_words(phrase):
+        return trunk_prefix("".join(chunks))
+    long = [trunk_prefix(c) for c in chunks if len(trunk_prefix(c)) >= 8]
+    if len(long) == 1:
+        return long[0]
+    if len(chunks) == 1:
+        return trunk_prefix(chunks[0])
+    return ""
 
 
-def heard_phone(text: str, heard: str = "") -> str:
+def _completed(text: str, heard: str) -> bool:
+    """A short phrase cannot become a full 10-digit mobile."""
+    if len(heard) < 10:
+        return False
+    return len(heard) > 3 * _number_words(text)
+
+
+def store_phone(text: str, heard: str = "") -> str:
     """The digits to store from this utterance.
 
-    A sentence that is only digits is stored as those digits. When they used
-    words, `heard` is the reading of what they said, in any language or grouping.
-    A yes or no is not a number. A reading cannot replace a digits-only sentence.
+    A digits-only sentence is stored as those digits. Words, in any language
+    or grouping, are stored from `heard`. A yes or no is not a number.
     """
-    literal = trunk_prefix(parse_spoken_phone(text))
+    if _bare_yes_no(text):
+        return ""
+    literal = _literal_number(text)
+    if not has_spoken_words(text):
+        return literal
     heard_digits = trunk_prefix(re.sub(r"\D", "", heard or ""))
     if len(heard_digits) > 13:
         heard_digits = ""
-    if has_spoken_words(text) and heard_digits and not _bare_yes_no(text):
+    if heard_digits and not _completed(text, heard_digits):
         return heard_digits
     return literal
 
@@ -257,80 +219,3 @@ def phone_again_line(language: str) -> str:
 def valid_indian_mobile(digits: str) -> bool:
     number = trunk_prefix(digits)
     return len(number) == 10 and number[0] in "6789"
-
-
-def _splice(prev: str, old: str, new: str) -> str:
-    if old and old in prev and new:
-        return prev.replace(old, new, 1)
-    return prev
-
-
-def correct_phone(previous: str, text: str) -> str:
-    """Apply a correction onto the number already read back.
-
-    A full restatement replaces it. Two groups replace only the group that is
-    not already in the number, whichever is said first. 'last four 3549' and
-    '3549 last' both rewrite the end. A bare denial with no digits returns empty.
-    """
-    prev = trunk_prefix(re.sub(r"\D", "", str(previous or "")))
-    chunks = digit_chunks(text)
-    if not chunks:
-        return ""
-    flat = trunk_prefix("".join(chunks))
-    if any(len(trunk_prefix(c)) >= 10 for c in chunks) or len(flat) >= 10:
-        long = next((trunk_prefix(c) for c in chunks if len(trunk_prefix(c)) >= 10), flat)
-        return long
-    if flat == prev:
-        return prev
-
-    usable = [c for c in chunks if len(c) >= 2]
-    neg = _NEG.search(text or "")
-    if neg and prev:
-        left, right = digit_chunks(text[: neg.start()]), digit_chunks(text[neg.end() :])
-        left = [c for c in left if len(c) >= 2]
-        right = [c for c in right if len(c) >= 2]
-        if len(left) == 1 and len(right) == 1:
-            if left[0] in prev:
-                return _splice(prev, left[0], right[0])
-            if right[0] in prev and left[0] not in prev:
-                return _splice(prev, right[0], left[0])
-        if left and not right and len(left) >= 2 and left[-1] in prev:
-            return _splice(prev, left[-1], left[-2])
-        if len(usable) == 1 and usable[0] != prev:
-            only = usable[0]
-            # "नहीं, नंबर है 9112323550" replaces the whole number.
-            # "start में 911, बाकी सही है" is one piece — keep the rest and splice below.
-            if len(only) >= 10 or len(only) >= len(prev):
-                return only
-
-    present = [c for c in usable if c in prev]
-    absent = [c for c in usable if c not in prev]
-    if len(present) >= 1 and len(absent) == 1 and prev:
-        return _splice(prev, max(present, key=len), absent[0])
-    if len(absent) == 1 and prev and not present:
-        new = absent[0]
-        if _LAST.search(text) and len(new) < len(prev):
-            return prev[: len(prev) - len(new)] + new
-        if _FIRST.search(text) and len(new) < len(prev):
-            return new + prev[len(new) :]
-        # One or two stray digits ("28") are not a correction of this number.
-        if len(new) >= 3:
-            best_at, best_score = 0, -1
-            for at in range(0, len(prev) - len(new) + 1):
-                window = prev[at : at + len(new)]
-                score = sum(a == b for a, b in zip(window, new))
-                if score > best_score:
-                    best_score, best_at = score, at
-            if best_score >= max(1, len(new) - 1):
-                return prev[:best_at] + new + prev[best_at + len(new) :]
-    if present and not absent:
-        return prev
-    if prev and len(flat) < len(prev):
-        if neg:
-            return flat
-        # Still dictating a short number: "9112323" then "540". A one- or two-digit
-        # reply ("28") is the next answer, not more of this number.
-        if len(prev) < 10 and len(flat) >= 3 and flat not in prev and len(prev) + len(flat) <= 13:
-            return prev + flat
-        return prev
-    return flat

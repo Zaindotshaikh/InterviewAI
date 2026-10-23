@@ -93,9 +93,9 @@ class TurnAnalysis:
     contradictions: list[dict[str, str]] = field(default_factory=list)
     gist_en: str = ""
     raw_utterance: str = ""
-    # Digits resolved from speech (groups, mixed language, or a correction). Empty if unused.
+    # Digits stored for this turn. Empty when the utterance was not a number.
     phone_resolved: str = ""
-    # Second hearing, used only when the word list missed part of a number.
+    # Hearing of number-words, in whatever language they used. Empty for digits.
     phone_hint: str = ""
     source: str = "llm"  # llm | heuristic
     # Optional (DIRECTOR_EMPATHY_TONE=true): gentle | reassuring | "" — never required.
@@ -599,8 +599,8 @@ class TurnAnalyzer:
     async def hear_phone_digits(self, utterance: str) -> str:
         """Digits they actually said. Empty when there is no number or the call fails.
 
-        Used when the sentence has words, in any language or grouping.
-        The model is told not to fill in digits that were not spoken.
+        Used when the sentence has words, in any language, script, or grouping.
+        The hearing converts those words. It does not fill a number out to 10 digits.
         """
         text = (utterance or "").strip()
         if not text or not self.available:
@@ -615,11 +615,16 @@ class TurnAnalyzer:
                         {
                             "role": "system",
                             "content": (
-                                "The person is saying a mobile number, in any language and any grouping. "
-                                "Return only the digits they actually said, in order, with no spaces. "
-                                "Examples: eighty-seven is 87, saade teen so is 350, chaar so chalees is 440, nauvad is 90. "
-                                "Do not add, complete, or guess missing digits. "
-                                "If they did not say a number, return nothing."
+                                "The person is saying a mobile number. They may use any language, "
+                                "any script, roman spelling, or grouping: one digit at a time, pairs, "
+                                "or number-words. Return only the digits they said, in order, with no spaces. "
+                                "Read the words as that language says them. "
+                                "saade or साडे means and a half, so saade paach she is 550 and साडे पाचशे is 550. "
+                                "dedh is 150 when it means dedh sau, dhai sau is 250, paune teen so is 275, "
+                                "chaar so chalees is 440, eighty-seven is 87, double nine is 99. "
+                                "These are examples of the pattern, not a closed list. "
+                                "Do not add digits, do not complete a short phrase into a 10-digit mobile, "
+                                "and do not add 91. If they did not say a number, return nothing."
                             ),
                         },
                         {"role": "user", "content": text[:400]},

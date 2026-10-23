@@ -8,6 +8,7 @@ from typing import Any
 
 from livekit.agents.stt import StreamAdapter
 from livekit.plugins import google as google_plugin
+from livekit.plugins import ai_coustics
 from livekit.plugins import noise_cancellation as noise_cancellation_plugin
 from livekit.plugins import openai as openai_plugin
 from livekit.plugins import sarvam
@@ -364,8 +365,8 @@ def build_tts(language: str, settings: Settings | None = None, *, provider: str 
 def build_noise_cancellation(settings: Settings | None = None):
     """Inbound audio cleanup before VAD/STT.
 
-    - krisp → Krisp BVC (background *voice* + noise cancellation; preferred for ward chatter)
-    - aicoustics → ai-coustics Quail Voice Focus L (primary-speaker isolation A/B)
+    - krisp → Krisp BVC (older voice isolation)
+    - aicoustics → ai-coustics Voice Focus S (primary speaker, other voices dropped)
     - none → passthrough
     Never stack client + agent enhanced NC on the same stream.
     """
@@ -392,35 +393,23 @@ def build_noise_cancellation(settings: Settings | None = None):
 
     if provider == "aicoustics":
         try:
-            from livekit.plugins import ai_coustics
-
-            model = getattr(ai_coustics.EnhancerModel, "QUAIL_VF_L", None) or getattr(
-                ai_coustics.EnhancerModel, "QUAIL_VF_S", None
+            # Imported at module load so the plugin registers on the main thread.
+            # Voice Focus S. LiveKit's cross-talk sample scored this ahead of L and Krisp VIVA.
+            model = ai_coustics.EnhancerModel.QUAIL_VF_S
+            opts = ai_coustics.audio_enhancement(
+                model=model,
+                model_parameters=ai_coustics.ModelParameters(enhancement_level=0.8),
             )
-            if model is None:
-                logger.warning("ai-coustics installed but Voice Focus model missing")
-                return None
-            params = None
-            if hasattr(ai_coustics, "ModelParameters"):
-                try:
-                    params = ai_coustics.ModelParameters(enhancement_level=0.8)
-                except Exception:  # noqa: BLE001
-                    params = None
-            kwargs: dict[str, Any] = {"model": model}
-            if params is not None:
-                kwargs["model_parameters"] = params
-            opts = ai_coustics.audio_enhancement(**kwargs)
-            logger.info("noise cancellation: ai-coustics Voice Focus (%s)", getattr(model, "name", model))
+            logger.info(
+                "noise cancellation: ai-coustics Voice Focus S (%s)",
+                getattr(model, "name", model),
+            )
             return opts
-        except ImportError:
-            logger.warning(
-                "NOISE_PROVIDER=aicoustics but livekit-plugins-ai-coustics is not installed "
-                "(pip install livekit-plugins-ai-coustics)"
-            )
-            return None
+        except SessionRefused:
+            raise
         except Exception as err:  # noqa: BLE001
-            logger.warning("ai-coustics noise cancellation unavailable: %s", err)
-            return None
+            logger.error("ai-coustics Voice Focus S required but unavailable; refusing session (%s)", err)
+            raise SessionRefused("ai-coustics Voice Focus S required but unavailable") from err
 
     logger.warning("unknown NOISE_PROVIDER=%s — disabling", provider)
     return None
