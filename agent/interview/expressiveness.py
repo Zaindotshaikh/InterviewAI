@@ -121,19 +121,28 @@ class ExpressivenessEngine:
         if first and not skip_first and not opening:
             sentence, used["sigh"] = self._maybe_sigh(sentence, language, empathy=empathy)
 
-        # Um only mid-sentence, not on greeting / post-filler first sentence.
-        can_um = allow_umm and not (first and (skip_first or opening)) and self._turns_since_umm >= self.cooldown_turns
+        # A reaction was already played. Do not add a second hesitation on this reply.
+        can_um = (
+            allow_umm
+            and not skip_first
+            and not used["sigh"]
+            and not (first and opening)
+            and self._turns_since_umm >= self.cooldown_turns
+        )
         sentence, um_hit = normalize_fillers(sentence, language, allow_um=can_um)
         if um_hit:
             used["umm"] = True
         elif can_um and self._rng.random() < self.umm_rate and not opening:
-            # Inject canonical um after first connector-ish chunk when LLM omitted it.
+            # One hesitation after a short opening word, where a person searches for the question.
             parts = re.split(r"(,\s+)", sentence, maxsplit=1)
             if len(parts) == 3 and len(parts[0].split()) <= 4:
                 sentence = f"{parts[0]}{parts[1]}{um_for(language)} {parts[2]}"
                 used["umm"] = True
 
-        sentence, used["pause"] = self._insert_pause(sentence, opening=opening, allow=allow_pause)
+        if used["umm"] or used["sigh"]:
+            used["pause"] = False
+        else:
+            sentence, used["pause"] = self._insert_pause(sentence, opening=opening, allow=allow_pause)
 
         if first and allow_tag and not skip_first:
             tag = tag_for_tone(tone)
@@ -156,8 +165,8 @@ class ExpressivenessEngine:
         buf = ""
         first = True
         tag_budget = 1
-        pause_budget = 2 if opening else 1
-        umm_budget = 1
+        pause_budget = 1
+        umm_budget = 0 if skip_first else 1
         used_any = {"tag": False, "umm": False, "pause": False, "sigh": False}
 
         async for chunk in text:

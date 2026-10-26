@@ -374,10 +374,8 @@ class InterviewFlow:
             f"- {lang_note} Optional one short beat: {profile.label}/English mix is fine. Do NOT say 'two-part chat', "
             f"'no trick questions', or any long process explanation.\n"
             f"- Then ask ONLY this first question: {ask}\n"
-            f"- Keep it SHORT and HUMAN: 2–3 very short sentences total (not one long paragraph). "
-            f"Commas and '…' for breath pauses. You MAY write one 'umm,' before the question.\n"
-            f"- If ElevenLabs audio tags are active: use several between beats, e.g. [friendly] "
-            f"[short pause] [hesitant] [curious]."
+            f"- Keep it SHORT: 2–3 very short sentences. Use a comma or one '...' for a breath. "
+            f"Do not write 'umm' or square-bracket tags.\n"
         )
         return Move("opening", greeting, events=[("flow.started", {"stage": "screening"})] + first.events)
 

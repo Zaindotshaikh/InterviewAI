@@ -65,6 +65,19 @@ def test_filler_bucket_heuristic():
     assert filler_bucket_from_text("I worked in ICU for three years") == "neutral"
 
 
+def test_a_played_reaction_does_not_get_another_hesitation():
+    eng = ExpressivenessEngine(rng=random.Random(0), pause_rate=1, umm_rate=1, sigh_rate=0)
+    out = _run(eng, "अच्छा, आप कहाँ काम करते हैं आजकल?", skip_first=True, tone="curious")
+    assert "umm" not in out.lower()
+
+
+def test_a_hesitation_sits_after_a_comma_without_a_second_pause():
+    eng = ExpressivenessEngine(rng=random.Random(0), pause_rate=1, umm_rate=1, sigh_rate=0)
+    out = _run(eng, "अच्छा, आप कहाँ काम करते हैं आजकल?", tone="curious")
+    assert "umm," in out
+    assert "..." not in out
+
+
 def test_spoken_for_transcript_strips_tags():
     eng = ExpressivenessEngine()
     assert "warmly" not in eng.spoken_for_transcript("[warmly] Hello... there")

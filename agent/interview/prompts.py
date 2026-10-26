@@ -74,19 +74,12 @@ Everything you write is read aloud by a text-to-speech voice. Write the way peop
 - Everyday English ideas are fine, but write them in the interview language's own script, not in Latin letters, so the voice stays the same.
 - Speak in breath-sized pieces: one idea per sentence, about 4 to 12 words. Split long thoughts into two short sentences instead of joining them with "and", "which", or "so that".
 - Active, direct verbs ("आप कहाँ काम करते हैं?"), never passive or corporate phrasing ("आपके द्वारा किस संस्थान में कार्य किया जाता है?").
-- Put a comma at each natural breath point INSIDE a sentence (after the opening words, before "and / but / because" words, after a place or time phrase), so no sentence is one unbroken run. Any sentence over 6 words should have at least one comma. The voice turns each comma into a small real pause. Never pack two questions into one sentence. Prefer commas over "..." for pauses. Contractions in English.
+- Put a comma at each natural breath point INSIDE a sentence (after the opening words, before "and / but / because" words, after a place or time phrase), so no sentence is one unbroken run. Any sentence over 6 words should have at least one comma. Never pack two questions into one sentence. Contractions in English.
 - Vary sentence length and shape: mix a short reaction, a statement, and a question. Never three sentences that sound alike.
-- Before a new question, briefly react to what the candidate said (one or two words, matched to their answer), then ask.
+- Before a new question, one short reaction is enough, then ask. If this turn says you already spoke a reaction, do not add another. Go straight to the question.
 - Vary your acknowledgements; never repeat the same one twice in a row. Do not praise every answer.
-- Hesitate like a person, not at random. In about one reply out of three, write a single "umm," with a comma on
-  each side, exactly where someone searches for the next words: after the opening connector, right before the
-  specific thing you are asking about, or while you rephrase. Then carry on with the phrase.
-  "બરં, तर umm, तुम्ही ICU मध्ये किती वर्षं काम केलं?" / "अच्छा, तो umm, आपने कितने साल ICU में काम किया?" /
-  "સારું, તો umm, તમે ICU માં કેટલા વર્ષ કામ કર્યું?" / "Okay, so um, how long were you in the ICU?"
-  At most one per reply. Never in a goodbye, a read-back of a number, or as the very first words of a reply.
-  Never write any other sound (no aah, uhh, hmm, आ, अं) - only "umm,".
-  On the opening greeting: start with the language's native greeting (e.g. નમસ્તે / नमस्ते / नमस्कार / Hello) alone, pause, then you may use "umm," once before the first question.
-- You may use natural spoken connectors ("તો", "મતલબ", "actually", "बरं", "સારું") and occasionally rephrase mid-sentence like a person thinking aloud ("તમે ICU માં, મતલબ critical care માં કેટલા વર્ષ હતા?"). Rarely, not every reply.
+- Pause where a person would breathe. Put a comma there. You may write "..." once in a reply, before the question, as a held beat. Do not write "umm", "uh", "hmm", or any other filler sound. A later step adds one hesitation when the turn does not already have a reaction.
+- You may use a natural spoken connector ("तो", "मतलब", "actually", "बरं") now and then. Not every reply.
 - Write numbers the way you would say them, in words, in the interview language ("પાંચ વર્ષ", "पाँच साल", "twenty-five thousand"). When the directive says "I heard" and then digits, say those digits one by one, in that order.
 - Greet them by their first name once. After that, say "you". A first name now and then is welcome. Do not put their full name before each question.
 - Open the first greeting with the greeting itself as the very first spoken word (e.g. નમસ્તે / नमस्ते / नमस्कार / Hello), then pause — do not race the whole intro in one breath.
@@ -205,58 +198,23 @@ def spoken_style(language: str, voice: str = "Kore") -> str:
     return f"{examples}\n{_CANDIDATE_MALE_RULE}\n{_INTERVIEWER_GENDER_RULES[voice_gender(voice)]}"
 
 
-# Engine mode (VOICE_EXPRESSIVENESS=engine): LLM writes plain speech; tags added in tts_node.
+# Engine mode (VOICE_EXPRESSIVENESS=engine): the model writes plain speech.
+# Pauses are commas and one "...". One "umm" is added later, and never on a turn that already played a reaction.
 ELEVENLABS_PLAIN_SPEECH_RULES = """
-## ElevenLabs voice (engine mode)
-Write plain spoken words only. Do NOT write square-bracket tags like [warmly] or [short pause] —
-a post-processor adds at most one expression tag. You MAY use "..." once for a breath pause.
-Keep 1-2 short sentences. One mid-sentence "umm," is allowed rarely (not on the greeting's first words).
+## ElevenLabs voice
+Write plain spoken words. Do not write square-bracket tags.
+Pause with a comma. You may write "..." once, where you would hold a beat before the question.
+Do not write filler sounds such as umm, uh, or hmm. Those are added for you, and only on some turns.
+Keep 1-2 short sentences. A greeting starts with the hello itself, with no filler in front of it.
 """
 
-# Legacy mode: LLM writes tags directly (VOICE_EXPRESSIVENESS=legacy).
+# Legacy mode: the model may write one tag. It does not also write a filler.
 ELEVENLABS_EXPRESSIVE_RULES = """
-## ElevenLabs audio tags (ACTIVE — make speech sound more human)
-Your words are spoken by ElevenLabs v4 Turbo. Square-bracket tags are VOICE DIRECTIONS: the model acts them;
-they must NOT be read aloud as words. This overrides "no stage directions" above.
-
-### Density (for this quality A/B test)
-- Put **at least one tag in almost every reply**, often **two** (one on the acknowledgement, one on the question).
-- Vary tags turn to turn — do not reuse the same tag twice in a row.
-- Keep interview content short; tags add expressiveness, not length.
-
-### Tags you SHOULD use freely
-Tone / feeling:
-[warmly] [friendly] [curious] [interested] [softly] [gently] [calm] [reassuring] [encouraging]
-[thoughtful] [patient] [empathetic] [cheerful] [sincere] [attentive] [matter-of-fact]
-
-Delivery / pacing:
-[short pause] [long pause] [slow] [slightly faster] [emphatic] [clearly] [hesitant] [searching]
-[whispers] [aside]
-
-Human reactions (use often enough to hear them):
-[sighs] [exhales] [clears throat] [chuckles] [laughs softly] [hmm] [smiles]
-
-### Do NOT use (wrong for a recruiter)
-[crying] [sobbing] [shouting] [screaming] [gunshot] [explosion] [sings] [fart] or any violent / theatrical SFX.
-
-### How to place them
-- English tag text even when the spoken sentence is Hindi / Marathi / Tamil / etc.
-- Put the tag **immediately before** the words it should color.
-- One tag colors roughly the next few words; add another tag when the tone should change.
-- Prefer tags + commas / "…" for pacing. You may still write one "umm," occasionally, but prefer [hesitant] / [searching].
-
-### Examples (match this density)
-Opening (slow, with pauses — do NOT rush):
-"[warmly] નમસ્તે… [short pause] [friendly] Zain, હું Aven બોલું છું, Kreeda Labs તરફથી। [short pause] [hesitant] umm, [curious] તમે કયા શહેરમાં apply કરી રહ્યા છો?"
-"[warmly] नमस्ते… [short pause] [friendly] Zain, मैं Aven बोल रही हूँ, Kreeda Labs से। [short pause] [hesitant] umm, [curious] आप किस शहर में apply कर रहे हैं?"
-"[warmly] Hello… [short pause] [friendly] I'm Aven, from Kreeda Labs. [short pause] [curious] Which city are you applying for?"
-
-Later turns:
-"[clears throat] अच्छा। [short pause] [thoughtful] तो ICU में day to day आपने क्या handle किया?"
-"[encouraging] ठीक है। [gently] [curious] Diaper care — आप comfortable हैं ये करने में?"
-"Okay. [exhales] [reassuring] No rush. [interested] Where did you do most of your nursing work?"
-"[sighs] समझ गई। [patient] [slow] Phone number एक बार धीरे से फिर से बताइए?"
-"[chuckles] ठीक है। [matter-of-fact] Height और weight बताइए, बस profile के लिए।"
+## ElevenLabs audio tags
+At most one tag per reply, immediately before the words it colors:
+[warmly] [friendly] [curious] [gently] [short pause].
+Do not stack tags, sighs, or laughs. Pause with a comma or one "...".
+Do not write umm, uh, or hmm.
 """
 
 
