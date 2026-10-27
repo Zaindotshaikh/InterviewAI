@@ -7,6 +7,7 @@ import pytest
 from interview.blueprint import Blueprint
 from interview.normalize import (
     normalize_height_cm,
+    spoken_height_phrase,
     normalize_phone,
     normalize_weight_kg,
     normalize_year,
@@ -53,7 +54,19 @@ def test_phone_is_read_as_single_digits():
 
 @pytest.mark.parametrize(
     ("raw", "cm"),
-    [("5 feet 4 inches", 163), ("5'2\"", 157), ("162", 162), ("162 cm", 162), ("1.62 m", 162), ("5.4", 163), ("five", None)],
+    [
+        ("5 feet 4 inches", 163),
+        ("5'2\"", 157),
+        ("5 feet 11 inches", 180),
+        ("5 ft 11", 180),
+        ("5 11", 180),
+        ("5.11", 180),
+        ("162", 162),
+        ("162 cm", 162),
+        ("1.62 m", 162),
+        ("5.4", 163),
+        ("five", None),
+    ],
 )
 def test_height(raw, cm):
     r = normalize_height_cm(raw)
@@ -70,6 +83,21 @@ def test_height_and_weight_stay_on_their_own_units():
     assert parse_height_and_weight("144 cm and 50 kg") == (144, 50)
     assert parse_height_and_weight("50kg 144cm") == (144, 50)
     assert parse_height_and_weight("कद 144 सेंटीमीटर और वजन 50 किलो") == (144, 50)
+    assert parse_height_and_weight("70 165") == (165, 70)
+    assert parse_height_and_weight("165 70") == (165, 70)
+    assert parse_height_and_weight("165 and 70") == (165, 70)
+    assert parse_height_and_weight("5 feet 11 inches and 70 kg") == (180, 70)
+    assert parse_height_and_weight("70 kg 5 11") == (180, 70)
+    assert parse_height_and_weight("5 11 70") == (180, 70)
+    assert parse_height_and_weight("5.11 and 65 kg") == (180, 65)
+
+
+def test_confirm_phrase_keeps_spoken_height_unit():
+    assert spoken_height_phrase("5 feet 11 inches and 70 kg", 180) == "5 feet 11 inches"
+    assert spoken_height_phrase("70 kg 5 11", 180) == "5 feet 11 inches"
+    assert spoken_height_phrase("5.11 and 65 kg", 180) == "5 feet 11 inches"
+    assert spoken_height_phrase("160 cm 55 kg", 160) == "160 centimetres"
+    assert spoken_height_phrase("55 kg and 160 cm", 160) == "160 centimetres"
 
 
 def test_weight():

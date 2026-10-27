@@ -81,7 +81,9 @@ def fill_screening(flow: InterviewFlow) -> None:
     flow.apply(say(("phone", "98765 43210")))
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
-    flow.apply(say(("height_cm", "5 feet 4 inches"), ("weight_kg", "58 kg")))
+    body = flow.apply(say(("height_cm", "5 feet 4 inches"), ("weight_kg", "58 kg")))
+    assert body.kind == "confirm"
+    flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     dive = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
     assert dive.kind == "experience_dive"
     flow.apply(TurnAnalysis(intent="answer", gist_en="Monitoring, meds, and ventilator care in ICU"))
@@ -196,9 +198,10 @@ def test_weight_and_height_from_one_answer(blueprint):
     flow.opening()
     flow.state.stage = "screening"
     flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
-    flow.apply(TurnAnalysis(intent="answer", raw_utterance="weight 50 kg and height 144 cm"))
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="weight 50 kg and height 144 cm"))
     assert flow.state.slots["weight_kg"].value == 50
     assert flow.state.slots["height_cm"].value == 144
+    assert move.kind == "confirm" and "144" in move.directive and "50" in move.directive
     flow.apply(
         TurnAnalysis(
             intent="answer",
@@ -207,6 +210,74 @@ def test_weight_and_height_from_one_answer(blueprint):
     )
     assert flow.state.slots["weight_kg"].value == 50
     assert flow.state.slots["height_cm"].value == 144
+
+
+def test_bare_height_and_weight_work_in_either_order(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.stage = "screening"
+    flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    flow.apply(TurnAnalysis(intent="answer", raw_utterance="70 165"))
+    assert flow.state.slots["height_cm"].value == 165
+    assert flow.state.slots["weight_kg"].value == 70
+    flow2, _ = make_flow(blueprint)
+    flow2.opening()
+    flow2.state.stage = "screening"
+    flow2.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    flow2.apply(TurnAnalysis(intent="answer", raw_utterance="165 and 70"))
+    assert flow2.state.slots["height_cm"].value == 165
+    assert flow2.state.slots["weight_kg"].value == 70
+
+
+def test_body_confirm_keeps_feet_inches_in_readback(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="5 feet 11 inches and 70 kg"))
+    assert move.kind == "confirm"
+    assert flow.state.slots["height_cm"].value == 180
+    assert "5 feet 11 inches" in (move.verbatim or "")
+    assert "centimetre" not in (move.verbatim or "").lower()
+    assert "180" not in (move.verbatim or "")
+
+
+def test_body_confirm_accepts_and_partial_correction(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
+    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="55 kg and 160 cm"))
+    assert move.kind == "confirm"
+    assert "160 centimetres" in (move.verbatim or "")
+    assert flow.state.focus.get("field") == "body"
+    yes = flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
+    assert flow.state.slots["height_cm"].status == "confirmed"
+    assert flow.state.slots["weight_kg"].status == "confirmed"
+    assert yes.kind != "confirm" or "body" not in str(flow.state.focus.get("field"))
+
+    flow2, _ = make_flow(blueprint)
+    flow2.opening()
+    flow2.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow2.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow2.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
+    flow2.apply(TurnAnalysis(intent="answer", raw_utterance="160 cm 55 kg"))
+    again = flow2.apply(
+        TurnAnalysis(
+            intent="answer",
+            confirmation_field="body",
+            confirmation="denied",
+            raw_utterance="no weight is 58",
+        )
+    )
+    assert flow2.state.slots["height_cm"].value == 160
+    assert flow2.state.slots["weight_kg"].value == 58
+    assert again.kind == "confirm"
+    flow2.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="yes"))
+    assert flow2.state.slots["height_cm"].status == "confirmed"
+    assert flow2.state.slots["weight_kg"].status == "confirmed"
 
 
 def test_one_utterance_can_fill_several_fields_and_phone_is_read_back(blueprint):
@@ -710,6 +781,7 @@ def test_experience_dive_runs_before_care(blueprint):
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
     flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     move = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU Apollo")))
     assert move.kind == "experience_dive"
     assert flow.state.focus["type"] == "experience_dive"
@@ -746,6 +818,7 @@ def reach_clinical(flow, experience=("3", "ICU at a private hospital")):
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
     flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     flow.apply(say(("experience_years", experience[0]), ("experience_settings", experience[1])))
     flow.apply(TurnAnalysis(intent="answer", gist_en="Day to day ICU nursing duties"))
     flow.apply(TurnAnalysis(care_updates=[CareUpdate(c.id, "comfortable") for c in blueprint_items(flow)]))
@@ -1038,7 +1111,9 @@ def test_experience_question_starts_from_the_resume_then_moves_to_nursing(bluepr
     flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
     flow.apply(say(("qualification", "GNM"), ("qualification_year", "2019")))
-    asked = flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    body = flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    assert body.kind == "confirm"
+    asked = flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     assert asked.kind == "ask_field"
     assert "Apollo" in asked.directive
     assert "ONE question" in asked.directive

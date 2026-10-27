@@ -26,6 +26,7 @@ from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.flow_state import AreaProgress, FlowState
 from interview.language import get_profile
 from interview.phone_speech import (
+    body_confirm_line,
     phone_again_line,
     phone_ask_line,
     phone_confirm_line,
@@ -34,7 +35,13 @@ from interview.phone_speech import (
     trunk_prefix,
     valid_indian_mobile,
 )
-from interview.normalize import normalize_field, parse_height_and_weight, plausible_city, spoken_groups
+from interview.normalize import (
+    normalize_field,
+    parse_height_and_weight,
+    plausible_city,
+    spoken_groups,
+    spoken_height_phrase,
+)
 from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
 
@@ -181,10 +188,18 @@ class InterviewFlow:
 
     def pending_confirmation(self) -> tuple[str, str] | None:
         f = self.state.focus
-        if f.get("type") == "confirm":
-            slot = self.state.slots.get(f.get("field", ""))
-            if slot and slot.value is not None:
-                return f["field"], str(slot.value)
+        if f.get("type") != "confirm":
+            return None
+        ids = {str(i) for i in (f.get("ids") or [])}
+        if f.get("body") or ids >= {"height_cm", "weight_kg"}:
+            height = self.state.slot("height_cm").value
+            weight = self.state.slot("weight_kg").value
+            if height is not None and weight is not None:
+                return "body", f"{self._body_height_phrase()}, {weight} kg"
+            return None
+        slot = self.state.slots.get(f.get("field", ""))
+        if slot and slot.value is not None:
+            return f["field"], str(slot.value)
         return None
 
     def expects_short_answer(self) -> bool:
@@ -548,7 +563,7 @@ class InterviewFlow:
             return self.force_complete("time")
 
         # Partial hearing → only force a read-back on fields marked confirm (phone).
-        # Height/weight/qualification must not get a confirm turn on every muddy STT pass.
+        # Body height/weight get one joint confirm after a clean capture, not on muddy STT.
         if a.intelligibility == "partial":
             for u in a.slot_updates:
                 spec = self.bp.field_spec(u.field)
@@ -672,6 +687,9 @@ class InterviewFlow:
         if kind == "confirm":
             if a.confirmation != "none":
                 return True
+            focus = self.state.focus or {}
+            if focus.get("body") or {str(i) for i in (focus.get("ids") or [])} >= {"height_cm", "weight_kg"}:
+                return any(u.field in ("height_cm", "weight_kg") for u in a.slot_updates)
             return bool(store_phone(raw, a.phone_hint))
         if kind == "slots":
             ids = [str(i) for i in (focus.get("ids") or [])]
@@ -729,6 +747,18 @@ class InterviewFlow:
                     move.verbatim = phone_ask_line(self.state.language)
                 return move
         if kind == "confirm":
+            if focus.get("body") or focus.get("field") == "body":
+                height = st.slot("height_cm").value
+                weight = st.slot("weight_kg").value
+                if height is not None and weight is not None:
+                    height_phrase = self._body_height_phrase()
+                    move = self._move(
+                        "confirm",
+                        f"Say exactly: I heard height {height_phrase} and weight {weight} kilograms. "
+                        "Is that correct?",
+                    )
+                    move.verbatim = body_confirm_line(self.state.language, height_phrase, weight)
+                    return move
             field_id = str(focus.get("field") or "")
             spec = self.bp.field_spec(field_id)
             slot = st.slots.get(field_id)
@@ -1011,13 +1041,21 @@ class InterviewFlow:
         a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
         a.slot_updates.append(SlotUpdate("phone", parsed, 0.9, raw[:80]))
 
-    def _prepare_body_turn(self, a: TurnAnalysis) -> None:
-        """Height and weight said in one sentence stay on the right field."""
+    def _body_focus_ids(self) -> set[str]:
         focus = self.state.focus or {}
-        if focus.get("type") != "slots":
-            return
         ids = {str(i) for i in (focus.get("ids") or [])}
-        if not ids & {"height_cm", "weight_kg"}:
+        if focus.get("type") == "slots" and ids & {"height_cm", "weight_kg"}:
+            return ids & {"height_cm", "weight_kg"}
+        if focus.get("type") == "confirm" and (
+            focus.get("body") or ids >= {"height_cm", "weight_kg"} or focus.get("field") == "body"
+        ):
+            return {"height_cm", "weight_kg"}
+        return set()
+
+    def _prepare_body_turn(self, a: TurnAnalysis) -> None:
+        """Height and weight said in one sentence stay on the right field, in either order."""
+        ids = self._body_focus_ids()
+        if not ids:
             return
         raw = (a.raw_utterance or "").strip()
         if not raw:
@@ -1065,6 +1103,22 @@ class InterviewFlow:
         if not pending or a.confirmation == "none":
             return
         field_id = pending[0]
+        if field_id == "body":
+            if a.confirmation == "confirmed":
+                for fid in ("height_cm", "weight_kg"):
+                    slot = self.state.slot(fid)
+                    if slot.status == "captured" and slot.value is not None:
+                        slot.status = "confirmed"
+            elif a.confirmation == "denied":
+                any_fresh = any(u.field in ("height_cm", "weight_kg") for u in a.slot_updates)
+                for fid in ("height_cm", "weight_kg"):
+                    slot = self.state.slot(fid)
+                    if any(u.field == fid for u in a.slot_updates):
+                        continue  # correction applied below; keep for re-confirm
+                    if not any_fresh and slot.status == "captured":
+                        # Bare "no" — clear both and ask again.
+                        slot.status, slot.value = "empty", None
+            return
         slot = self.state.slot(field_id)
         spec = self.bp.field_spec(field_id)
         if a.confirmation == "confirmed":
@@ -1236,17 +1290,44 @@ class InterviewFlow:
                 return [s for s in self.bp.fields if s.group == spec.group and st.slot(s.id).status == "empty"]
         return []
 
+    def _body_pair_ready(self) -> bool:
+        st = self.state
+        return (
+            st.slot("height_cm").status == "captured"
+            and st.slot("height_cm").value is not None
+            and st.slot("weight_kg").status == "captured"
+            and st.slot("weight_kg").value is not None
+        )
+
+    def _body_height_phrase(self) -> str:
+        """Confirm in feet/inches when they said feet; otherwise centimetres. Stored value stays cm."""
+        st = self.state
+        height = st.slot("height_cm")
+        raw = height.evidence or st.slot("weight_kg").evidence or ""
+        return spoken_height_phrase(raw, height.value)
+
     def _needs_confirmation(self) -> FieldSpec | None:
-        """Read-back only for blueprint `confirm` fields (phone). Other slots auto-accept after normalize."""
+        """Read-back for blueprint `confirm` fields (phone). Body pair is handled jointly."""
         st = self.state
         limit = self.bp.limits.max_field_attempts + 2
+        height = st.slot("height_cm")
+        weight = st.slot("weight_kg")
         for spec in self.bp.fields:
             slot = st.slot(spec.id)
             if slot.status != "captured":
                 continue
+            if spec.id in ("height_cm", "weight_kg"):
+                other = weight if spec.id == "height_cm" else height
+                # Wait for the joint body confirm when the other value is still coming.
+                if other.status == "captured":
+                    continue
+                if other.status == "empty":
+                    continue
+                # Sibling unknown/confirmed — accept this one alone.
+                slot.status = "confirmed"
+                continue
             if spec.confirm and slot.attempts <= limit:
                 return spec
-            # Non-phone captures: no spoken confirm unless the blueprint opts in.
             slot.status = "confirmed"
         return None
 
@@ -1286,7 +1367,29 @@ class InterviewFlow:
                     events=events,
                 )
 
-        # 2. A captured value that needs reading back (phone numbers, low-confidence hearing).
+        # 2. Height + weight captured together — one joint read-back before moving on.
+        if self._body_pair_ready():
+            height = st.slot("height_cm")
+            weight = st.slot("weight_kg")
+            height.attempts += 1
+            weight.attempts += 1
+            height_phrase = self._body_height_phrase()
+            self._set_focus(
+                "confirm",
+                field="body",
+                ids=["height_cm", "weight_kg"],
+                body=True,
+            )
+            move = self._move(
+                "confirm",
+                f"Say exactly: I heard height {height_phrase} and weight {weight.value} kilograms. "
+                "Is that correct?",
+                events=events,
+            )
+            move.verbatim = body_confirm_line(st.language, height_phrase, weight.value)
+            return move
+
+        # 3. A captured value that needs reading back (phone numbers).
         spec = self._needs_confirmation()
         if spec is not None:
             slot = st.slot(spec.id)
@@ -1303,7 +1406,7 @@ class InterviewFlow:
                 move.verbatim = phone_confirm_line(st.language, shown)
             return move
 
-        # 3. Something was heard but looked wrong: ask again.
+        # 4. Something was heard but looked wrong: ask again.
         if self._invalid:
             fid, reason = next(iter(self._invalid.items()))
             spec2 = self.bp.field_spec(fid)

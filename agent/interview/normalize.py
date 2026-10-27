@@ -67,28 +67,76 @@ def plausible_city(raw: Any) -> tuple[bool, str]:
     return True, cleaned
 
 
-def normalize_height_cm(raw: Any) -> Normalized:
-    text = str(raw or "").lower().replace("’", "'").replace("”", '"')
-    # 5'4", 5 ft 4 in, 5 feet 4 inches, 5.4 (feet.inches as people say it)
-    m = re.search(r"(\d)\s*(?:'|ft|feet|foot|फुट|फीट)\s*(\d{1,2})?\s*(?:\"|in|inch|inches|इंच)?", text)
+def _feet_inches_to_cm(feet: int, inches: int) -> Normalized:
+    if inches > 11:
+        return _fail("inches must be below 12")
+    if not 4 <= feet <= 7:
+        return _fail("feet outside believable range")
+    return _check_height(round((feet * 12 + inches) * 2.54))
+
+
+def _parse_feet_inches(text: str) -> tuple[int, int] | None:
+    """Return (feet, inches) when the text is a feet-inches height, else None."""
+    raw = str(text or "").lower().replace("’", "'").replace("”", '"')
+    if re.search(r"\bcm\b|सेंटीमीटर|सेमी", raw, re.IGNORECASE):
+        return None
+    m = re.search(r"(\d)\s*(?:'|ft|feet|foot|फुट|फीट)\s*(\d{1,2})?\s*(?:\"|in|inch|inches|इंच)?", raw)
     if m:
         feet, inches = int(m.group(1)), int(m.group(2) or 0)
-        if inches > 11:
-            return _fail("inches must be below 12")
-        cm = round((feet * 12 + inches) * 2.54)
-        return _check_height(cm)
+        return (feet, inches) if inches <= 11 and 4 <= feet <= 7 else None
+    m = re.search(r"\b([4-7])\s+(\d{1,2})\b(?:\s*(?:\"|in|inch|inches|इंच))?", raw)
+    if m:
+        feet, inches = int(m.group(1)), int(m.group(2))
+        return (feet, inches) if inches <= 11 else None
+    nums = re.findall(r"\d+(?:\.\d+)?", raw)
+    if not nums:
+        return None
+    n = float(nums[0])
+    if not (3.5 <= n <= 7.5):
+        return None
+    # Plain "162" is cm, not feet. Only treat decimals / short feet forms here.
+    if n >= 8 and "." not in nums[0]:
+        return None
+    feet = int(n)
+    frac = n - feet
+    two_digit = round(frac * 100)
+    one_digit = round(frac * 10)
+    inches = two_digit if 10 <= two_digit <= 11 else one_digit
+    if inches > 11 or not (4 <= feet <= 7):
+        return None
+    # Bare integer 5 alone is too ambiguous; need inches or an explicit unit (handled above).
+    if frac == 0 and not re.search(r"(?:'|ft|feet|foot|फुट|फीट)", raw):
+        return None
+    return feet, inches
+
+
+def height_said_in_feet(raw: Any) -> bool:
+    return _parse_feet_inches(str(raw or "")) is not None
+
+
+def spoken_height_phrase(raw: Any, height_cm: int | str) -> str:
+    """Read-back phrase in the unit the candidate used. Slots stay stored as cm."""
+    cm = int(height_cm)
+    parsed = _parse_feet_inches(str(raw or ""))
+    if parsed is not None:
+        feet, inches = parsed
+        if inches:
+            return f"{feet} feet {inches} inches"
+        return f"{feet} feet"
+    return f"{cm} centimetres"
+
+
+def normalize_height_cm(raw: Any) -> Normalized:
+    text = str(raw or "").lower().replace("’", "'").replace("”", '"')
+    feet_pair = _parse_feet_inches(text)
+    if feet_pair is not None:
+        return _feet_inches_to_cm(*feet_pair)
     nums = re.findall(r"\d+(?:\.\d+)?", text)
     if not nums:
         return _fail("no number heard")
     n = float(nums[0])
     if "m" in text and "cm" not in text and 1.0 <= n <= 2.3:
         return _check_height(round(n * 100))
-    if 3.5 <= n <= 7.5:  # "5.4" meaning 5 ft 4 in
-        feet = int(n)
-        inches = round((n - feet) * 10)
-        if inches > 11:
-            return _fail("ambiguous height")
-        return _check_height(round((feet * 12 + inches) * 2.54))
     return _check_height(round(n))
 
 
@@ -118,7 +166,8 @@ def _chunk_measure(chunk: str) -> tuple[str, int | None]:
     if not text:
         return "", None
     kind = "height" if _HEIGHT_UNIT.search(text) else "weight" if _WEIGHT_UNIT.search(text) else ""
-    if _FEET_UNIT.search(text):
+    # Feet/inches with or without the word "feet" ("5 ft 11", bare "5 11")
+    if _FEET_UNIT.search(text) or re.search(r"\b[4-7]\s+\d{1,2}\b", text):
         height = normalize_height_cm(text)
         if height.ok:
             return "height", int(height.value)
@@ -145,15 +194,56 @@ def _near_kind(text: str, start: int, end: int) -> str:
     return ""
 
 
+def _assign_bare_body_numbers(
+    bare: list[int],
+    *,
+    height: int | None,
+    weight: int | None,
+) -> tuple[int | None, int | None]:
+    """Map bare numbers to height/weight. Order in the sentence does not matter."""
+    unused = [n for n in bare if 30 <= n <= 210]
+    if height is not None and weight is not None:
+        return height, weight
+    if height is None and weight is None and len(unused) >= 2:
+        a, b = unused[0], unused[1]
+        lo, hi = (a, b) if a <= b else (b, a)
+        # Two numbers: larger is height when both look like cm, smaller is kg.
+        if 120 <= hi <= 210 and 30 <= lo <= 200 and lo != hi:
+            return hi, lo
+    for number in unused:
+        if height is None and 120 <= number <= 210:
+            height = number
+        elif weight is None and 30 <= number < 120:
+            weight = number
+        elif weight is None and height is not None and 30 <= number <= 200 and number != height:
+            weight = number
+        elif height is None and weight is not None and 120 <= number <= 210 and number != weight:
+            height = number
+    return height, weight
+
+
 def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
     """Pull height in cm and weight in kg out of one answer.
 
-    '50 kg and 144 cm' and '144 cm और 50 किलो' both come back as (144, 50).
-    A number is only stored when its unit or its range says which one it is.
+    Handles cm/kg in either order, and feet-inches as '5 feet 11', '5\'11',
+    bare '5 11', or '5.11'. Bare '70 165' still maps by size when no feet pattern.
     """
     raw = str(text or "")
     height: int | None = None
     weight: int | None = None
+    bare: list[int] = []
+
+    # Prefer an explicit feet-inches height before bare cm heuristics eat "5 11".
+    feet_height = normalize_height_cm(raw)
+    if feet_height.ok and (
+        _FEET_UNIT.search(raw)
+        or re.search(r"\b[4-7]\s+\d{1,2}\b", raw)
+        or re.search(r"\b[4-7]\.\d{1,2}\b", raw)
+    ):
+        # Only trust solo normalize when the text looks like feet, not plain cm.
+        if not re.search(r"\bcm\b|सेंटीमीटर|सेमी", raw, re.IGNORECASE):
+            height = int(feet_height.value)
+
     for match in re.finditer(r"\d{2,3}", raw):
         number = int(match.group(0))
         kind = _near_kind(raw, match.start(), match.end())
@@ -161,9 +251,13 @@ def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
             height = number
         elif kind == "weight" and weight is None and 30 <= number <= 200:
             weight = number
+        elif kind == "" and 30 <= number <= 210:
+            # Skip digits that belong to a feet-inches pair already used as height.
+            if height is not None and number <= 11:
+                continue
+            bare.append(number)
     if height is not None and weight is not None:
         return height, weight
-    bare: list[int] = []
     parts = [p for p in _BODY_SPLIT.split(raw) if p.strip()] or [raw]
     for part in parts:
         kind, number = _chunk_measure(part)
@@ -173,14 +267,9 @@ def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
             height = number
         elif kind == "weight" and weight is None and 30 <= number <= 200:
             weight = number
-        elif kind == "":
+        elif kind == "" and number not in bare and number >= 30:
             bare.append(number)
-    for number in bare:
-        if height is None and 120 <= number <= 210:
-            height = number
-        elif weight is None and 30 <= number < 120:
-            weight = number
-    return height, weight
+    return _assign_bare_body_numbers(bare, height=height, weight=weight)
 
 
 def normalize_weight_kg(raw: Any) -> Normalized:

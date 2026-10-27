@@ -184,6 +184,24 @@ def phone_confirm_line(language: str, shown: str) -> str:
     }.get(_lang(language), "मैंने सुना {d}. क्या यह सही है?").format(d=shown)
 
 
+def body_confirm_line(language: str, height_phrase: str, weight_kg: int | str) -> str:
+    """One read-back for height and weight. height_phrase keeps the candidate's unit."""
+    h, w = str(height_phrase), str(weight_kg)
+    return {
+        "en": f"I heard height {h} and weight {w} kilograms. Is that correct?",
+        "hi": f"मैंने सुना कद {h} और वजन {w} किलो. क्या यह सही है?",
+        "mr": f"मला ऐकलं उंची {h} आणि वजन {w} किलो. हे बरोबर आहे का?",
+        "gu": f"મેં સાંભળ્યું ઊંચાઈ {h} અને વજન {w} કિલો. શું આ સાચું છે?",
+        "te": f"నేను విన్నాను ఎత్తు {h} మరియు బరువు {w} కిలోలు. ఇది సరియైనదేనా?",
+        "ta": f"நான் கேட்டது உயரம் {h} மற்றும் எடை {w} கிலோ. இது சரியா?",
+        "kn": f"ನಾನು ಕೇಳಿದ್ದು ಎತ್ತರ {h} ಮತ್ತು ತೂಕ {w} ಕೆಜಿ. ಇದು ಸರಿಯಾ?",
+        "ml": f"ഞാൻ കേട്ടത് ഉയരം {h} കൂടാതെ ഭാരം {w} കിലോ. ഇത് ശരിയാണോ?",
+        "bn": f"আমি শুনেছি উচ্চতা {h} এবং ওজন {w} কেজি. এটা ঠিক আছে?",
+        "pa": f"ਮੈਂ ਸੁਣਿਆ ਕੱਦ {h} ਅਤੇ ਭਾਰ {w} ਕਿਲੋ. ਕੀ ਇਹ ਠੀਕ ਹੈ?",
+        "or": f"ମୁଁ ଶୁଣିଲି ଉଚ୍ଚତା {h} ଏବଂ ଓଜନ {w} କିଲୋ. ଏହା ଠିକ୍ କି?",
+    }.get(_lang(language), f"मैंने सुना कद {h} और वजन {w} किलो. क्या यह सही है?")
+
+
 def phone_invalid_line(language: str, shown: str) -> str:
     return {
         "en": "{d} is not a complete mobile number. Please say the number again.",

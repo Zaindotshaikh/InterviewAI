@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import LanguagePicker from "./components/LanguagePicker";
 import PreflightCheck from "./components/PreflightCheck";
 import LiveInterview from "./components/LiveInterview";
@@ -129,6 +129,11 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   const [preflightDone, setPreflightDone] = useState(false);
   const [micReady, setMicReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeNote, setResumeNote] = useState(
+    "Prefilled sample nurse resume — edit if you want, or upload a PDF, Word file, text file, or photo.",
+  );
+  const resumeInputRef = useRef<HTMLInputElement>(null);
   const [phase, setPhase] = useState<Phase>("setup");
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<V2StartResponse | null>(null);
@@ -171,6 +176,32 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
     const id = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [eleven, rejoin?.droppedAt]);
+
+  const onResumeFile = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    if (resumeInputRef.current) resumeInputRef.current.value = "";
+    if (file.size > 8 * 1024 * 1024) {
+      setError("Resume must be 8 MB or smaller");
+      return;
+    }
+    setResumeBusy(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("resume", file);
+      const res = await fetch("/api/resume/parse", { method: "POST", body: form });
+      const data = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
+      if (!res.ok || !data.text?.trim()) {
+        throw new Error(data.error || "Could not read that resume");
+      }
+      setResumeText(data.text);
+      setResumeNote("Text from your file. Fix anything that looks wrong before you join.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read that resume");
+    } finally {
+      setResumeBusy(false);
+    }
+  }, []);
 
   const start = useCallback(async () => {
     setBusy(true);
@@ -556,7 +587,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
     }
 
     const canJoin =
-      Boolean(roleId) && name.trim().length > 0 && recordingConsent && micReady && !busy;
+      Boolean(roleId) && name.trim().length > 0 && recordingConsent && micReady && !busy && !resumeBusy;
 
     return (
       <div className="mx-auto max-w-lg space-y-5 px-4 py-10">
@@ -584,13 +615,30 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
 
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Resume</span>
+          {eleven && (
+            <input
+              ref={resumeInputRef}
+              type="file"
+              accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+              disabled={resumeBusy}
+              className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-stone-200 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-stone-800"
+              onChange={(e) => void onResumeFile(e.target.files?.[0])}
+            />
+          )}
           <textarea
             className="min-h-40 rounded-lg border border-stone-300 px-3 py-2 font-mono text-xs leading-relaxed"
             value={resumeText}
             onChange={(e) => setResumeText(e.target.value)}
             spellCheck={false}
+            readOnly={resumeBusy}
           />
-          <span className="text-xs text-stone-500">Prefilled sample nurse resume — edit if you want.</span>
+          <span className="text-xs text-stone-500">
+            {eleven
+              ? resumeBusy
+                ? "Reading resume…"
+                : resumeNote
+              : "Prefilled sample nurse resume — edit if you want."}
+          </span>
         </label>
 
         <PreflightCheck
@@ -622,7 +670,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
           onClick={() => void start()}
           className="w-full rounded-lg bg-stone-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
         >
-          {busy ? "Joining…" : "Join interview"}
+          {resumeBusy ? "Reading resume…" : busy ? "Joining…" : "Join interview"}
         </button>
       </div>
     );
