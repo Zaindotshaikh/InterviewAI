@@ -161,18 +161,30 @@ def test_two_digit_phone_groups_are_read_back(blueprint):
     assert "8, 9, 7, 5, 3, 4, 6, 7, 9, 0" in move.directive
 
 
-def test_a_wording_is_stored_from_the_hearing(blueprint):
+def test_a_wording_is_stored_from_the_analyst_digits(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     flow.state.focus = {"type": "slots", "ids": ["phone"]}
-    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="saade paach she", phone_hint="550"))
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="saade paach she",
+            slot_updates=[SlotUpdate("phone", "550", 0.9)],
+        )
+    )
     assert flow.state.slots["phone"].value == "550"
     assert move.kind == "confirm"
     assert "5, 5, 0" in move.directive
     flow2, _ = make_flow(blueprint)
     flow2.opening()
     flow2.state.focus = {"type": "slots", "ids": ["phone"]}
-    flow2.apply(TurnAnalysis(intent="answer", raw_utterance="साडे पाचशे", phone_hint="550"))
+    flow2.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="साडे पाचशे",
+            slot_updates=[SlotUpdate("phone", "550", 0.9)],
+        )
+    )
     assert flow2.state.slots["phone"].value == "550"
 
 
@@ -180,17 +192,48 @@ def test_a_short_phrase_is_not_completed_into_a_mobile(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     flow.state.focus = {"type": "slots", "ids": ["phone"]}
-    move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="the number I said", phone_hint="8975346790"))
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="the number I said",
+            slot_updates=[SlotUpdate("phone", "8975346790", 0.9)],
+        )
+    )
     assert flow.state.slots["phone"].status == "empty"
     assert move.kind == "ask_repeat"
 
 
-def test_digits_are_not_replaced_by_a_hearing(blueprint):
+def test_digits_are_not_replaced_by_analyst_guess(blueprint):
     flow, _ = make_flow(blueprint)
     flow.opening()
     flow.state.focus = {"type": "slots", "ids": ["phone"]}
-    flow.apply(TurnAnalysis(intent="answer", raw_utterance="89, 75, 34, 67, 90", phone_hint="1111111111"))
+    flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="89, 75, 34, 67, 90",
+            slot_updates=[SlotUpdate("phone", "1111111111", 0.9)],
+        )
+    )
     assert flow.state.slots["phone"].value == "8975346790"
+
+
+def test_ten_digit_mobile_starting_with_91_is_kept(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(say(("phone", "9123456789")))
+    assert flow.state.slots["phone"].value == "9123456789"
+    assert move.kind == "confirm"
+    assert "9, 1, 2, 3, 4, 5, 6, 7, 8, 9" in move.directive
+
+
+def test_country_code_91_is_stripped_to_national_mobile(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(say(("phone", "+91 98765 43210")))
+    assert flow.state.slots["phone"].value == "9876543210"
+    assert move.kind == "confirm"
 
 
 def test_weight_and_height_from_one_answer(blueprint):
@@ -312,8 +355,7 @@ def test_mixed_language_phone_groups_are_caught(blueprint):
         TurnAnalysis(
             intent="answer",
             raw_utterance="nine एक 1 two तीन 2 chappan baawan",
-            phone_hint="9112325652",
-            slot_updates=[SlotUpdate("phone", "91", 0.4)],
+            slot_updates=[SlotUpdate("phone", "9112325652", 0.9)],
         )
     )
     assert flow.state.slots["phone"].value == "9112325652"
@@ -368,7 +410,8 @@ def test_repeating_the_same_grouped_number_confirms_once_then_moves_on(blueprint
     assert "qualification" in second.directive.lower()
 
 
-def test_same_digits_after_no_are_accepted(blueprint):
+def test_same_digits_after_no_are_asked_again(blueprint):
+    """Saying no to the read-back must re-ask, even if the same digits appear again."""
     flow, _ = make_flow(blueprint)
     flow.opening()
     flow.apply(say(("city", "Pune"), ("phone", "9112323549")))
@@ -379,10 +422,45 @@ def test_same_digits_after_no_are_accepted(blueprint):
             raw_utterance="nahi, number hai 9112323549",
         )
     )
-    assert flow.state.slots["phone"].value == "9112323549"
-    assert flow.state.slots["phone"].status == "confirmed"
+    assert flow.state.slots["phone"].status == "empty"
     assert move.kind == "ask_field"
-    assert "qualification" in move.directive.lower()
+    assert "mobile" in move.directive.lower()
+    assert "qualification" not in move.directive.lower()
+
+
+def test_denied_phone_is_not_skipped_when_marked_refusal(blueprint):
+    """'That number is wrong' must not be treated as refusing the mobile field."""
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    move = flow.apply(
+        TurnAnalysis(
+            intent="refusal",
+            confirmation_field="phone",
+            confirmation="denied",
+            raw_utterance="नंबर गलत है",
+        )
+    )
+    assert flow.state.slots["phone"].status == "empty"
+    assert move.kind == "ask_field"
+    assert "mobile" in move.directive.lower()
+    assert "qualification" not in move.directive.lower()
+
+
+def test_grouped_hindi_hearing_is_read_back(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    move = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            raw_utterance="char sau sattar",
+            slot_updates=[SlotUpdate("phone", "470", 0.9)],
+        )
+    )
+    assert flow.state.slots["phone"].value == "470"
+    assert move.kind == "confirm"
+    assert "qualification" not in move.directive.lower()
 
 
 def test_city_tail_does_not_pretend_the_number_was_missed(blueprint):
@@ -1145,6 +1223,10 @@ def test_nervous_candidate_gets_reassurance_first(blueprint):
     move = flow.apply(say(("city", "Pune"), nervous=True))
     assert move.directive.startswith("The candidate sounds nervous")
     assert flow.state.nervous_events == 1
+    # Later nervous flags must not keep injecting "no hurry" into every turn.
+    later = flow.apply(say(("phone", "9876543210"), nervous=True))
+    assert not later.directive.startswith("The candidate sounds nervous")
+    assert flow.state.nervous_events == 2
 
 
 def test_wanting_to_stop_is_confirmed_before_ending(blueprint):
@@ -1159,9 +1241,40 @@ def test_wanting_to_stop_is_confirmed_before_ending(blueprint):
 def test_long_silence_escalates_then_ends_as_incomplete(blueprint):
     flow, _ = make_flow(blueprint)
     reach_clinical(flow, experience=("1", "ward"))
-    kinds = [flow.silence(level).kind for level in (1, 2, 3, 4)]
-    assert kinds == ["silence_nudge", "silence_rephrase", "silence_check", "silence_end"]
+    kinds: list[str] = []
+    nudge_directive = ""
+    for level in (1, 2, 3, 4):
+        move = flow.silence(level)
+        kinds.append(move.kind)
+        if level == 2:
+            nudge_directive = move.directive.lower()
+    assert kinds == ["silence_hold", "silence_nudge", "silence_check", "silence_end"]
+    assert "forbidden" in nudge_directive
+    assert "replay" in nudge_directive or "replaying" in nudge_directive
     assert flow.state.outcome == "incomplete_silence"
+
+
+def test_body_and_experience_wait_for_full_answer(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    assert flow.patient_answer_focus()
+    assert not flow.expects_short_answer()
+    assert not flow.utterance_ready_for_focus("my height is")
+    assert not flow.utterance_ready_for_focus("5 foot 4")
+    assert flow.utterance_ready_for_focus("5 foot 4 and 55 kg")
+
+    flow.state.focus = {"type": "slots", "ids": ["experience_years", "experience_settings"]}
+    assert flow.patient_answer_focus()
+    assert not flow.utterance_ready_for_focus("three")
+    assert flow.utterance_ready_for_focus(
+        "I worked three years in ICU monitoring patients and giving medicines"
+    )
+
+    unclear = flow.noise_move()
+    assert unclear.kind == "ask_repeat"
+    assert "forbidden" in unclear.directive.lower()
+    assert "audio was unclear" in unclear.directive.lower()
 
 
 # ------------------------------------------------------------------------------------ closing and limits

@@ -24,7 +24,10 @@ BLUEPRINT_PATH = Path(__file__).resolve().parents[2] / "server" / "v2" / "lib" /
     [
         ("98765 43210", "9876543210"),
         ("+91-98765-43210", "9876543210"),
+        ("919876543210", "9876543210"),
+        ("0919876543210", "9876543210"),
         ("09876543210", "9876543210"),
+        ("9123456789", "9123456789"),
         ("9 8 7 6 5 4 3 2 1 0", "9876543210"),
     ],
 )
@@ -76,6 +79,24 @@ def test_height(raw, cm):
 @pytest.mark.parametrize("raw", ["400", "50", "5 feet 15 inches"])
 def test_height_rejects_impossible(raw):
     assert not normalize_height_cm(raw).ok
+
+
+@pytest.mark.parametrize(
+    ("raw", "city"),
+    [
+        ("Carol", "Kerala"),
+        ("kerla", "Kerala"),
+        ("Kerala", "Kerala"),
+        ("Bombay", "Mumbai"),
+        ("Bangalore", "Bengaluru"),
+        ("Pune", "Pune"),
+    ],
+)
+def test_city_stt_repairs(raw, city):
+    from interview.normalize import plausible_city
+
+    ok, cleaned = plausible_city(raw)
+    assert ok and cleaned == city
 
 
 def test_height_and_weight_stay_on_their_own_units():

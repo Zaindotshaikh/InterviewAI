@@ -43,7 +43,10 @@ _KIND_TONE: dict[str, Tone] = {
     "resume": "warm",
     "resume_closing": "warm",
     "noise": "reassuring",
+    "silence_hold": "neutral",
     "silence_nudge": "reassuring",
+    "silence_rephrase": "gentle",
+    "silence_check": "gentle",
     "redirect": "neutral",
     "answer_faq": "matter_of_fact",
 }

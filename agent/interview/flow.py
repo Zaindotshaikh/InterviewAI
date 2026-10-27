@@ -171,11 +171,13 @@ class InterviewFlow:
                 "Reply to that in one short sentence first. Then do only what follows. "
             ) + move.directive
         if nervous:
+            # One reassurance per call. Repeating "no hurry / dheere se" every turn sounds scripted.
+            if self.state.nervous_events == 0:
+                move.directive = (
+                    "The candidate sounds nervous. First give one short, warm reassurance (no rush, no trick "
+                    "questions, any answer is okay), then: " + move.directive
+                )
             self.state.nervous_events += 1
-            move.directive = (
-                "The candidate sounds nervous. First give one short, warm reassurance (no rush, no trick "
-                "questions, any answer is okay), then: " + move.directive
-            )
         return move
 
     def _move(self, kind: str, directive: str, **kw: Any) -> Move:
@@ -202,6 +204,20 @@ class InterviewFlow:
             return f["field"], str(slot.value)
         return None
 
+    def patient_answer_focus(self) -> bool:
+        """True when the candidate normally pauses mid-answer (body, work history, clinical)."""
+        f = self.state.focus or {}
+        ftype = f.get("type") or ""
+        if ftype in ("clinical", "experience_dive", "resume_check"):
+            return True
+        if ftype != "slots":
+            return False
+        ids = {str(i) for i in (f.get("ids") or [])}
+        if ids & {"height_cm", "weight_kg", "experience_settings"}:
+            return True
+        # Both experience fields together are a story, not a one-word fact.
+        return "experience_years" in ids and "experience_settings" in ids
+
     def expects_short_answer(self) -> bool:
         """True when the current focus is a one-fact / yes-no question (city, phone, year, confirm, care…)."""
         f = self.state.focus or {}
@@ -209,7 +225,7 @@ class InterviewFlow:
         if ftype in ("confirm", "care"):
             return True
         if ftype == "slots":
-            return True  # screening fields are single facts (city, phone, years, height, …)
+            return not self.patient_answer_focus()
         return False
 
     def short_answer_kinds(self) -> tuple[str, ...]:
@@ -223,6 +239,15 @@ class InterviewFlow:
             if spec is not None:
                 kinds.append(spec.kind)
         return tuple(kinds)
+
+    def endpointing_hold_s(self, *, covered: bool, settings: Any) -> tuple[float, float]:
+        """Min/max silence before closing the candidate turn for the live focus."""
+        min_delay = settings.endpointing_min_delay if covered else settings.endpointing_min_delay_uncovered
+        max_delay = max(float(settings.endpointing_max_delay), float(min_delay))
+        if not self.patient_answer_focus():
+            return float(min_delay), float(max_delay)
+        # Height/weight and work-history answers have natural mid-sentence pauses.
+        return max(float(min_delay), 1.1), max(float(max_delay), 3.5)
 
     def utterance_ready_for_focus(self, text: str) -> bool:
         """Whether this transcript is enough to decide, given the live focus (not a fixed length rule)."""
@@ -258,11 +283,22 @@ class InterviewFlow:
                 or other_words >= 2
             )
 
+        # Height + weight: do not close after the first number or "my height is…".
+        if kinds and set(kinds) <= {"height", "weight"} and len(set(kinds)) >= 1:
+            height, weight = parse_height_and_weight(text)
+            if height is not None and weight is not None:
+                return True
+            # Still waiting for the other measurement.
+            return False
+
+        if self.patient_answer_focus():
+            # Work history / clinical: short scraps are not enough.
+            return verdict == "substantive" and len(tokens) >= 4
+
         if verdict == "substantive":
             return True
 
         if not self.expects_short_answer():
-            # Clinical / experience dive: keep holding short scraps for a fuller answer.
             return False
 
         ftype = (self.state.focus or {}).get("type") or ""
@@ -443,14 +479,27 @@ class InterviewFlow:
             return self._move(
                 "noise_help",
                 "Say kindly that you are having trouble hearing them. Suggest moving somewhere quieter, closer to the "
-                "phone, or using earphones. Then ask your last question again, simply.",
+                "phone, or using earphones. Then ask your last question again, simply. "
+                "Forbidden: pace reassurances.",
                 events=[("audio.noise_help", {"stage": st.stage, "total": st.unclear_total})],
             )
         last = f" Then ask this once: {st.last_question}" if st.last_question else " Then ask your last question once."
+        # Mid-answer pauses on height/weight or work history often look like "unclear" to STT.
+        # Do not claim you missed them on the first miss — that interrupts them.
+        if self.patient_answer_focus() and st.unclear_streak <= 1:
+            return self._move(
+                "ask_repeat",
+                "They may still be answering. Forbidden: saying the audio was unclear, apologising, pace "
+                "reassurances, or a different question. Wait a beat, then invite them once to continue with "
+                "the same question."
+                + last,
+                events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak, "patient": True})],
+            )
         return self._move(
             "ask_repeat",
             "You could not hear that properly. Your FIRST sentence must say, in their language, that you could not "
-            "hear it properly. Do not guess what they said and do not ask it as if it were a new question."
+            "hear it properly. Do not guess what they said, do not reassure about pace, and do not ask it "
+            "as if it were a new question."
             + last,
             events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
         )
@@ -512,22 +561,26 @@ class InterviewFlow:
         st.silence_level = level
         if st.stage in ("closing", "ended"):
             return self._move("goodbye", "Say a short goodbye.", completed=True, end_session=True)
+        # First quiet stretch: stay silent. Speaking "no hurry / would you like me to repeat"
+        # mid-answer is what QA flagged as unnatural interruption.
         if level <= 1:
             return self._move(
-                "silence_nudge",
-                "The candidate has been quiet for a while. Gently say there is no hurry and offer to repeat the "
-                "question if they would like. Do not ask a new question.",
+                "silence_hold",
+                "",
+                events=[("audio.silence_hold", {"stage": st.stage, "patient": self.patient_answer_focus()})],
             )
         if level == 2:
             return self._move(
-                "silence_rephrase",
-                "Still quiet. Check that they can hear you, then offer to ask the same thing in simpler words, or to "
-                "move on to the next question if they prefer.",
+                "silence_nudge",
+                "Still quiet. In one short warm sentence check they can hear you. "
+                "Forbidden phrases: any reassurance about pace, offering to replay the question, "
+                "or asking the interview question again. Do not ask a new question.",
             )
         if level == 3:
             return self._move(
                 "silence_check",
-                "Still no reply. Ask warmly if they are still there and say you will wait a little longer.",
+                "Still no reply. Ask warmly if they are still there. "
+                "Forbidden: pace reassurances, replaying the question, or a new interview question.",
             )
         return self._close(
             "incomplete_silence",
@@ -690,14 +743,14 @@ class InterviewFlow:
             focus = self.state.focus or {}
             if focus.get("body") or {str(i) for i in (focus.get("ids") or [])} >= {"height_cm", "weight_kg"}:
                 return any(u.field in ("height_cm", "weight_kg") for u in a.slot_updates)
-            return bool(store_phone(raw, a.phone_hint))
+            return bool(store_phone(raw, self._analyst_phone_digits(a)))
         if kind == "slots":
             ids = [str(i) for i in (focus.get("ids") or [])]
             spec = self.bp.field_spec(ids[0]) if ids else None
             if spec is None:
                 return False
             if spec.kind == "phone":
-                return bool(store_phone(raw, a.phone_hint) or a.phone_resolved)
+                return bool(store_phone(raw, self._analyst_phone_digits(a)) or a.phone_resolved)
             return any(u.field == spec.id and str(u.value or "").strip() for u in a.slot_updates)
         if kind == "care":
             items = {str(i) for i in (focus.get("items") or [])}
@@ -992,15 +1045,26 @@ class InterviewFlow:
     def _slots_done(self) -> bool:
         return all(self.state.slots.get(f.id) and self.state.slots[f.id].status != "empty" for f in self.bp.fields)
 
+    @staticmethod
+    def _analyst_phone_digits(a: TurnAnalysis) -> str:
+        """Digits the main analyst put on the phone slot (words already converted)."""
+        for u in a.slot_updates:
+            if u.field == "phone":
+                return re.sub(r"\D", "", str(u.value or ""))
+        return ""
+
     def _prepare_phone_turn(self, a: TurnAnalysis) -> None:
         """Store the number they just said, in whatever wording they used.
 
-        The hearing supplies digits for words. A full number replaces the one
-        we read back. The same number locks it. A scrap does not rewrite part
-        of a number already read back. A short number can still be finished
-        with the next group.
+        Digits in the transcript are copied. Number-words use the analyst's phone
+        slot (same turn analysis — no second LLM). A full number replaces the one
+        we read back. Repeating the same number (without saying no) confirms it.
+        A scrap does not rewrite a number already read back. A short number can
+        still be finished with the next group. A denied read-back always clears
+        or re-confirms — it never locks the old number and moves on.
         """
         pending = self.pending_confirmation()
+        analyst_digits = self._analyst_phone_digits(a)
         if pending:
             spec = self.bp.field_spec(pending[0])
             if spec is None or spec.kind != "phone":
@@ -1008,16 +1072,22 @@ class InterviewFlow:
             previous = str(self.state.slot(spec.id).value or "")
             raw = (a.raw_utterance or "").strip()
             prev_digits = trunk_prefix(re.sub(r"\D", "", previous))
-            heard = store_phone(raw, a.phone_hint) if raw else ""
+            heard = store_phone(raw, analyst_digits) if raw else ""
             if heard and len(prev_digits) < 10 and len(heard) < 10 and heard not in prev_digits:
                 if len(prev_digits) + len(heard) <= 13:
                     heard = prev_digits + heard
-            if heard and heard == prev_digits:
+            denied = a.confirmation == "denied"
+            if heard and heard == prev_digits and not denied:
                 a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
                 a.confirmation = "confirmed"
                 a.confirmation_field = spec.id
                 return
-            if not heard or (len(heard) < 10 and len(prev_digits) >= 10):
+            if denied and (not heard or heard == prev_digits):
+                # Bare "no" / "incorrect", or restating the rejected digits: clear and ask again.
+                a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
+                a.phone_resolved = ""
+                return
+            if not heard or (len(heard) < 10 and len(prev_digits) >= 10 and not denied):
                 a.slot_updates = [u for u in a.slot_updates if u.field != spec.id]
                 return
             a.phone_resolved = heard
@@ -1033,7 +1103,7 @@ class InterviewFlow:
         raw = (a.raw_utterance or "").strip()
         if not raw:
             return
-        parsed = store_phone(raw, a.phone_hint)
+        parsed = store_phone(raw, analyst_digits)
         if not parsed:
             a.slot_updates = [u for u in a.slot_updates if u.field != "phone"]
             return
@@ -1202,7 +1272,9 @@ class InterviewFlow:
             # Non-gate care: mark and move on — _screening_next only persuades gate_items.
             self._mark_care_focus_negative(a.intent)
         elif a.intent == "refusal" and focus_type in ("slots", "confirm"):
-            self._give_up_focus_slots(hard_kinds=(), refusal=True, force=True)
+            # A denied phone read-back is "that number is wrong", not "skip my mobile".
+            if not (focus_type == "confirm" and a.confirmation == "denied"):
+                self._give_up_focus_slots(hard_kinds=(), refusal=True, force=True)
 
         if focus_type != "contradiction":
             check = self._resume_crosscheck(a)
@@ -1235,7 +1307,7 @@ class InterviewFlow:
             return None
         if spec.kind == "phone":
             raw = a.raw_utterance or " ".join(str(u.value) for u in a.slot_updates if u.field == spec.id)
-            if store_phone(raw, a.phone_hint) or a.phone_resolved:
+            if store_phone(raw, self._analyst_phone_digits(a)) or a.phone_resolved:
                 return None
         return spec
 
@@ -1274,6 +1346,9 @@ class InterviewFlow:
             spec = self.bp.field_spec(fid)
             slot = st.slot(fid)
             if spec is None or slot.status != "empty":
+                continue
+            # Mobile must be re-asked after a wrong read-back — never skip via refusal heuristics.
+            if spec.kind == "phone":
                 continue
             # force=True: candidate said "I don't know" / refused — never hang on the same field.
             if force or spec.kind in hard_kinds or slot.attempts >= 2 or refusal:

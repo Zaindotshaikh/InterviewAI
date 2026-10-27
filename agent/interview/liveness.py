@@ -42,8 +42,16 @@ class SilenceMonitor:
                 # Never talk over ourselves.
                 while getattr(self._session, "agent_state", "listening") in ("speaking", "thinking"):
                     await asyncio.sleep(0.4)
+                # Candidate started talking again while we were waiting to nudge.
+                if getattr(self._session, "user_state", None) == "speaking":
+                    return
                 move = self._flow.silence(level)
                 logger.info("silence level=%d move=%s", level, move.kind)
+                # silence_hold: wait longer without speaking (mid-answer pauses).
+                if move.kind == "silence_hold":
+                    wait = self._spacing + (10 if self._flow.patient_answer_focus() else 6)
+                    await asyncio.sleep(wait)
+                    continue
                 await self._agent.speak_move(move)
                 if move.end_session:
                     return

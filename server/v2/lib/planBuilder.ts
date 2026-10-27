@@ -34,6 +34,30 @@ const NURSING_KEYTERMS_EN = [
   "patient care",
 ];
 
+/** Place names Scribe often mishears (e.g. Kerala → Carol). Keep short for the 50-term cap. */
+const PLACE_KEYTERMS = [
+  "Kerala",
+  "Kochi",
+  "Mumbai",
+  "Pune",
+  "Bengaluru",
+  "Chennai",
+  "Hyderabad",
+  "Kolkata",
+  "Delhi",
+  "Gurugram",
+  "Noida",
+  "Jaipur",
+  "Ahmedabad",
+  "Lucknow",
+  "Patna",
+  "Bhopal",
+  "Indore",
+  "Nagpur",
+  "Thiruvananthapuram",
+  "Mangalore",
+];
+
 async function loadGlossary(language: InterviewLanguageCode): Promise<string[]> {
   const short = language.split("-")[0] ?? "en";
   const file = path.join(__dirname, "glossary", `${short}.json`);
@@ -60,7 +84,12 @@ function buildKeyterms(
   resumeText: string,
   glossary: string[],
 ): string[] {
-  const base = [...NURSING_KEYTERMS_EN, ...extractResumeKeyterms(resumeText), ...glossary];
+  const base = [
+    ...PLACE_KEYTERMS,
+    ...NURSING_KEYTERMS_EN,
+    ...extractResumeKeyterms(resumeText),
+    ...glossary,
+  ];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const term of base) {

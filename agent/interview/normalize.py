@@ -56,12 +56,61 @@ def spoken_groups(phone: str) -> str:
     return ", ".join(digits)
 
 
+# Common STT mishears for Indian cities / states (lowercase key → canonical label).
+_CITY_REPAIRS: dict[str, str] = {
+    "carol": "Kerala",
+    "kerla": "Kerala",
+    "kerela": "Kerala",
+    "keral": "Kerala",
+    "keralaa": "Kerala",
+    "bombay": "Mumbai",
+    "bomabay": "Mumbai",
+    "mumbay": "Mumbai",
+    "banglor": "Bengaluru",
+    "banglore": "Bengaluru",
+    "bangalore": "Bengaluru",
+    "bengalooru": "Bengaluru",
+    "madras": "Chennai",
+    "chenai": "Chennai",
+    "hydrabbad": "Hyderabad",
+    "hydarabad": "Hyderabad",
+    "calcutta": "Kolkata",
+    "kolkatta": "Kolkata",
+    "trivandrum": "Thiruvananthapuram",
+    "cochin": "Kochi",
+    "kochi": "Kochi",
+    "poon": "Pune",
+    "poona": "Pune",
+    "punne": "Pune",
+    "delhii": "Delhi",
+    "newdelhi": "New Delhi",
+    "gurgaon": "Gurugram",
+    "gurgoan": "Gurugram",
+}
+
+
+def repair_city(text: str) -> str:
+    """Map a common mis-heard place name back to the real one."""
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    key = re.sub(r"[^a-zA-Z]", "", cleaned).casefold()
+    if key in _CITY_REPAIRS:
+        return _CITY_REPAIRS[key]
+    parts = [w.strip(".,।!?;:'\"") for w in cleaned.split()]
+    fixed: list[str] = []
+    for part in parts:
+        part_key = re.sub(r"[^a-zA-Z]", "", part).casefold()
+        fixed.append(_CITY_REPAIRS.get(part_key, part))
+    return " ".join(fixed)[:160]
+
+
 def plausible_city(raw: Any) -> tuple[bool, str]:
     """True when the text names a place. Failed hearings like 'उन्हें location.' are not."""
     text = " ".join(str(raw or "").replace("।", " ").replace(".", " ").split())
     words = [w.strip(".,।!?;:'\"") for w in text.split()]
     content = [w for w in words if w and w.casefold() not in _CITY_NOISE and w not in _CITY_NOISE]
-    cleaned = " ".join(content)[:160]
+    cleaned = repair_city(" ".join(content)[:160])
     if len(cleaned) < 2:
         return False, ""
     return True, cleaned

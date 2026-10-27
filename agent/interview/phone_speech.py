@@ -1,9 +1,8 @@
 """Store the mobile digits the candidate said.
 
-Digits written in the transcript are copied, in any script. Words, in any
-language or grouping, are stored from the hearing of that sentence. A hearing
-may not replace a digits-only sentence, and it may not turn a short phrase
-into a 10-digit number they did not say.
+Digits written in the transcript are copied as-is (any script). When they speak
+number-words — any language, mix, or grouping — the hearing (LLM) supplies the
+digits. This module does not translate number-words itself.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ def _script_digits(start: int) -> str:
     return "".join(chr(start + i) for i in range(10))
 
 
-# Digit characters only. These are the glyphs for 0-9, not names of numbers.
+# Digit glyphs for 0-9 only — not names of numbers.
 _DIGIT_CHARS = str.maketrans(
     _script_digits(0x0966)  # Devanagari
     + _script_digits(0x09E6)  # Bengali
@@ -27,16 +26,6 @@ _DIGIT_CHARS = str.maketrans(
     + _script_digits(0x0CE6)  # Kannada
     + _script_digits(0x0D66),  # Malayalam
     "0123456789" * 9,
-)
-
-# Talk around a number. Not a list of number-words.
-_NOT_NUMBER = frozenset(
-    {
-        "a", "an", "the", "is", "my", "me", "i", "it", "that", "this", "please", "again",
-        "number", "mobile", "phone", "nambar", "said",
-        "hai", "hain", "mera", "meri", "mere", "aapka", "apka", "tumcha", "tumhara",
-        "ji", "aur", "and", "ka", "ki", "ke", "ko", "mein", "me", "main",
-    }
 )
 
 
@@ -81,68 +70,77 @@ def _drop_repeated_phrase(text: str) -> str:
     return text
 
 
-def _number_words(text: str) -> int:
-    tokens = re.findall(r"[^\W\d_]+", _as_digits(text), flags=re.UNICODE)
-    return sum(1 for token in tokens if token.casefold() not in _NOT_NUMBER)
-
-
 def parse_spoken_phone(text: str) -> str:
     """Digits written in the transcript. Words are left for the hearing."""
     return "".join(digit_chunks(_drop_repeated_phrase(text)))
 
 
 def _literal_number(text: str) -> str:
-    """Join digit groups when they are the whole number.
-
-    A sentence that also has words keeps one long digit run ('my number is
-    9876543210'). Two groups with talk between them are not glued together.
-    """
+    """Join digit groups when the transcript is digits-only."""
     phrase = _drop_repeated_phrase(text)
-    chunks = digit_chunks(phrase)
-    if not has_spoken_words(phrase):
-        return trunk_prefix("".join(chunks))
-    long = [trunk_prefix(c) for c in chunks if len(trunk_prefix(c)) >= 8]
-    if len(long) == 1:
-        return long[0]
-    if len(chunks) == 1:
-        return trunk_prefix(chunks[0])
-    return ""
+    return trunk_prefix("".join(digit_chunks(phrase)))
 
 
-def _completed(text: str, heard: str) -> bool:
-    """A short phrase cannot become a full 10-digit mobile."""
+def _long_digit_run(text: str) -> str:
+    """One clear mobile-length run written in a wordy sentence; never scrap digits."""
+    phrase = _drop_repeated_phrase(text)
+    long = [trunk_prefix(c) for c in digit_chunks(phrase) if len(trunk_prefix(c)) >= 8]
+    return long[0] if len(long) == 1 else ""
+
+
+def _word_tokens(text: str) -> list[str]:
+    return re.findall(r"[^\W\d_]+", _as_digits(text), flags=re.UNICODE)
+
+
+def _hearing_plausible(text: str, heard: str) -> bool:
+    """Reject a full mobile invented from a short non-number phrase.
+
+    Shorter hearings (groups like 'char sau sattar' → 470) are always kept.
+    A 10-digit hearing needs enough spoken tokens that they could have said it
+    (roughly one token per two digits — pairs or larger groups).
+    """
     if len(heard) < 10:
-        return False
-    return len(heard) > 3 * _number_words(text)
+        return True
+    words = _word_tokens(text)
+    return len(words) >= 3 and len(heard) <= 2 * len(words)
 
 
 def store_phone(text: str, heard: str = "") -> str:
     """The digits to store from this utterance.
 
-    A digits-only sentence is stored as those digits. Words, in any language
-    or grouping, are stored from `heard`. A yes or no is not a number.
+    Digits-only speech → those digits. A long digit run already in the
+    transcript wins over the hearing. Number-words (any language or mix) →
+    `heard`. Short digit scraps in a wordy sentence are ignored.
     """
     if _bare_yes_no(text):
         return ""
-    literal = _literal_number(text)
     if not has_spoken_words(text):
-        return literal
+        return _literal_number(text)
+    written = _long_digit_run(text)
+    if written:
+        return written
     heard_digits = trunk_prefix(re.sub(r"\D", "", heard or ""))
-    if len(heard_digits) > 13:
-        heard_digits = ""
-    if heard_digits and not _completed(text, heard_digits):
+    if heard_digits and len(heard_digits) <= 13 and _hearing_plausible(text, heard_digits):
         return heard_digits
-    return literal
+    return ""
 
 
 def trunk_prefix(digits: str) -> str:
-    if digits.startswith("0091"):
-        digits = digits[4:]
-    elif digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    elif digits.startswith("0") and len(digits) == 11:
-        digits = digits[1:]
-    return digits
+    """Drop India country / trunk prefixes only when the length makes that clear.
+
+    A real 10-digit mobile may start with 91 (e.g. 9123456789) — never strip those.
+    Country code is removed only for 91 + 10 national digits (12), 091… (13), or 0091….
+    """
+    d = re.sub(r"\D", "", str(digits or ""))
+    if d.startswith("0091") and len(d) >= 14:
+        d = d[4:]
+    elif d.startswith("091") and len(d) == 13:
+        d = d[3:]
+    elif d.startswith("91") and len(d) == 12:
+        d = d[2:]
+    if d.startswith("0") and len(d) == 11:
+        d = d[1:]
+    return d
 
 
 def _lang(language: str) -> str:

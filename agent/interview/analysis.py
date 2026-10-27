@@ -99,8 +99,6 @@ class TurnAnalysis:
     raw_utterance: str = ""
     # Digits stored for this turn. Empty when the utterance was not a number.
     phone_resolved: str = ""
-    # Hearing of number-words, in whatever language they used. Empty for digits.
-    phone_hint: str = ""
     source: str = "llm"  # llm | heuristic
     # Optional (DIRECTOR_EMPATHY_TONE=true): gentle | reassuring | "" — never required.
     empathy_tone: str = ""
@@ -274,6 +272,10 @@ nervousness.
 - slot_updates: only values the candidate stated in THIS utterance. Do not invent or complete a phone
   number. Years as 4 digits, height in centimetres (convert feet and inches), weight in kilograms, experience
   in years. Never infer from the resume.
+  Phone: put digits only in the phone slot (no spaces). They may speak any language, mix languages, or
+  group digits as words (hundreds, halves, doubles). Convert what they said — do not pad to 10 digits.
+  If they include country code 91 / +91, keep those digits in the value (e.g. 919876543210). Do not drop a
+  leading 91 from a 10-digit mobile that starts with 91 (e.g. 9123456789 stays 9123456789).
   If a city (or other place) was not heard — garbled audio such as "location" with no place name — set
   intelligibility to "unclear" and do not invent a city.
 - confirmation: if pending_confirmation is set, say whether they confirmed or denied it. If they deny and give the
@@ -613,45 +615,3 @@ class TurnAnalyzer:
             self.failures += 1
             logger.warning("turn analysis failed (%s): %s", type(err).__name__, err)
             return fallback
-
-    async def hear_phone_digits(self, utterance: str) -> str:
-        """Digits they actually said. Empty when there is no number or the call fails.
-
-        Used when the sentence has words, in any language, script, or grouping.
-        The hearing converts those words. It does not fill a number out to 10 digits.
-        """
-        text = (utterance or "").strip()
-        if not text or not self.available:
-            return ""
-        try:
-            resp = await asyncio.wait_for(
-                self._get_client().chat.completions.create(
-                    model=self._model,
-                    temperature=0,
-                    max_tokens=24,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "The person is saying a mobile number. They may use any language, "
-                                "any script, roman spelling, or grouping: one digit at a time, pairs, "
-                                "or number-words. Return only the digits they said, in order, with no spaces. "
-                                "Read the words as that language says them. "
-                                "saade or साडे means and a half, so saade paach she is 550 and साडे पाचशे is 550. "
-                                "dedh is 150 when it means dedh sau, dhai sau is 250, paune teen so is 275, "
-                                "chaar so chalees is 440, eighty-seven is 87, double nine is 99. "
-                                "These are examples of the pattern, not a closed list. "
-                                "Do not add digits, do not complete a short phrase into a 10-digit mobile, "
-                                "and do not add 91. If they did not say a number, return nothing."
-                            ),
-                        },
-                        {"role": "user", "content": text[:400]},
-                    ],
-                ),
-                timeout=2.5,
-            )
-            raw = resp.choices[0].message.content or ""
-        except Exception:  # noqa: BLE001
-            logger.debug("phone digit check skipped", exc_info=True)
-            return ""
-        return re.sub(r"\D", "", raw)[:13]

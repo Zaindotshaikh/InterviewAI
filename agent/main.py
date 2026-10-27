@@ -569,10 +569,7 @@ class InterviewAgent(Agent):
                 return
             lang = self.flow.state.language or ""
             covered = bool(settings.turn_detector_enabled) and detector_covers(lang)
-            min_hold = (
-                settings.endpointing_min_delay if covered else settings.endpointing_min_delay_uncovered
-            )
-            max_hold = max(float(settings.endpointing_max_delay), min_hold)
+            min_hold, max_hold = self.flow.endpointing_hold_s(covered=covered, settings=settings)
             speaking = getattr(session, "user_state", None) == "speaking"
             decision = self._floor.decide(
                 now,
@@ -815,6 +812,9 @@ class InterviewAgent(Agent):
         """Say something unprompted (resume, silence nudges, goodbyes)."""
         self.spawn(self._persist(move.events))
         self._finish_if_needed(move)
+        # First silence level is intentional quiet — do not invent a "no hurry" line.
+        if move.kind == "silence_hold" or not (move.directive or "").strip():
+            return
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
             self._empathy_hint = self._current_tone in ("gentle", "reassuring")
@@ -947,10 +947,30 @@ class InterviewAgent(Agent):
         kinds = self.flow.short_answer_kinds()
         if kinds and all(k == "phone" for k in kinds):
             return 1.7
+        if self.flow.patient_answer_focus():
+            return 2.0
         ftype = (self.flow.state.focus or {}).get("type") or ""
         if ftype in ("clinical", "experience_dive"):
             return 1.5
         return self._gpt_live_drive_settle_s
+
+    def _retune_endpointing(self) -> None:
+        """Give height/weight and work-history answers more silence before the turn closes."""
+        if self._gpt_live:
+            return
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is None:
+            return
+        settings = get_settings()
+        from interview.turns import detector_covers
+
+        lang = self.flow.state.language or ""
+        covered = bool(settings.turn_detector_enabled) and detector_covers(lang)
+        min_delay, max_delay = self.flow.endpointing_hold_s(covered=covered, settings=settings)
+        try:
+            session.update_options(endpointing_opts={"min_delay": min_delay, "max_delay": max_delay})
+        except Exception:  # noqa: BLE001
+            logger.debug("endpointing retune failed", exc_info=True)
 
     def _gpt_live_user_from_chat(self) -> str:
         """Latest user turn already in chat_ctx."""
@@ -1166,6 +1186,7 @@ class InterviewAgent(Agent):
             move = self.flow.force_complete("time")
         else:
             move = await self.director.decide(joined)
+        self._retune_endpointing()
         director_ms = (datetime.now(timezone.utc) - t0).total_seconds() * 1000.0
         if self.latency is not None:
             self.latency.on_director_done(director_ms / 1000.0)
@@ -1461,6 +1482,7 @@ class InterviewAgent(Agent):
             move = self.flow.force_complete("time")
         else:
             move = await self.director.decide(text)
+        self._retune_endpointing()
         if self.latency is not None:
             self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
         self._current_tone = move.tone or tone_for_kind(move.kind)

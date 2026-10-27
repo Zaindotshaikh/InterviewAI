@@ -15,7 +15,6 @@ from typing import Any
 from interview.analysis import TurnAnalyzer, heuristic_analysis, recover_care_updates
 from interview.flow import InterviewFlow, Move
 from interview.guards import sanitize_candidate_text
-from interview.phone_speech import has_spoken_words
 from interview.plan import classify_answer
 
 logger = logging.getLogger("interview-v2.director")
@@ -116,9 +115,6 @@ class Director:
             return self.flow.noise_move()
 
         payload, fallback = self._prepare(text)
-        phone_check = None
-        if self._needs_phone_check(text):
-            phone_check = asyncio.create_task(self.analyzer.hear_phone_digits(text))
         if early and early[1] == payload:
             try:
                 analysis = await early[2]
@@ -140,12 +136,6 @@ class Director:
                 logger.info("care stance recovered from utterance for items=%s", items)
 
         analysis.raw_utterance = text
-        if phone_check is not None:
-            try:
-                analysis.phone_hint = await phone_check
-            except Exception:  # noqa: BLE001
-                logger.debug("phone digit check skipped", exc_info=True)
-                analysis.phone_hint = ""
         logger.info(
             "analysis source=%s intent=%s clarity=%s stage=%s latency=%.0fms",
             analysis.source,
@@ -177,16 +167,3 @@ class Director:
         except Exception:  # noqa: BLE001
             logger.debug("tone resolve skipped", exc_info=True)
         return move
-
-    def _needs_phone_check(self, text: str) -> bool:
-        """Hear number-words. Digits alone are already the number."""
-        if not has_spoken_words(text):
-            return False
-        focus = self.flow.state.focus or {}
-        on_phone = focus.get("type") == "slots" and "phone" in (focus.get("ids") or [])
-        pending = self.flow.pending_confirmation()
-        on_confirm = False
-        if pending:
-            spec = self.flow.bp.field_spec(pending[0])
-            on_confirm = spec is not None and spec.kind == "phone"
-        return on_phone or on_confirm
