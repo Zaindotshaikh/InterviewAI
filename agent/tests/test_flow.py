@@ -84,9 +84,37 @@ def fill_screening(flow: InterviewFlow) -> None:
     body = flow.apply(say(("height_cm", "5 feet 4 inches"), ("weight_kg", "58 kg")))
     assert body.kind == "confirm"
     flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
-    dive = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
-    assert dive.kind == "experience_dive"
-    flow.apply(TurnAnalysis(intent="answer", gist_en="Monitoring, meds, and ventilator care in ICU"))
+    care = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
+    assert care.kind == "ask_care"
+
+
+def clear_care(flow: InterviewFlow) -> None:
+    flow.apply(
+        TurnAnalysis(
+            care_updates=[CareUpdate(c.id, "comfortable") for c in flow.bp.care_items],
+        )
+    )
+
+
+def drain_experience_probes(flow: InterviewFlow, *, gist: str | None = None) -> None:
+    """Answer every post-care experience probe with a sufficient line until clinical starts."""
+    text = gist or (
+        "I check vitals every hour, give medicines after the five rights, "
+        "inform the doctor when readings drop, and document in the chart."
+    )
+    for _ in range(24):
+        if flow.stage == "clinical" or flow.state.experience_dive_done:
+            return
+        if flow.state.focus.get("type") != "experience_probe":
+            return
+        flow.apply(
+            TurnAnalysis(
+                intent="answer",
+                gist_en=text,
+                answer_depth="sufficient",
+                raw_utterance=text,
+            )
+        )
 
 
 # ----------------------------------------------------------------------------------------------- screening
@@ -667,7 +695,11 @@ def test_persuasion_that_works_lets_the_candidate_continue_to_clinical(blueprint
     reach_care(flow)
     flow.apply(care("diaper_care", "hesitant", "never done it"))
     move = flow.apply(care("diaper_care", "willing_with_training"))
-    assert flow.stage == "clinical" or move.kind in ("ask_care_item", "clinical_question")
+    assert flow.stage == "clinical" or move.kind in (
+        "ask_care_item",
+        "experience_probe",
+        "clinical_question",
+    )
     assert flow.state.gate_failed is None
 
 
@@ -679,7 +711,9 @@ def test_comfortable_with_everything_goes_straight_to_clinical(blueprint):
             care_updates=[CareUpdate(c.id, "comfortable") for c in blueprint.care_items],
         )
     )
-    assert flow.stage == "clinical" and move.kind == "clinical_question"
+    assert move.kind == "experience_probe"
+    drain_experience_probes(flow)
+    assert flow.stage == "clinical"
 
 
 def test_discomfort_with_a_non_essential_item_is_recorded_but_does_not_gate(blueprint):
@@ -695,6 +729,8 @@ def test_discomfort_with_a_non_essential_item_is_recorded_but_does_not_gate(blue
             ]
         )
     )
+    assert flow.state.focus.get("type") == "experience_probe"
+    drain_experience_probes(flow)
     assert flow.stage == "clinical"
     assert flow.state.care["toileting_bedpan"].stance == "hesitant"
     assert flow.state.gate_failed is None
@@ -826,7 +862,7 @@ def test_care_intro_short_yes_skips_per_item_diaper_reask(blueprint):
     assert all(flow.state.care_state(c.id).stance == "comfortable" for c in blueprint.care_items)
     assert move.kind != "ask_care_item"
     assert move.kind != "ask_care"
-    assert flow.stage == "clinical" or move.kind == "clinical_question"
+    assert move.kind == "experience_probe" or flow.stage == "clinical"
 
 
 def test_care_intro_icu_yes_does_not_skip_diaper_ask(blueprint):
@@ -852,8 +888,11 @@ def test_care_intro_icu_yes_does_not_skip_diaper_ask(blueprint):
     assert flow.stage == "screening"
 
 
-def test_experience_dive_runs_before_care(blueprint):
-    flow, _ = make_flow(blueprint)
+def test_experience_probes_run_after_care_not_before(blueprint):
+    flow, _ = make_flow(
+        blueprint,
+        resume="Staff nurse, 3 years ICU at Apollo Hospital Pune. Handled ventilators and infusions.",
+    )
     flow.opening()
     flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
@@ -861,12 +900,46 @@ def test_experience_dive_runs_before_care(blueprint):
     flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
     flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     move = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU Apollo")))
-    assert move.kind == "experience_dive"
-    assert flow.state.focus["type"] == "experience_dive"
+    assert move.kind == "ask_care"
     assert not flow.state.experience_dive_done
-    after = flow.apply(TurnAnalysis(intent="answer", gist_en="Handled ICU monitoring and meds"))
-    assert flow.state.experience_dive_done
-    assert after.kind == "ask_care" or flow.state.focus.get("type") == "care"
+    clear_care(flow)
+    assert flow.state.focus.get("type") == "experience_probe"
+    assert any(i.get("source") == "resume" for i in flow.state.experience_probe_queue)
+    assert any(i.get("source") == "bank" for i in flow.state.experience_probe_queue)
+    assert len(flow.state.experience_probe_queue) >= 6
+
+
+def test_fresher_gets_bank_probes_only_after_care(blueprint):
+    flow, _ = make_flow(blueprint, resume="BSc Nursing intern, hospital postings only")
+    flow.opening()
+    flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "BSc"), ("qualification_year", "2024")))
+    flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
+    flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
+    flow.apply(say(("experience_years", "0"), ("experience_settings", "internship ward posting")))
+    assert flow.state.experience_level == "fresher"
+    clear_care(flow)
+    q = flow.state.experience_probe_queue
+    assert 3 <= len(q) <= 4
+    assert all(i.get("source") == "bank" for i in q)
+    assert flow.state.focus.get("type") == "experience_probe"
+
+
+def test_thin_experience_probe_gets_one_deepen_then_moves_on(blueprint):
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    clear_care(flow)
+    assert flow.state.focus.get("type") == "experience_probe"
+    thin = flow.apply(
+        TurnAnalysis(intent="answer", gist_en="yes", answer_depth="thin", raw_utterance="yes")
+    )
+    assert thin.kind == "experience_deepen"
+    still_thin = flow.apply(
+        TurnAnalysis(intent="answer", gist_en="ok", answer_depth="thin", raw_utterance="ok")
+    )
+    assert still_thin.kind == "experience_probe"
+    assert flow.state.experience_probe_index == 1
 
 
 def test_salary_holdout_does_not_invent_numbers(blueprint):
@@ -898,8 +971,8 @@ def reach_clinical(flow, experience=("3", "ICU at a private hospital")):
     flow.apply(say(("height_cm", "160"), ("weight_kg", "55")))
     flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
     flow.apply(say(("experience_years", experience[0]), ("experience_settings", experience[1])))
-    flow.apply(TurnAnalysis(intent="answer", gist_en="Day to day ICU nursing duties"))
     flow.apply(TurnAnalysis(care_updates=[CareUpdate(c.id, "comfortable") for c in blueprint_items(flow)]))
+    drain_experience_probes(flow)
     assert flow.stage == "clinical"
 
 
@@ -1202,12 +1275,20 @@ def test_experience_question_starts_from_the_resume_then_moves_to_nursing(bluepr
     assert "Apollo" in check.directive
     assert flow.state.resume_crosscheck_done
     clarified = flow.apply(TurnAnalysis(intent="answer", gist_en="The resume is old. I work on a ward now."))
-    assert clarified.kind == "experience_dive"
-    assert "resume" in clarified.directive.lower()
-    nursing = flow.apply(TurnAnalysis(intent="answer", gist_en="I check vitals and give medicines", resume_mismatch="still conflicts"))
+    assert clarified.kind in ("ask_care", "ask_care_item")
+    clear_care(flow)
+    assert flow.state.focus.get("type") == "experience_probe"
+    assert any(i.get("source") == "resume" for i in flow.state.experience_probe_queue)
+    nursing = flow.apply(
+        TurnAnalysis(
+            intent="answer",
+            gist_en="I check vitals and give medicines on the ward every shift",
+            answer_depth="sufficient",
+            resume_mismatch="still conflicts",
+        )
+    )
     assert nursing.kind != "resume_check"
-    assert flow.state.experience_dive_done
-    assert nursing.kind in ("ask_care", "ask_care_item")
+    assert nursing.kind in ("experience_probe", "experience_deepen")
 
 
 def test_answers_to_candidate_questions_come_from_the_faq_only(blueprint):

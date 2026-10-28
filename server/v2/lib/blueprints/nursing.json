@@ -13,7 +13,11 @@
     "max_contradiction_probes": 2,
     "max_unclear_streak": 3,
     "max_dont_know_total": 4,
-    "max_field_attempts": 3
+    "max_field_attempts": 3,
+    "experience_resume_tied": 3,
+    "experience_bank_target": 4,
+    "experience_fresher_target": 4,
+    "max_deepens_per_experience_probe": 1
   },
   "screening": {
     "fields": [
@@ -107,6 +111,128 @@
         "gate": false,
         "ask": "Ask if they are comfortable turning, lifting and repositioning patients.",
         "persuasion": []
+      }
+    ],
+    "experience_probes": [
+      {
+        "id": "vital_ranges",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask the normal adult ranges for blood pressure, pulse, and breathing rate, and which change would worry them first."
+      },
+      {
+        "id": "vitals_escalate",
+        "tags": ["fresher", "ward", "icu"],
+        "ask": "Ask what they do first if a patient's blood pressure suddenly reads very low and the patient feels dizzy."
+      },
+      {
+        "id": "med_five_rights",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask them to name the five rights of giving medicine, in plain words."
+      },
+      {
+        "id": "high_alert_meds",
+        "tags": ["ward", "icu", "junior"],
+        "ask": "Ask how they handle high-alert medicines like insulin or potassium chloride on the ward."
+      },
+      {
+        "id": "med_error",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask what they would do if they realised they had given the wrong dose of a medicine."
+      },
+      {
+        "id": "verbal_order",
+        "tags": ["ward", "icu", "junior"],
+        "ask": "Ask how they take a verbal or phone medicine order from a doctor safely."
+      },
+      {
+        "id": "hand_hygiene",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask when they wash or rub their hands during patient care, and why gloves are not enough alone."
+      },
+      {
+        "id": "bmw_bags",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask which colour bag they use for soiled dressings and which container for used needles."
+      },
+      {
+        "id": "needle_stick",
+        "tags": ["fresher", "ward", "icu"],
+        "ask": "Ask the first steps they take after a needle-stick injury on duty."
+      },
+      {
+        "id": "busy_ward_priority",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask how they decide whom to see first when several patients need them at once on a busy shift."
+      },
+      {
+        "id": "unresponsive_patient",
+        "tags": ["fresher", "ward", "icu", "emergency"],
+        "ask": "Ask what they do step by step if they find a patient unresponsive in the ward."
+      },
+      {
+        "id": "crash_cart",
+        "tags": ["ward", "icu", "junior"],
+        "ask": "Ask where the crash cart is kept on a typical ward and what they check on it."
+      },
+      {
+        "id": "fall_risk",
+        "tags": ["fresher", "ward", "homecare"],
+        "ask": "Ask how they reduce fall risk for an elderly patient who is weak or confused."
+      },
+      {
+        "id": "pressure_injury",
+        "tags": ["fresher", "ward", "homecare"],
+        "ask": "Ask how they prevent bed sores for a bedridden patient."
+      },
+      {
+        "id": "iv_site_check",
+        "tags": ["fresher", "ward", "icu"],
+        "ask": "Ask what signs at an IV site would make them stop the drip and call a senior."
+      },
+      {
+        "id": "catheter_care",
+        "tags": ["ward", "icu", "junior"],
+        "ask": "Ask how they care for a patient with a urinary catheter to reduce infection."
+      },
+      {
+        "id": "handover",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask what key points they include when handing over their patients to the next shift."
+      },
+      {
+        "id": "difficult_relative",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask how they respond if a relative is angry because the doctor is late."
+      },
+      {
+        "id": "blood_transfusion",
+        "tags": ["ward", "icu", "junior"],
+        "ask": "Ask what they check at the bedside before starting a blood transfusion."
+      },
+      {
+        "id": "two_identifiers",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask how they confirm they have the right patient before giving medicine or a procedure."
+      },
+      {
+        "id": "documentation",
+        "tags": ["fresher", "ward", "general"],
+        "ask": "Ask why nurses say if it is not documented it is not done, with one short example from ward work."
+      },
+      {
+        "id": "breathlessness",
+        "tags": ["fresher", "ward", "icu"],
+        "ask": "Ask the first things they do if a patient suddenly becomes short of breath."
+      },
+      {
+        "id": "intake_output",
+        "tags": ["fresher", "ward", "icu"],
+        "ask": "Ask why intake and output charting matters, and when they would escalate low urine output."
+      },
+      {
+        "id": "internship_learning",
+        "tags": ["fresher"],
+        "ask": "Ask what patient-care tasks they did most during hospital postings or internship, and what they learned."
       }
     ]
   },

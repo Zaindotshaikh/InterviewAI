@@ -24,6 +24,18 @@ class Limits:
     max_unclear_streak: int = 3
     max_dont_know_total: int = 4
     max_field_attempts: int = 3
+    # Post-care experience block (after diaper gate clears).
+    experience_resume_tied: int = 3
+    experience_bank_target: int = 4
+    experience_fresher_target: int = 4
+    max_deepens_per_experience_probe: int = 1
+
+
+@dataclass(frozen=True)
+class ExperienceProbeSpec:
+    id: str
+    ask: str
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +110,7 @@ class Blueprint:
     areas: tuple[AreaSpec, ...]
     start_level_by_experience: dict[str, int]
     tiers: tuple[TierSpec, ...]
+    experience_probes: tuple[ExperienceProbeSpec, ...] = ()
     faq: tuple[tuple[str, str], ...] = ()
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -109,6 +122,9 @@ class Blueprint:
 
     def area(self, area_id: str) -> AreaSpec | None:
         return next((a for a in self.areas if a.id == area_id), None)
+
+    def experience_probe(self, probe_id: str) -> ExperienceProbeSpec | None:
+        return next((p for p in self.experience_probes if p.id == probe_id), None)
 
     @property
     def gate_items(self) -> tuple[CareItem, ...]:
@@ -144,6 +160,16 @@ class Blueprint:
             )
             for c in screening.get("care_items") or []
         )
+        experience_probes = tuple(
+            ExperienceProbeSpec(
+                id=str(p["id"]),
+                ask=str(p.get("ask") or "").strip()
+                or f"Ask one short nursing question about {p.get('id')}.",
+                tags=tuple(str(t) for t in (p.get("tags") or ()) if str(t).strip()),
+            )
+            for p in screening.get("experience_probes") or []
+            if p.get("id") and str(p.get("ask") or "").strip()
+        )
         areas = tuple(
             AreaSpec(
                 id=a["id"],
@@ -177,6 +203,7 @@ class Blueprint:
             areas=areas,
             start_level_by_experience={"fresher": 1, "junior": 1, "experienced": 2, **{k: int(v) for k, v in levels.items()}},
             tiers=tiers,
+            experience_probes=experience_probes,
             faq=faq,
             raw=data,
         )

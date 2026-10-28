@@ -950,7 +950,7 @@ class InterviewAgent(Agent):
         if self.flow.patient_answer_focus():
             return 2.0
         ftype = (self.flow.state.focus or {}).get("type") or ""
-        if ftype in ("clinical", "experience_dive"):
+        if ftype in ("clinical", "experience_dive", "experience_probe"):
             return 1.5
         return self._gpt_live_drive_settle_s
 

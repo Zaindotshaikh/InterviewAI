@@ -56,7 +56,10 @@ class FlowState:
     care: dict[str, CareState] = field(default_factory=dict)
     gate_failed: str | None = None
     care_intro_done: bool = False
-    experience_dive_done: bool = False  # asked what they actually did in those settings
+    experience_dive_done: bool = False  # post-care experience probe block finished
+    experience_probe_queue: list[dict[str, Any]] = field(default_factory=list)
+    experience_probe_index: int = 0
+    experience_probe_deepens: int = 0  # deepens used on the current queue item
     resume_crosscheck_done: bool = False  # one check when spoken experience conflicts with the resume
     experience_level: str = "unknown"  # fresher | junior | experienced | unknown
     areas: dict[str, AreaProgress] = field(default_factory=dict)

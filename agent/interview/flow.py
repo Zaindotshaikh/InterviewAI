@@ -23,6 +23,7 @@ from interview.analysis import (
     looks_like_care_consent,
 )
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
+from interview.experience_probes import build_probe_queue, is_fresher
 from interview.flow_state import AreaProgress, FlowState
 from interview.language import get_profile
 from interview.phone_speech import (
@@ -208,7 +209,7 @@ class InterviewFlow:
         """True when the candidate normally pauses mid-answer (body, work history, clinical)."""
         f = self.state.focus or {}
         ftype = f.get("type") or ""
-        if ftype in ("clinical", "experience_dive", "resume_check"):
+        if ftype in ("clinical", "experience_dive", "experience_probe", "resume_check"):
             return True
         if ftype != "slots":
             return False
@@ -341,6 +342,9 @@ class InterviewFlow:
             )
         if ftype == "experience_dive":
             return f"stage={stage} focus=experience_dive"
+        if ftype == "experience_probe":
+            pid = focus.get("probe_id") or ""
+            return f"stage={stage} focus=experience_probe id={pid}"
         if ftype == "resume_check":
             return f"stage={stage} focus=resume_check"
         if ftype == "contradiction":
@@ -540,9 +544,8 @@ class InterviewFlow:
         if focus_type == "care":
             self._mark_care_focus_negative("dont_know")
             return self._screening_next(events)
-        if focus_type == "experience_dive":
-            st.experience_dive_done = True
-            return self._screening_next(events)
+        if focus_type in ("experience_dive", "experience_probe"):
+            return self._advance_experience_probe(events, skip_rest=True)
         if focus_type == "resume_check":
             return self._screening_next(events)
         if focus_type == "clinical" and st.current_area:
@@ -842,6 +845,14 @@ class InterviewFlow:
                 "They were still finishing their answer. Ask once what they actually did day to day. "
                 "Do not say you could not hear them and do not move on.",
             )
+        if kind == "experience_probe":
+            item = self._current_experience_probe()
+            ask = (item or {}).get("ask") or "Ask the same nursing experience question once."
+            return self._move(
+                "experience_probe",
+                "They were still finishing their answer. Ask the same question once. "
+                f"Do not say you could not hear them and do not move on. {ask}",
+            )
         if st.last_question:
             return self._move(
                 "ask_field",
@@ -899,7 +910,7 @@ class InterviewFlow:
 
     def _about_experience(self, a: TurnAnalysis) -> bool:
         focus = self.state.focus or {}
-        if focus.get("type") == "experience_dive":
+        if focus.get("type") in ("experience_dive", "experience_probe"):
             return True
         if focus.get("type") == "resume_check":
             return False
@@ -907,6 +918,150 @@ class InterviewFlow:
         if ids & {"experience_years", "experience_settings"}:
             return True
         return any(u.field in ("experience_years", "experience_settings") for u in a.slot_updates)
+
+    def _current_experience_probe(self) -> dict[str, Any] | None:
+        st = self.state
+        q = st.experience_probe_queue or []
+        i = st.experience_probe_index
+        if 0 <= i < len(q):
+            return q[i]
+        return None
+
+    def _is_fresher_candidate(self) -> bool:
+        years = self.state.slots.get("experience_years")
+        return is_fresher(
+            experience_level=self.state.experience_level,
+            years_value=years.value if years else None,
+        )
+
+    def _answer_sufficient_for_probe(self, a: TurnAnalysis) -> bool:
+        """Enough detail to move on; thin answers get at most one deepen."""
+        if a.intent in ("dont_know", "refusal", "filler_only", "wants_to_stop"):
+            return True  # do not deepen forever; advance the queue
+        depth = str(getattr(a, "answer_depth", "") or "").strip()
+        if depth == "sufficient":
+            return True
+        if depth == "thin":
+            return False
+        text = " ".join(((a.gist_en or "") + " " + (a.raw_utterance or "")).split())
+        return len(text.split()) >= 10
+
+    def _ensure_experience_probe_queue(self) -> None:
+        st = self.state
+        if st.experience_probe_queue or st.experience_dive_done:
+            return
+        settings = st.slots.get("experience_settings")
+        where = str(settings.value) if settings and settings.value else ""
+        st.experience_probe_queue = build_probe_queue(
+            self.bp,
+            fresher=self._is_fresher_candidate(),
+            resume_text=getattr(self.plan, "resume_text", "") or "",
+            settings=where,
+        )
+        st.experience_probe_index = 0
+        st.experience_probe_deepens = 0
+        if not st.experience_probe_queue:
+            st.experience_dive_done = True
+
+    def _ask_experience_probe(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        st = self.state
+        self._ensure_experience_probe_queue()
+        if st.experience_dive_done:
+            return self._screening_next(events)
+        item = self._current_experience_probe()
+        if item is None:
+            st.experience_dive_done = True
+            return self._screening_next(events)
+        self._set_focus(
+            "experience_probe",
+            probe_id=item.get("id"),
+            source=item.get("source"),
+        )
+        return self._move(
+            "experience_probe",
+            str(item.get("ask") or "Ask one short nursing question."),
+            events=events
+            + [
+                (
+                    "experience.probe",
+                    {
+                        "id": item.get("id"),
+                        "source": item.get("source"),
+                        "index": st.experience_probe_index,
+                        "total": len(st.experience_probe_queue),
+                    },
+                )
+            ],
+        )
+
+    def _advance_experience_probe(
+        self,
+        events: list[tuple[str, dict[str, Any]]],
+        *,
+        skip_rest: bool = False,
+    ) -> Move:
+        st = self.state
+        if skip_rest:
+            st.experience_dive_done = True
+            st.experience_probe_deepens = 0
+            self._set_focus("none")
+            return self._screening_next(events)
+        st.experience_probe_index += 1
+        st.experience_probe_deepens = 0
+        if st.experience_probe_index >= len(st.experience_probe_queue or []):
+            st.experience_dive_done = True
+            self._set_focus("none")
+            return self._screening_next(events)
+        return self._ask_experience_probe(events)
+
+    def _handle_experience_probe_answer(
+        self,
+        a: TurnAnalysis,
+        events: list[tuple[str, dict[str, Any]]],
+    ) -> Move:
+        st = self.state
+        item = self._current_experience_probe()
+        if a.intent == "dont_know":
+            events.append(
+                (
+                    "experience.probe_answer",
+                    {"id": (item or {}).get("id"), "status": "skipped"},
+                )
+            )
+            return self._advance_experience_probe(events)
+        max_deepen = int(self.bp.limits.max_deepens_per_experience_probe)
+        if not self._answer_sufficient_for_probe(a) and st.experience_probe_deepens < max_deepen:
+            st.experience_probe_deepens += 1
+            ask = (item or {}).get("ask") or "the same nursing question"
+            self._set_focus(
+                "experience_probe",
+                probe_id=(item or {}).get("id"),
+                source=(item or {}).get("source"),
+                deepen=True,
+            )
+            return self._move(
+                "experience_deepen",
+                "Their answer was too thin. Ask ONE short follow-up to get more concrete detail "
+                f"(what they did, checked, or would do next). Stay on the same topic. Prior ask: {ask}",
+                events=events
+                + [
+                    (
+                        "experience.probe_deepen",
+                        {"id": (item or {}).get("id"), "n": st.experience_probe_deepens},
+                    )
+                ],
+            )
+        events.append(
+            (
+                "experience.probe_answer",
+                {
+                    "id": (item or {}).get("id"),
+                    "status": "answered",
+                    "sufficient": self._answer_sufficient_for_probe(a),
+                },
+            )
+        )
+        return self._advance_experience_probe(events)
 
     def _resume_crosscheck(self, a: TurnAnalysis) -> Move | None:
         """One friendly check when spoken experience conflicts with the resume, then the interview moves on."""
@@ -1256,8 +1411,11 @@ class InterviewFlow:
         self._absorb_slot_updates(a, events)
         self._absorb_care(a, events)
 
-        if focus_type == "experience_dive":
-            # Any substantive reply (or idk) closes the dive; we still keep what they said as claims.
+        if focus_type == "experience_probe":
+            # Answered below after resume cross-check / meta intents; mark nothing here yet.
+            pass
+        elif focus_type == "experience_dive":
+            # Legacy focus from an in-flight rejoin: treat as one probe answer and finish the block.
             st.experience_dive_done = True
             if a.intent == "dont_know":
                 events.append(("experience.dive", {"status": "skipped"}))
@@ -1285,6 +1443,9 @@ class InterviewFlow:
             if move:
                 move.events = events + move.events
                 return move
+        if focus_type == "experience_probe":
+            return self._handle_experience_probe_answer(a, events)
+
         missed = self._unheard_slot(a)
         if missed is not None:
             heard = self._could_not_hear(missed, events)
@@ -1535,28 +1696,16 @@ class InterviewFlow:
                 move.verbatim = phone_ask_line(st.language)
             return move
 
-        # 5. What did they actually do in those settings (depth before care / clinical).
-        if self._experience_captured() and not st.experience_dive_done:
-            settings = st.slots.get("experience_settings")
-            where = str(settings.value) if settings and settings.value else "that work"
-            # A long answer already described the duties. Move on to care instead of another background question.
-            if len(where.split()) >= 6:
-                st.experience_dive_done = True
-            else:
-                self._set_focus("experience_dive")
-                return self._move(
-                    "experience_dive",
-                    f"They said they have experience in {where}. Ask ONE short nursing question about what they "
-                    "actually did with patients there, such as vitals, medicines, or ward work. "
-                    "Do not mention the resume or ask where they worked again. "
-                    "Do not start the scored clinical scenarios yet.",
-                    events=events,
-                )
-
-        # 6. Comfort with hands-on care.
+        # 5. Comfort with hands-on care (diaper gate). Experience probes wait until this clears.
         care_move = self._care_questions(events)
         if care_move is not None:
             return care_move
+
+        # 6. After diaper/care clears: resume-tied + India nursing bank (or fresher bank only).
+        if not st.experience_dive_done:
+            self._ensure_experience_probe_queue()
+            if not st.experience_dive_done:
+                return self._ask_experience_probe(events)
 
         return self._enter_clinical(events)
 

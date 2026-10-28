@@ -47,6 +47,7 @@ INTENTS = (
 QUALITIES = ("correct", "partial", "incorrect", "unrelated", "none")
 STANCES = ("comfortable", "willing_with_training", "hesitant", "refuses")
 EXPERIENCE_LEVELS = ("fresher", "junior", "experienced", "unknown")
+ANSWER_DEPTHS = ("sufficient", "thin", "none")
 
 
 @dataclass
@@ -96,6 +97,8 @@ class TurnAnalysis:
     aside: str = ""
     # Spoken work history that conflicts with the resume. Empty when it matches or there is no resume.
     resume_mismatch: str = ""
+    # Depth of an experience-probe answer: sufficient | thin | none (not applicable).
+    answer_depth: str = "none"
     raw_utterance: str = ""
     # Digits stored for this turn. Empty when the utterance was not a number.
     phone_resolved: str = ""
@@ -162,6 +165,7 @@ class TurnAnalysis:
             gist_en=str(d.get("gist_en") or ""),
             aside=str(d.get("aside") or "")[:240],
             resume_mismatch=str(d.get("resume_mismatch") or "")[:240],
+            answer_depth=pick(d.get("answer_depth"), ANSWER_DEPTHS, "none"),
             source=source,
             empathy_tone=(
                 emp
@@ -239,6 +243,7 @@ def build_schema(blueprint: Blueprint) -> dict[str, Any]:
             "gist_en": str_t,
             "aside": str_t,
             "resume_mismatch": str_t,
+            "answer_depth": {"type": "string", "enum": list(ANSWER_DEPTHS)},
         }
     )
 
@@ -322,6 +327,9 @@ nervousness.
   concrete fact (years, hospital, ward, or role) clearly conflicts with that resume. Then one line:
   "resume says …; they said …". The same place in different words is not a conflict. A detail the resume does
   not mention is not a conflict. Never copy the resume into slot_updates.
+- answer_depth: when the interviewer asked an experience or nursing-practice probe (not a one-word screening
+  slot), set sufficient if they gave concrete steps, checks, or duties; thin if only a vague yes / one short
+  phrase with no detail; none when the question was not that kind of probe.
 
 If a section does not apply, return empty arrays, "none" or false for it."""
 

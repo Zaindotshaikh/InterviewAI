@@ -151,6 +151,10 @@ def test_the_shipped_blueprint_is_well_formed():
     assert bp.field_spec("phone").confirm
     assert [c.id for c in bp.gate_items] == ["diaper_care"]
     assert len(bp.care_item("diaper_care").persuasion) >= 2
+    assert len(bp.experience_probes) >= 20
+    assert bp.limits.experience_resume_tied == 3
+    assert bp.limits.experience_bank_target == 4
+    assert bp.limits.experience_fresher_target == 4
     assert len(bp.areas) >= 8 and {t.id for t in bp.tiers} >= {"tier_1", "not_eligible", "needs_review"}
     for area in bp.areas:
         assert {lv.level for lv in area.levels} == {1, 2, 3}, area.id
