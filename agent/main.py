@@ -67,6 +67,7 @@ from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_te
 from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
+from interview.speech import SpeechArbiter, await_playout, source_for_move
 from interview.voice_tone import tone_for_kind
 from providers import (
     SessionRefused,
@@ -391,9 +392,18 @@ class InterviewAgent(Agent):
         self._gpt_live_ignore_until: float = 0.0
         self._gpt_live_held_voice: bool = False
         self._floor_watch_started = False
+        # P2-01: every cascade TTS start goes through speak() / this arbiter.
+        self._speech = SpeechArbiter()
 
     def is_listening_armed(self) -> bool:
         return bool(self._listening_armed)
+
+    def speech_busy(self) -> bool:
+        return self._speech.busy()
+
+    async def speak(self, source: str, *starts: Any, wait: bool = True, detail: str = "") -> bool:
+        """Only function allowed to start agent TTS. Sources: director, filler, silence, verbatim, watchdog."""
+        return await self._speech.play(source, *starts, wait=wait, detail=detail)
 
     def _set_candidate_mic(self, enabled: bool, *, reason: str) -> None:
         """Gate candidate audio so ward noise cannot steal the turn before the greeting.
@@ -461,16 +471,7 @@ class InterviewAgent(Agent):
 
     async def _await_playout(self, handle: Any) -> None:
         """Wait until a SpeechHandle finishes playing (say / generate_reply return handles, not coroutines)."""
-        if handle is None:
-            return
-        wait = getattr(handle, "wait_for_playout", None)
-        try:
-            if callable(wait):
-                await wait()
-            elif hasattr(handle, "__await__"):
-                await handle
-        except Exception:  # noqa: BLE001
-            logger.exception("speech playout wait failed")
+        await await_playout(handle)
 
     async def _gpt_live_wait_quiet(self, *, min_quiet_s: float = 1.2, timeout_s: float = 14.0) -> None:
         """GPT-Live splits one directive into several spoken beats; wait until speech has truly stopped.
@@ -815,6 +816,7 @@ class InterviewAgent(Agent):
         # First silence level is intentional quiet — do not invent a "no hurry" line.
         if move.kind == "silence_hold" or not (move.directive or "").strip():
             return
+        source = source_for_move(move.kind)
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
             self._empathy_hint = self._current_tone in ("gentle", "reassuring")
@@ -830,8 +832,11 @@ class InterviewAgent(Agent):
                 # Still request no barge-in; mic is muted until listening is armed.
                 if move.kind == "opening":
                     reply_kwargs["allow_interruptions"] = False
-                reply_handle = self.session.generate_reply(**reply_kwargs)
-                await self._await_playout(reply_handle)
+                await self.speak(
+                    source,
+                    lambda: self.session.generate_reply(**reply_kwargs),
+                    detail=move.kind,
+                )
                 if move.kind == "opening":
                     # Wait out multi-beat openings. 0.55s was too short: quiet gap between
                     # greeting beats → focus_lock / retry re-asked the same question.
@@ -849,23 +854,28 @@ class InterviewAgent(Agent):
                     elevenlabs=self._tts_provider == "elevenlabs",
                     engine=self._expressiveness_mode == "engine",
                 )
-                seed_handle = self.session.say(seed, allow_interruptions=not block)
                 directive_text = (
                     f"CONTROLLER DIRECTIVE: {move.directive}\n"
                     f"{native_script_reminder(self.flow.state.language)}"
                 )
-                reply_handle = self.session.generate_reply(
-                    instructions=directive_text,
-                    allow_interruptions=not block,
+                await self.speak(
+                    source,
+                    lambda: self.session.say(seed, allow_interruptions=not block),
+                    lambda: self.session.generate_reply(
+                        instructions=directive_text,
+                        allow_interruptions=not block,
+                    ),
+                    detail=move.kind,
                 )
-                await self._await_playout(seed_handle)
-                await self._await_playout(reply_handle)
                 # Playout already finished — do NOT poll agent_state (that used to hang ~45s).
                 await self._arm_listening(reason="opening_complete")
             else:
                 directive_text = f"CONTROLLER DIRECTIVE: {move.directive}"
-                reply_handle = self.session.generate_reply(instructions=directive_text)
-                await self._await_playout(reply_handle)
+                await self.speak(
+                    source,
+                    lambda: self.session.generate_reply(instructions=directive_text),
+                    detail=move.kind,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("generate_reply failed for %s", move.kind)
             if move.kind == "opening" and not self._listening_armed:
@@ -1467,14 +1477,22 @@ class InterviewAgent(Agent):
             picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
             if picked is not None:
                 filler_text, frames = picked
-                if self.latency is not None:
-                    self.latency.on_filler_start()
-                self.session.say(filler_text, audio=frames_iter(frames), add_to_chat_ctx=False)
-                self._suppress_lead = True
-                filler_note = (
-                    f'\nYou have already said "{filler_text}" out loud as your reaction. Do not open with another '
-                    "acknowledgement; continue straight on from it."
+                played = await self.speak(
+                    "filler",
+                    lambda: self.session.say(
+                        filler_text, audio=frames_iter(frames), add_to_chat_ctx=False
+                    ),
+                    wait=False,
+                    detail="ack",
                 )
+                if played:
+                    if self.latency is not None:
+                        self.latency.on_filler_start()
+                    self._suppress_lead = True
+                    filler_note = (
+                        f'\nYou have already said "{filler_text}" out loud as your reaction. Do not open with another '
+                        "acknowledgement; continue straight on from it."
+                    )
 
         elapsed_min = (datetime.now(timezone.utc) - self._started_at).total_seconds() / 60.0
         t0 = datetime.now(timezone.utc)
@@ -1503,21 +1521,42 @@ class InterviewAgent(Agent):
             # The mobile step is one fixed sentence. The dialogue model was adding the next
             # question ("what is your age?") in the same breath as the number read-back.
             self.director.note_assistant(move.verbatim)
-            self.session.say(move.verbatim, allow_interruptions=True)
+            await self.speak(
+                "verbatim",
+                lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                wait=False,
+                detail=move.kind,
+            )
             if self.latency is not None:
                 self.latency.on_hook_end()
             self._finish_if_needed(move)
             raise StopResponse()
-        turn_ctx.add_message(
-            role="system",
-            content=(
-                f"CONTROLLER DIRECTIVE: {move.directive}\n"
-                f"{native_script_reminder(self.flow.state.language)}{filler_note}"
-            ),
+        directive = (
+            f"CONTROLLER DIRECTIVE: {move.directive}\n"
+            f"{native_script_reminder(self.flow.state.language)}{filler_note}"
         )
+        turn_ctx.add_message(role="system", content=directive)
         if self.latency is not None:
             self.latency.on_hook_end()
         self._finish_if_needed(move)
+        # Claim the floor here so LiveKit's default generate_reply cannot overlap a filler.
+        # StopResponse skips that default; user_input keeps the candidate turn in this reply.
+        await self.speak(
+            "director",
+            lambda: self._director_reply(turn_ctx, text, directive),
+            wait=False,
+            detail=move.kind,
+        )
+        raise StopResponse()
+
+    def _director_reply(self, turn_ctx: Any, text: str, directive: str) -> Any:
+        try:
+            return self.session.generate_reply(chat_ctx=turn_ctx, user_input=text)
+        except TypeError:
+            try:
+                return self.session.generate_reply(user_input=text, instructions=directive)
+            except TypeError:
+                return self.session.generate_reply(instructions=directive)
 
 
 class CascadeInterviewAgent(InterviewAgent):
@@ -1617,6 +1656,7 @@ async def _run_gpt_live_session(
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
+        speak=agent.speak,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -1959,6 +1999,7 @@ async def entrypoint(ctx: JobContext) -> None:
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
+        speak=agent.speak,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -2004,6 +2045,7 @@ async def entrypoint(ctx: JobContext) -> None:
         language=language,
         enabled=bool(settings.voice_early_filler),
         on_start=(latency.on_filler_start if latency else None),
+        speak=agent.speak,
     )
     early.attach()
 

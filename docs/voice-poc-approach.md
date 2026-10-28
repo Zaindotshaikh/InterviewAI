@@ -3,7 +3,9 @@
 **Date:** 19 October 2026  
 **Decision:** Demo `/elevenlabs-interviewer`. Keep the LiveKit cascade and the existing Director / InterviewFlow brain. Do not demo `/gpt-live-interviewer` as the feedback surface. Avatar stays out.
 
-This is a voice-first demo the team can break and score. It is not a build plan for the full product. Phase 1 execution scope for languages is in `docs/poc-implementation-plan.md`: every language in `SUPPORTED_LANGUAGES`, one voice persona per language.
+**Update 28 October 2026:** Phase 1 cascade / languages / Rejoin is complete (21 Oct). Post-QA workstreams are now the execution plan in `docs/poc-implementation-plan.md` and `docs/phase-2-quality-tracker.md` (speech arbiter, fillers/silence, screening parsers, pre-TTS guard, then clinical). Demo route unchanged. Hosted STS / ElevenAgents / Eleven Realtime / Speech Engine stay deferred. GPT-Live is still not the demo. This note is not rewritten; where the 19 Oct “defer arbiter / output guard” list disagrees with the quality plan, the plan wins.
+
+This is a voice-first demo the team can break and score. It is not a build plan for the full product. Phase 1 language scope (now Done) is in `docs/poc-implementation-plan.md` Appendix A and `docs/phase-1-tracker.md`.
 
 ---
 

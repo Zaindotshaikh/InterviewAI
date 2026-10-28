@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from config import Settings
@@ -140,6 +140,7 @@ class TurnWatchdog:
         settings: Settings,
         is_listening_armed: Callable[[], bool] | None = None,
         get_language: Callable[[], str] | None = None,
+        speak: Callable[..., Awaitable[bool]] | None = None,
     ) -> None:
         self._session = session
         self._backend = backend
@@ -147,6 +148,7 @@ class TurnWatchdog:
         self._settings = settings
         self._is_listening_armed = is_listening_armed
         self._get_language = get_language
+        self._speak = speak
         self._eou_delays: list[float] = []
         self._counters = {
             "transcription_timeouts": 0,
@@ -209,6 +211,19 @@ class TurnWatchdog:
         # asking the candidate to repeat cold.
         self._spawn(self._salvage_or_repeat())
 
+    def _speech_busy(self) -> bool:
+        owner = getattr(self._speak, "__self__", None)
+        if owner is None:
+            return False
+        for name in ("speech_busy", "busy"):
+            fn = getattr(owner, name, None)
+            if callable(fn):
+                try:
+                    return bool(fn())
+                except Exception:  # noqa: BLE001
+                    return False
+        return False
+
     async def _salvage_or_repeat(self) -> None:
         if getattr(self._session, "agent_state", None) in ("speaking", "thinking"):
             return
@@ -239,14 +254,32 @@ class TurnWatchdog:
             return
         if not self._armed():
             return
+        if self._speech_busy():
+            return
+        instructions = REPEAT_DIRECTIVE
+        if self._get_language is not None:
+            lang = self._get_language()
+            if lang:
+                instructions = f"{REPEAT_DIRECTIVE}\n{native_script_reminder(lang)}"
+        if self._speak is None:
+            try:
+                self._session.generate_reply(instructions=instructions)
+                self._counters["repeat_prompts"] += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("could not ask the candidate to repeat")
+            return
+        self._spawn(self._repeat_via_speak(instructions))
+
+    async def _repeat_via_speak(self, instructions: str) -> None:
         try:
-            instructions = REPEAT_DIRECTIVE
-            if self._get_language is not None:
-                lang = self._get_language()
-                if lang:
-                    instructions = f"{REPEAT_DIRECTIVE}\n{native_script_reminder(lang)}"
-            self._session.generate_reply(instructions=instructions)
-            self._counters["repeat_prompts"] += 1
+            ok = await self._speak(
+                "watchdog",
+                lambda: self._session.generate_reply(instructions=instructions),
+                wait=False,
+                detail="repeat",
+            )
+            if ok:
+                self._counters["repeat_prompts"] += 1
         except Exception:  # noqa: BLE001
             logger.exception("could not ask the candidate to repeat")
 

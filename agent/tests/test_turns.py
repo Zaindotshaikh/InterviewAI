@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from config import Settings
+from interview.speech import SpeechArbiter
 from interview.turns import (
     MAX_BACKEND_EVENTS,
     REPEAT_DIRECTIVE,
@@ -126,7 +127,14 @@ class _FakeBackend:
 
 
 def _watchdog(session, backend, **settings):
-    wd = TurnWatchdog(session=session, backend=backend, interview_id="i1", settings=_settings(**settings))
+    arb = SpeechArbiter()
+    wd = TurnWatchdog(
+        session=session,
+        backend=backend,
+        interview_id="i1",
+        settings=_settings(**settings),
+        speak=arb.play,
+    )
     wd.attach()
     return wd
 
@@ -138,7 +146,7 @@ def test_missing_transcript_asks_the_candidate_to_repeat_with_a_cap():
         ev = SimpleNamespace(speech_duration=8.0)
         for _ in range(4):
             session.handlers["user_transcription_timeout"](ev)
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
         assert [r["instructions"] for r in session.replies] == [REPEAT_DIRECTIVE] * 2
         assert wd.summary()["transcription_timeouts"] == 4
         assert wd.summary()["repeat_prompts"] == 2
@@ -191,6 +199,39 @@ def test_does_not_talk_over_the_agent():
         await asyncio.sleep(0.05)
         assert session.replies == []
         assert session.commits == []
+
+    asyncio.run(run())
+
+
+def test_watchdog_repeat_skips_when_arbiter_busy():
+    async def run():
+        session, backend = _FakeSession(), _FakeBackend()
+        arb = SpeechArbiter()
+        held = asyncio.Event()
+
+        class Held:
+            def interrupt(self, force=False):
+                held.set()
+
+            async def wait_for_playout(self):
+                await held.wait()
+
+        await arb.play("director", lambda: Held(), wait=False)
+        wd = TurnWatchdog(
+            session=session,
+            backend=backend,
+            interview_id="i1",
+            settings=_settings(),
+            speak=arb.play,
+        )
+        wd.attach()
+        session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=8.0))
+        await asyncio.sleep(0.05)
+        assert session.replies == []
+        assert session.commits == []
+        assert wd.summary()["repeat_prompts"] == 0
+        held.set()
+        await asyncio.sleep(0.02)
 
     asyncio.run(run())
 
