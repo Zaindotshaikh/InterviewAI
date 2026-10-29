@@ -37,7 +37,9 @@ from interview.phone_speech import (
     valid_indian_mobile,
 )
 from interview.normalize import (
+    extract_qualification_and_year,
     normalize_field,
+    normalize_qualification,
     parse_height_and_weight,
     plausible_city,
     spoken_groups,
@@ -159,7 +161,7 @@ class InterviewFlow:
     def _wrap(self, move: Move, nervous: bool) -> Move:
         aside = (self._pending_aside or "").strip()
         self._pending_aside = ""
-        if aside and move.verbatim:
+        if aside and move.verbatim and move.kind != "salary_holdout":
             move.directive = (
                 f"They also said something that is not the answer: {aside}. "
                 "Reply to that in one short sentence. Then say exactly this and nothing more: "
@@ -211,22 +213,30 @@ class InterviewFlow:
         ftype = f.get("type") or ""
         if ftype in ("clinical", "experience_dive", "experience_probe", "resume_check"):
             return True
+        if ftype == "care":
+            # Care intro / multi-item care discussions need patience; single-item gate follow-up is short.
+            items = f.get("items") or []
+            return len(items) != 1
         if ftype != "slots":
             return False
         ids = {str(i) for i in (f.get("ids") or [])}
-        if ids & {"height_cm", "weight_kg", "experience_settings"}:
+        if ids & {"height_cm", "weight_kg", "experience_settings", "experience_years", "phone"}:
             return True
-        # Both experience fields together are a story, not a one-word fact.
         return "experience_years" in ids and "experience_settings" in ids
 
     def expects_short_answer(self) -> bool:
-        """True when the current focus is a one-fact / yes-no question (city, phone, year, confirm, care…)."""
+        """True when the current focus is a one-fact / yes-no question (city, confirm, single-item care…)."""
+        if self.patient_answer_focus():
+            return False
         f = self.state.focus or {}
         ftype = f.get("type") or ""
-        if ftype in ("confirm", "care"):
+        if ftype == "confirm":
             return True
+        if ftype == "care":
+            return len(f.get("items") or []) == 1
         if ftype == "slots":
-            return not self.patient_answer_focus()
+            ids = {str(i) for i in (f.get("ids") or [])}
+            return bool(ids & {"city", "qualification_year"})
         return False
 
     def short_answer_kinds(self) -> tuple[str, ...]:
@@ -573,24 +583,42 @@ class InterviewFlow:
                 events=[("audio.silence_hold", {"stage": st.stage, "patient": self.patient_answer_focus()})],
             )
         if level == 2:
-            return self._move(
+            verbatim_lines = {
+                "hi-IN": "क्या आप अभी भी लाइन पर हैं?",
+                "en-IN": "Are you still there?",
+                "mr-IN": "तुम्ही ऐकत आहात का?",
+                "gu-IN": "તમે લાઇન પર છો?",
+                "te-IN": "మీరు లైన్‌లో ఉన్నారా?",
+                "ta-IN": "நீங்கள் இணைப்பில் இருக்கிறீர்களா?",
+            }
+            move = self._move(
                 "silence_nudge",
-                "Still quiet. In one short warm sentence check they can hear you. "
-                "Forbidden phrases: any reassurance about pace, offering to replay the question, "
-                "or asking the interview question again. Do not ask a new question.",
+                "Still quiet. In one short warm sentence check if they are still there. "
+                "Forbidden phrases: any reassurance about pace, asking 'can you hear me', "
+                "offering to replay the question, or asking the interview question again. Do not ask a new question.",
             )
+            move.verbatim = verbatim_lines.get(st.language, "Are you still there?")
+            return move
         if level == 3:
             return self._move(
                 "silence_check",
                 "Still no reply. Ask warmly if they are still there. "
                 "Forbidden: pace reassurances, replaying the question, or a new interview question.",
             )
-        return self._close(
+        verbatim_close = {
+            "hi-IN": "काफी देर से आपकी आवाज़ नहीं आई है। हम इस बातचीत को यहीं रोकते हैं, आप इसी लिंक से दोबारा जुड़ सकते हैं। धन्यवाद।",
+            "en-IN": "I have not heard from you for a while. We will pause here; you can rejoin using the same link when ready. Thank you.",
+            "mr-IN": "बराच वेळ आपला आवाज आलेला नाही. आपण ही मुलाखत इथेच थांबवत आहोत, आपण याच लिंकवरून पुन्हा सामील होऊ शकता. धन्यवाद.",
+            "gu-IN": "લાંબા સમયથી તમારો અવાજ આવ્યો નથી. આપણે અહીં વિરામ લઈએ છીએ, તમે આ જ લિંકથી ફરી જોડાઈ શકો છો. આભાર.",
+        }
+        move = self._close(
             "incomplete_silence",
             "There has been no response for a long time. Say kindly that you will pause here, that they can rejoin "
             "using the same link when they are ready, and thank them. Keep it to two short sentences.",
             "silence_end",
         )
+        move.verbatim = verbatim_close.get(st.language, verbatim_close["en-IN"])
+        return move
 
     def force_complete(self, reason: str = "time") -> Move:
         return self._close(
@@ -612,6 +640,7 @@ class InterviewFlow:
         self._pending_aside = "" if a.intent == "off_topic" else (a.aside or "").strip()[:200]
         self._prepare_phone_turn(a)
         self._prepare_body_turn(a)
+        self._prepare_education_turn(a)
 
         if st.stage == "ended":
             return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
@@ -760,6 +789,8 @@ class InterviewFlow:
             return any(u.item in items for u in a.care_updates)
         if kind == "clinical":
             return a.clinical is not None
+        if kind == "experience_probe":
+            return bool((a.gist_en or a.raw_utterance or "").strip() or a.intent in ("dont_know", "refusal", "answer"))
         return False
 
     def _keep_fuller_known_text(self, a: TurnAnalysis) -> None:
@@ -896,16 +927,16 @@ class InterviewFlow:
 
     def _experience_ask(self) -> str:
         resume = " ".join((getattr(self.plan, "resume_text", "") or "").split())
+        ask_base = (
+            "Ask about their nursing experience: how many total years of nursing experience they have, and where they have worked. "
+            "If they are a fresher, ask about hospital postings, internship or clinical exposure. One question only."
+        )
         if not resume:
-            return (
-                "Ask about their nursing experience: how many years, and where they worked. "
-                "If they are a fresher, ask about hospital postings or internship instead. One question."
-            )
+            return ask_base
         return (
-            "Ask ONE question about their nursing experience, using the resume as the starting point. "
-            "Pick one concrete fact from it (role, hospital, ward, or years) and ask them to tell you about that work. "
-            "Do not read the resume aloud. Do not ask anything else in this turn. "
-            f"Resume: {resume[:500]}"
+            f"{ask_base} "
+            f"Resume context: {resume[:300]}. Still verify total years and settings directly from them. "
+            "Do not read the resume aloud."
         )
 
     def _about_experience(self, a: TurnAnalysis) -> bool:
@@ -1113,7 +1144,20 @@ class InterviewFlow:
         )
 
     def _salary_or_holdout(self, a: TurnAnalysis) -> Move:
-        return self._move(
+        verbatim_lines = {
+            "hi-IN": "वेतन और पैकेज की जानकारी रिक्रूटमेंट टीम द्वारा सीधे साझा की जाएगी। क्या हम आगे बढ़ सकते हैं?",
+            "en-IN": "Salary and package details will be shared directly by the recruitment team. Can we continue with the next question?",
+            "mr-IN": "पगार आणि पॅकेजची माहिती रिक्रूटमेंट टीम थेट देईल. आपण पुढचा प्रश्न सुरू ठेवू शकतो का?",
+            "gu-IN": "પગાર અને પેકેજની વિગતો રિક્રૂટમેન્ટ ટીમ સીધી આપશે. શું આપણે આગળ વધી શકીએ?",
+            "te-IN": "జీతం మరియు ప్యాకేజీ వివరాలను రిక્રూట్‌మెంట్ బృందం నేరుగా పంచుకుంటుంది. మనం తర్వాతి ప్రశ్నకు కొనసాగవచ్చా?",
+            "ta-IN": "சம்பளம் மற்றும் பேக்கேஜ் விவரங்கள் ஆட்சேர்ப்பு குழுவால் நேரடியாக பகிரப்படும். நாம் அடுத்த கேள்விக்கு செல்லலாமா?",
+            "kn-IN": "ವೇತನ ಮತ್ತು ಪ್ಯಾಕೇಜ್ ವಿವರಗಳನ್ನು ನೇಮಕಾತಿ ತಂಡವು ನೇರವಾಗಿ ಹಂಚಿಕೊಳ್ಳುತ್ತದೆ. ನಾವು ಮುಂದಿನ ಪ್ರಶ್ನೆಗೆ ಮುಂದುವರಿಯಬಹುದೇ?",
+            "ml-IN": "ശമ്പളത്തിന്റെയും പാക്കേജിന്റെയും വിവരങ്ങൾ റിക്രൂട്ട്‌മെന്റ് ടീം നേരിട്ട് പങ്കിടും. നമുക്ക് അടുത്ത ചോദ്യത്തിലേക്ക് തുടരാമോ?",
+            "bn-IN": "বেতন এবং প্যাকেজের বিবরণ রিক্রুটমেন্ট টিম সরাসরি জানাবে। আমরা কি পরবর্তী প্রশ্নে এগিয়ে যেতে পারি?",
+            "pa-IN": "ਤਨਖਾਹ ਅਤੇ ਪੈਕੇਜ ਦੇ ਵੇਰਵੇ ਭਰਤੀ ਟੀਮ ਦੁਆਰਾ ਸਿੱਧੇ ਸਾਂਝੇ ਕੀਤੇ ਜਾਣਗੇ। ਕੀ ਅਸੀਂ ਅਗਲੇ ਸਵਾਲ 'ਤੇ ਅੱਗੇ ਵਧ ਸਕਦੇ ਹਾਂ?",
+            "od-IN": "ଦରମା ଏବଂ ପ୍ୟାକେଜ୍ ବିବରଣୀ ନିଯୁକ୍ତି ଦଳ ସିଧାସଳଖ ଜଣାଇବ। ଆମେ ପରବର୍ତ୍ତୀ ପ୍ରଶ୍ନକୁ ଆଗକୁ ବଢିପାରିବା କି?",
+        }
+        move = self._move(
             "salary_holdout",
             "They are asking about salary, benefits, or joining, or refusing to continue until you share that. "
             "In one short sentence say you cannot quote numbers — the recruitment team shares salary and benefits "
@@ -1121,6 +1165,8 @@ class InterviewFlow:
             "Never invent a figure.",
             events=[("branch.salary_holdout", {"gist": (a.gist_en or "")[:120]})],
         )
+        move.verbatim = verbatim_lines.get(self.state.language, verbatim_lines["en-IN"])
+        return move
 
     def _answer_question(self, a: TurnAnalysis | None = None) -> Move:
         if a is not None and self._mentions_comp(a):
@@ -1293,6 +1339,23 @@ class InterviewFlow:
             a.slot_updates = [u for u in a.slot_updates if u.field != "weight_kg"]
             a.slot_updates.append(SlotUpdate("weight_kg", str(weight), 0.9, raw[:80]))
 
+    def _prepare_education_turn(self, a: TurnAnalysis) -> None:
+        """P2-06: Recover qualification and year from raw utterance if analyst missed it."""
+        focus = self.state.focus or {}
+        ids = {str(i) for i in (focus.get("ids") or [])}
+        if not ids & {"qualification", "qualification_year"}:
+            return
+        raw = (a.raw_utterance or a.gist_en or "").strip()
+        if not raw:
+            return
+        qual, yr = extract_qualification_and_year(raw)
+        has_qual = any(u.field == "qualification" for u in a.slot_updates)
+        has_yr = any(u.field == "qualification_year" for u in a.slot_updates)
+        if qual is not None and not has_qual and "qualification" in ids:
+            a.slot_updates.append(SlotUpdate("qualification", qual, 0.95, raw[:80]))
+        if yr is not None and not has_yr and "qualification_year" in ids:
+            a.slot_updates.append(SlotUpdate("qualification_year", str(yr), 0.95, raw[:80]))
+
     def _absorb_slot_updates(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
         st = self.state
         for u in a.slot_updates:
@@ -1300,7 +1363,7 @@ class InterviewFlow:
             if spec is None:
                 continue
             source = a.phone_resolved if spec.kind == "phone" and a.phone_resolved else u.value
-            norm = normalize_field(spec.kind, source)
+            norm = normalize_qualification(source) if spec.id == "qualification" else normalize_field(spec.kind, source)
             if spec.id == "city" and norm.ok:
                 ok, cleaned = plausible_city(norm.value)
                 if not ok:
@@ -1861,6 +1924,30 @@ class InterviewFlow:
             k.text for k in lv.key_points if k.id not in grade.covered
         ]
         over_time = self._clinical_over_time()
+
+        # P2-09: Map thin complete-sounding answers (no numbers, no action) to probe/clarify, not finish_area
+        words = (a.raw_utterance or "").split()
+        has_num = any(ch.isdigit() for ch in (a.raw_utterance or ""))
+        is_thin = a.answer_depth == "thin" or (
+            len(words) > 0 and len(words) <= 4 and not has_num and not grade.needs_clarification
+        )
+        if is_thin and prog.probes < lim.max_probes_per_area and not over_time:
+            prog.probes += 1
+            target = "; ".join(missing[:2]) or "the specific values, checks, or actions"
+            self._set_focus("clinical", area=area.id, level=lv.level, question=st.focus.get("question", lv.seed))
+            return self._move(
+                "probe",
+                f"Their answer was very brief or thin ({a.raw_utterance or 'e.g. general phrase'}). "
+                "Acknowledge what they said briefly, then ask them to specify the exact numbers, normal ranges, "
+                f"or steps they would take. Target: {target}. Do not reveal the answer.",
+            )
+        if is_thin and prog.clarifications < lim.max_clarifications_per_area:
+            prog.clarifications += 1
+            self._set_focus("clinical", area=area.id, level=lv.level, question=st.focus.get("question", lv.seed))
+            return self._move(
+                "clarify",
+                "Their answer was very brief. Ask them to be more specific about what exactly they would check or do first.",
+            )
 
         if grade.quality == "correct":
             strong = prog.probes == 0 and prog.challenges == 0 and not prog.red_flags

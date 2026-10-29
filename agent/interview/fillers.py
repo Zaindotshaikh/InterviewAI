@@ -47,11 +47,12 @@ ACKS_NEUTRAL: dict[str, list[str]] = {
 }
 
 # Reviewed: hi / mr / en. Other langs fall back to hi/en forms via acks_for().
+# P2-04: Pace coaching lines ("take your time", "dheere se") removed from automatic fillers.
 ACKS_EMPATHETIC: dict[str, list[str]] = {
-    "hi-IN": ["कोई बात नहीं.", "समझ सकती हूँ.", "ठहरिए, कोई जल्दी नहीं.", "हाँ, ठीक है धीरे से."],
-    "mr-IN": ["काही हरकत नाही.", "समजू शकते.", "हळूच सांगा.", "बरं, घाई नको."],
-    "gu-IN": ["કોઈ વાંધો નહીં.", "સમજી શકું છું.", "શાંતિથી કહો, કોઈ ઉતાવળ નથી.", "હા, બરાબર છે."],
-    "en-IN": ["That's okay.", "No rush.", "I understand.", "Take your time."],
+    "hi-IN": ["कोई बात नहीं.", "समझ सकती हूँ.", "हाँ, समझी."],
+    "mr-IN": ["काही हरकत नाही.", "समजू शकते.", "हो, समजलं."],
+    "gu-IN": ["કોઈ વાંધો નહીં.", "સમજી શકું છું."],
+    "en-IN": ["That's okay.", "I understand.", "Understood."],
 }
 
 # Backward-compatible alias (neutral list).

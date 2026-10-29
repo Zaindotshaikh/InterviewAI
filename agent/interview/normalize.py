@@ -353,8 +353,16 @@ def normalize_year(raw: Any, *, today: date | None = None) -> Normalized:
 
 def normalize_years_experience(raw: Any) -> Normalized:
     text = str(raw or "").lower()
-    if any(w in text for w in ("fresher", "no experience", "none")):
+    if any(w in text for w in ("fresher", "intern", "internship", "no experience", "none", "zero", "शून्य", "इंटर्न", "फ्रेशर")):
         return Normalized(True, 0.0)
+    indic_years = {
+        "ek": 1.0, "do": 2.0, "teen": 3.0, "char": 4.0, "chaar": 4.0, "paanch": 5.0,
+        "panch": 5.0, "chhah": 6.0, "che": 6.0, "saat": 7.0, "aath": 8.0, "nau": 9.0, "das": 10.0,
+        "एक": 1.0, "दो": 2.0, "तीन": 3.0, "चार": 4.0, "पांच": 5.0, "पाँच": 5.0, "छह": 6.0, "सात": 7.0, "आठ": 8.0, "नौ": 9.0, "दस": 10.0,
+    }
+    for word, val in indic_years.items():
+        if re.search(rf"\b{word}\s*(?:saal|sal|years?|yrs?|साल|वर्ष)\b", text, re.I):
+            return Normalized(True, val)
     nums = re.findall(r"\d+(?:\.\d+)?", text)
     if not nums:
         return _fail("no number heard")
@@ -364,6 +372,42 @@ def normalize_years_experience(raw: Any) -> Normalized:
     if not 0 <= n <= 45:
         return _fail(f"{n} years is not believable")
     return Normalized(True, n)
+
+
+_QUAL_PATTERNS = [
+    (re.compile(r"\b(?:post\s*basic\s*b\.?\s*sc|pbbsc|pb\s*b\.?\s*sc)\b", re.I), "Post Basic B.Sc Nursing"),
+    (re.compile(r"\b(?:m\.?\s*sc|msc)\s*(?:nursing)?\b|एमएससी", re.I), "M.Sc Nursing"),
+    (re.compile(r"\b(?:b\.?\s*sc|bsc|bachelor\s*of\s*science)\s*(?:nursing)?\b|बीएससी", re.I), "B.Sc Nursing"),
+    (re.compile(r"\b(?:gnm|g\s*n\s*m|general\s*nursing(?:\s*and\s*midwifery)?)\b|जीएनएम|जी\s*एन\s*एम", re.I), "GNM"),
+    (re.compile(r"\b(?:anm|a\s*n\s*m|auxiliary\s*nursing(?:\s*midwifery)?)\b|एएनएम|ए\s*एन\s*एम", re.I), "ANM"),
+    (re.compile(r"\b(?:diploma\s*(?:in)?\s*nursing|nursing\s*diploma)\b|डिप्लोमा", re.I), "Diploma in Nursing"),
+]
+
+
+def normalize_qualification(raw: Any) -> Normalized:
+    """Canonicalize spoken Indian nursing qualifications (GNM, ANM, B.Sc, M.Sc, Diploma)."""
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return _fail("no qualification heard")
+    for pat, canonical in _QUAL_PATTERNS:
+        if pat.search(text):
+            return Normalized(True, canonical)
+    if len(text) >= 2:
+        return Normalized(True, text[:80])
+    return _fail("unrecognized qualification")
+
+
+def extract_qualification_and_year(text: str) -> tuple[str | None, str | None]:
+    """Recover qualification and year from noisy utterance if analyst missed it."""
+    s = " ".join(str(text or "").split())
+    qual: str | None = None
+    for pat, canonical in _QUAL_PATTERNS:
+        if pat.search(s):
+            qual = canonical
+            break
+    m = re.search(r"\b(19\d{2}|20\d{2})\b", s)
+    yr = m.group(1) if m else None
+    return qual, yr
 
 
 def normalize_text(raw: Any) -> Normalized:
@@ -379,6 +423,7 @@ _BY_KIND = {
     "weight": normalize_weight_kg,
     "year": normalize_year,
     "years": normalize_years_experience,
+    "qualification": normalize_qualification,
     "text": normalize_text,
 }
 

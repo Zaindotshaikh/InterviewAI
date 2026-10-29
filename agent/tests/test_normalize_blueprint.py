@@ -167,3 +167,31 @@ def test_the_shipped_blueprint_is_well_formed():
 def test_missing_blueprint_falls_back_to_a_minimal_one():
     bp = Blueprint.from_api(None)
     assert bp.areas and not bp.fields and not bp.gate_items
+
+
+def test_normalize_qualification_canonicalizes_known_degrees():
+    from interview.normalize import extract_qualification_and_year, normalize_qualification
+
+    assert normalize_qualification("GNM").value == "GNM"
+    assert normalize_qualification("Maine GNM kiya hai").value == "GNM"
+    assert normalize_qualification("B.Sc Nursing").value == "B.Sc Nursing"
+    assert normalize_qualification("bsc nursing 2019").value == "B.Sc Nursing"
+    assert normalize_qualification("post basic bsc nursing").value == "Post Basic B.Sc Nursing"
+    assert normalize_qualification("ANM course").value == "ANM"
+    assert normalize_qualification("Diploma in Nursing").value == "Diploma in Nursing"
+
+    qual, yr = extract_qualification_and_year("Maine GNM kiya hai aur 2019 mein pass out hoon")
+    assert qual == "GNM"
+    assert yr == "2019"
+
+    qual, yr = extract_qualification_and_year("BSc Nursing 2021")
+    assert qual == "B.Sc Nursing"
+    assert yr == "2021"
+
+
+def test_normalize_years_handles_spoken_indic_and_freshers():
+    assert normalize_years_experience("teen saal").value == 3.0
+    assert normalize_years_experience("do saal ward mein").value == 2.0
+    assert normalize_years_experience("char saal ICU").value == 4.0
+    assert normalize_years_experience("fresher hoon").value == 0.0
+    assert normalize_years_experience("internship only").value == 0.0

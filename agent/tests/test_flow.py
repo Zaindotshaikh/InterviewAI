@@ -102,17 +102,18 @@ def drain_experience_probes(flow: InterviewFlow, *, gist: str | None = None) -> 
         "I check vitals every hour, give medicines after the five rights, "
         "inform the doctor when readings drop, and document in the chart."
     )
-    for _ in range(24):
+    for idx in range(24):
         if flow.stage == "clinical" or flow.state.experience_dive_done:
             return
         if flow.state.focus.get("type") != "experience_probe":
             return
+        ans = f"{text} (step {idx})"
         flow.apply(
             TurnAnalysis(
                 intent="answer",
-                gist_en=text,
+                gist_en=ans,
                 answer_depth="sufficient",
-                raw_utterance=text,
+                raw_utterance=ans,
             )
         )
 
@@ -950,6 +951,8 @@ def test_salary_holdout_does_not_invent_numbers(blueprint):
     )
     assert move.kind == "salary_holdout"
     assert "cannot quote" in move.directive.lower() or "recruitment team" in move.directive.lower()
+    assert move.verbatim is not None
+    assert "वेतन" in move.verbatim or "salary" in move.verbatim.lower()
 
 
 def test_diaper_idk_on_care_intro_persuades_before_skipping(blueprint):
@@ -1029,6 +1032,22 @@ def test_strong_first_answer_deepens_once_then_moves_on(blueprint):
     m2 = flow.apply(grade("correct"))
     assert m2.kind == "clinical_question"
     assert flow.state.areas[first].outcome == "adequate" or flow.state.areas[first].outcome == "strong"
+
+
+def test_thin_clinical_answer_probes_for_specifics(blueprint):
+    """P2-09: A thin answer like 'I check vitals' without numbers or actions triggers probe instead of finishing."""
+    flow, _ = make_flow(blueprint)
+    reach_clinical(flow, experience=("2", "ward"))
+    first = flow.state.current_area
+    # Candidate gives thin complete-sounding answer with 3 words and no numbers
+    thin = TurnAnalysis(
+        raw_utterance="I check vitals",
+        answer_depth="thin",
+        clinical=ClinicalGrade(area_id=first, quality="correct", covered=["x"], missing=["y"]),
+    )
+    m = flow.apply(thin)
+    assert m.kind == "probe"
+    assert "thin" in m.directive.lower() or "specific" in m.directive.lower()
 
 
 def test_wrong_answer_is_challenged_not_corrected(blueprint):

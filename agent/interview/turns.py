@@ -227,6 +227,8 @@ class TurnWatchdog:
     async def _salvage_or_repeat(self) -> None:
         if getattr(self._session, "agent_state", None) in ("speaking", "thinking"):
             return
+        if self._speech_busy():
+            return
         # During opening settle, ignore ambient STT — do not salvage junk into a real turn.
         if not self._armed():
             self._counters["preamble_skips"] += 1

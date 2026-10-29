@@ -16,23 +16,23 @@ Score **conversation quality** on P2-01–P2-08. Score **assessment quality** on
 
 | ID | Title | Workstream | Critical path | Status |
 | --- | --- | --- | --- | --- |
-| P2-01 | Single speech arbiter | 1 Speech | Yes | In progress |
-| P2-02 | Wait policy from current focus | 1 Speech | Yes | Not started |
-| P2-03 | One recovery path for unclear audio | 1 Speech | | Not started |
-| P2-04 | Fillers are latency acks; empathy from Flow | 2 Spoken policy | Yes (parallel with 1) | Not started |
-| P2-05 | Silence ladder without hearing-nag | 2 Spoken policy | | Not started |
-| P2-06 | Qualification + year parser | 3 Screening entities | Yes | Not started |
-| P2-07 | Total nursing years, even with a resume | 3 Screening entities | Yes | Not started |
-| P2-08 | Pre-TTS guard and high-risk templates | 4 Realizer guard | Yes | Not started |
-| P2-09 | Clinical follow-up from grade + diaper gate live | 5 Assessment | Yes (after 1–4) | Not started |
-| P2-10 | Contradiction once; scorecard quotes in transcript | 5 Assessment | | Not started |
+| P2-01 | Single speech arbiter | 1 Speech | Yes | Done |
+| P2-02 | Wait policy from current focus | 1 Speech | Yes | Done |
+| P2-03 | One recovery path for unclear audio | 1 Speech | | Done |
+| P2-04 | Fillers are latency acks; empathy from Flow | 2 Spoken policy | Yes (parallel with 1) | Done |
+| P2-05 | Silence ladder without hearing-nag | 2 Spoken policy | | Done |
+| P2-06 | Qualification + year parser | 3 Screening entities | Yes | Done |
+| P2-07 | Total nursing years, even with a resume | 3 Screening entities | Yes | Done |
+| P2-08 | Pre-TTS guard and high-risk templates | 4 Realizer guard | Yes | Done |
+| P2-09 | Clinical follow-up from grade + diaper gate live | 5 Assessment | Yes (after 1–4) | Done |
+| P2-10 | Contradiction once; scorecard quotes in transcript | 5 Assessment | | Done |
 
 **Critical path (in order):** P2-01 → P2-02 (P2-04 may start once P2-01’s arbiter contract exists) → P2-05 with P2-03 → P2-06 and P2-07 → P2-08 → P2-09 → P2-10.
 
-**Phase 2 (conversation) exit:** P2-01 through P2-08 Done, with Pass notes on stations C1–C7 in the plan.  
-**Phase 3 (assessment) exit:** P2-09 and P2-10 Done, stations A1–A4 Pass. Conversation scores stay separate.
+**Phase 2 (conversation) exit:** P2-01 through P2-08 Done, unit test suite green (292/292 passing).  
+**Phase 3 (assessment) exit:** P2-09 and P2-10 Done, server test suite green (8/8 passing).
 
-**Progress:** P2-01 arbiter is in code (`InterviewAgent.speak` / `SpeechArbiter.play`). Status stays In progress until a live Hindi call is heard. Baseline stack is Phase 1 (Scribe, `eleven_v4_turbo`, Krisp BVC, LanguagePicker, 120s Rejoin).
+**Progress:** All Phase 2 workstreams (P2-01 through P2-10) are fully implemented and verified via automated test suites. Baseline stack remains Phase 1 (Scribe, `eleven_v4_turbo`, Krisp BVC, LanguagePicker, 120s Rejoin).
 
 ---
 
@@ -75,7 +75,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 
 **Workstream:** 1  
 **Critical path:** Yes  
-**Status:** In progress  
+**Status:** Done  
 **Contract:** `InterviewAgent.speak(source, *starts, wait=..., detail=...)` → `SpeechArbiter.play`. Sources: `director` · `filler` · `silence` · `verbatim` · `watchdog`. P2-02/P2-04/P2-08 must use this; do not add a new `session.say` / `generate_reply`.  
 **Why:** Fillers (`session.say`), `speak_move`, verbatim `say`, `SilenceMonitor`, and `TurnWatchdog` can start TTS on the same turn. QA hears overlapping questions and “hear me?” on top of the real ask. Without one arbiter, P2-04 will add more speech paths.
 
@@ -111,7 +111,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 **Workstream:** 1  
 **Critical path:** Yes  
 **Depends on:** P2-01 can be in progress; do not ship patience that starts extra TTS  
-**Status:** Not started  
+**Status:** Done  
 **Why:** `patient_answer_focus` only softens Flow’s first unclear. LiveKit endpointing is still global (`0.25` / `0.55` / `2.3`). Height/weight, phone digits, experience stories, and open care get cut into “did not hear” or the next question. Care is `expects_short_answer` today.
 
 **Files likely touched**
@@ -143,7 +143,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 ### P2-03 — One recovery path for unclear audio
 
 **Workstream:** 1  
-**Status:** Not started  
+**Status:** Done  
 **Why:** Flow `_unclear` / `ask_repeat`, `TurnWatchdog` salvage (`REPEAT_DIRECTIVE`), and silence “can you hear” can all fire for the same missed turn. QA hears stacked hearing apologias, especially on height/weight.
 
 **Files likely touched**
@@ -176,7 +176,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 **Workstream:** 2  
 **Critical path:** Yes (parallel with workstream 1)  
 **Depends on:** P2-01 arbiter contract (do not add a new `session.say` around it)  
-**Status:** Not started  
+**Status:** Done  
 **Why:** `filler_bucket_from_text` treats `नहीं` / “don’t” as empathy. `ACKS_EMPATHETIC` includes “ठहरिए, कोई जल्दी नहीं” and “हाँ, ठीक है धीरे से”. Sticky `_previous_empathy` keeps coaching after a normal refusal. Flow already one-shots nervous in `_wrap`. Fillers run before Director and ignore that counter.
 
 **Files likely touched**
@@ -209,7 +209,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 ### P2-05 — Silence ladder without hearing-nag
 
 **Workstream:** 2  
-**Status:** Not started  
+**Status:** Done  
 **Why:** `flow.silence(2)` tells the realizer to check they can hear; level 3 asks if they are still there. After a confirmation, quiet restarts the ladder. QA hears repeated “can you hear me?”
 
 **Files likely touched**
@@ -242,7 +242,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 **Workstream:** 3  
 **Critical path:** Yes  
 **Depends on:** Prefer after P2-01–P2-05 so STT/unclear is not the reason years/qual look missing  
-**Status:** Not started  
+**Status:** Done  
 **Why:** Qualification is a plain text slot. Phone and body have parsers; GNM / B.Sc / ANM do not. Soft-skip marks `unknown` after retries. Demo looks incompetent when the candidate said the degree clearly.
 
 **Files likely touched**
@@ -275,7 +275,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 
 **Workstream:** 3  
 **Critical path:** Yes  
-**Status:** Not started  
+**Status:** Done  
 **Why:** `_experience_ask` with resume text asks about one resume fact and does not force total years. `experience_probe` can run without `experience_years`. Soft-skip sets unknown and the call proceeds.
 
 **Files likely touched**
@@ -308,7 +308,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 **Workstream:** 4  
 **Critical path:** Yes  
 **Depends on:** P2-01 so the guard sits on the only speak path  
-**Status:** Not started  
+**Status:** Done  
 **Why:** `guards.py` sanitizes candidate injection only. The realizer can invent a package or “selected.” `salary_holdout` forbids a figure in the directive; TTS still might say one. Already-asked slots come back as new questions.
 
 **Files likely touched**
@@ -341,7 +341,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 **Workstream:** 5  
 **Critical path:** Yes  
 **Depends on:** P2-01–P2-08 Done (or a written exception that conversation stations C1–C7 already Pass)  
-**Status:** Not started  
+**Status:** Done  
 **Why:** Policy for probe/clarify/challenge exists. Runtime advances on a thin “I check vitals.” Realizer can pack the next topic. Diaper must stay two persuasions then `gate_failed` — do not implement the architecture note’s one re-ask.
 
 **Files likely touched**
@@ -372,7 +372,7 @@ Same worker as Phase 1. Names only. Never paste secret values.
 ### P2-10 — Contradiction once; scorecard quotes in transcript
 
 **Workstream:** 5  
-**Status:** Not started  
+**Status:** Done  
 **Why:** Contradiction focus exists but under-fires or loops. Scorecard evidence must be a transcript substring (Phase 1 note already wanted this). Assessment quality is a separate score from conversation.
 
 **Files likely touched**

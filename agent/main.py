@@ -59,6 +59,7 @@ from interview import (
     native_script_reminder,
     sanitize_candidate_text,
     spoken_style,
+    OutputGuard,
 )
 from interview.director import Director
 from interview.listen import ListenFloor, is_candidate_speech
@@ -394,6 +395,8 @@ class InterviewAgent(Agent):
         self._floor_watch_started = False
         # P2-01: every cascade TTS start goes through speak() / this arbiter.
         self._speech = SpeechArbiter()
+        # P2-08: pre-TTS deterministic guard against salary/hiring leaks and redundant asks.
+        self._guard = OutputGuard()
 
     def is_listening_armed(self) -> bool:
         return bool(self._listening_armed)
@@ -615,17 +618,27 @@ class InterviewAgent(Agent):
 
         # Collect LLM raw + spoken for transcript split.
         raw_chunks: list[str] = []
+        async for chunk in text:
+            raw_chunks.append(chunk)
+        full_raw = "".join(raw_chunks)
+
+        # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
+        captured = {k for k, v in self.flow.state.slots.items() if v.value is not None}
+        is_blocked, guarded_text, reason = self._guard.inspect_text(
+            full_raw,
+            language=self.flow.state.language,
+            captured_slots=captured,
+            single_question=not opening,
+        )
+
+        async def _iter_guarded() -> Any:
+            yield guarded_text
+
         spoken_chunks: list[str] = []
-
-        async def _tee_raw() -> Any:
-            async for chunk in text:
-                raw_chunks.append(chunk)
-                yield chunk
-
         use_engine = is_el and self._expressiveness_mode == "engine"
         if use_engine:
             shaped = self._engine.apply(
-                _tee_raw(),
+                _iter_guarded(),
                 language=self.flow.state.language,
                 tone=self._current_tone,
                 opening=opening,
@@ -634,7 +647,7 @@ class InterviewAgent(Agent):
             )
         else:
             shaped = self._disfluency.apply(
-                _tee_raw(),
+                _iter_guarded(),
                 self.flow.state.language,
                 skip_first=skip_first,
                 opening=opening,
@@ -869,6 +882,13 @@ class InterviewAgent(Agent):
                 )
                 # Playout already finished — do NOT poll agent_state (that used to hang ~45s).
                 await self._arm_listening(reason="opening_complete")
+            elif move.verbatim:
+                # P2-08: Force verbatim (skip generate_reply) for high-risk / deterministic moves
+                await self.speak(
+                    source,
+                    lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                    detail=move.kind,
+                )
             else:
                 directive_text = f"CONTROLLER DIRECTIVE: {move.directive}"
                 await self.speak(
@@ -1469,10 +1489,10 @@ class InterviewAgent(Agent):
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
-        # Ack filler BEFORE Director — bucket from STT heuristics / prior turn, never Director sentiment.
+        # P2-04: Ack filler BEFORE Director is strictly neutral (latency ack, not emotional coaching).
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
-        bucket = filler_bucket_from_text(text, previous_empathy=self._previous_empathy)
+        bucket = "neutral"
         if fillers is not None and not self.flow.done and classify_answer(text) == "substantive":
             picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
             if picked is not None:
@@ -1504,8 +1524,9 @@ class InterviewAgent(Agent):
         if self.latency is not None:
             self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
         self._current_tone = move.tone or tone_for_kind(move.kind)
-        self._empathy_hint = bucket == "empathetic" or self._current_tone in ("gentle", "reassuring")
-        self._previous_empathy = self._empathy_hint
+        # P2-04: Empathy allowed only when Move.tone dictates gentle/reassuring, never sticky across turns.
+        self._empathy_hint = self._current_tone in ("gentle", "reassuring")
+        self._previous_empathy = False
         self._interrupted = False
         self.director.note_user(text)
 

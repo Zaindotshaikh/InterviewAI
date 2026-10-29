@@ -13,8 +13,8 @@ from interview.blueprint import Blueprint, ExperienceProbeSpec
 _NURSING_LINE = re.compile(
     r"(?:"
     r"\b(?:nurse|nursing|staff\s*nurse|gnm|anm|b\.?\s*sc|icu|nicu|picu|ccu|ward|ot\b|theatre|"
-    r"hospital|clinic|apollo|fortis|max\b|manipal|aiims|pgimer|homecare|home\s*care|"
-    r"ventilator|medication|patient|duty|internship|posting|opd|casualty|emergency)\b"
+    r"hospitals?|clinics?|apollo|fortis|max\b|manipal|aiims|pgimer|homecare|home\s*care|"
+    r"ventilators?|infusions?|medications?|patients?|duties|duty|internships?|postings?|opd|casualty|emergency)\b"
     r"|नर्स|वार्ड|हॉस्पिटल|अस्पताल|आईसीयू|इंटर्न"
     r")",
     re.IGNORECASE,

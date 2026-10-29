@@ -202,13 +202,28 @@ export function finalizeModelTier(
   }
   if (!reasoning) reasoning = "No reasoning was returned.";
 
+  const verifiedList = verifyEvidence(Array.isArray(raw.evidence) ? (raw.evidence as never[]) : [], haystacks);
+  // P2-10: Every evidence quote must be in candidate transcript or dropped
+  const keptEvidence = verifiedList.filter((e) => e.verified);
+  const droppedCount = verifiedList.length - keptEvidence.length;
+  if (droppedCount > 0) {
+    flags.push(`${droppedCount} unverified evidence quote(s) not in transcript were dropped`);
+  }
+  // Thin or empty verified evidence for high tiers -> needs_review
+  if (TIER_ORDER.slice(0, 2).includes(tier) && keptEvidence.length < 2) {
+    flags.push("Insufficient verified evidence in transcript for Tier 1/2 rating");
+    reasoning = `${reasoning} (Automatically sent for human review: insufficient verified evidence quotes in transcript.)`.trim();
+    tier = "needs_review";
+    method = "rule_override";
+  }
+
   return {
     tier,
     tier_name: tierName(bp, tier),
     confidence,
     reasoning,
     method,
-    evidence: verifyEvidence(Array.isArray(raw.evidence) ? (raw.evidence as never[]) : [], haystacks),
+    evidence: keptEvidence,
     flags,
   };
 }

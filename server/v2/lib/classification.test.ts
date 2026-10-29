@@ -106,3 +106,30 @@ test("area summaries show key point wording, not ids", async () => {
   const [a] = summarizeAreas(flow({ area_order: ["vitals_monitoring"], areas: { vitals_monitoring: area("strong") } }), bp);
   assert.match(a.covered[0], /BP/);
 });
+
+test("unverified evidence is dropped and thin evidence triggers needs_review (P2-10)", async () => {
+  const bp = await loadBlueprint();
+  const f = flow({ areas: { vitals_monitoring: area("strong") } });
+  const raw = {
+    tier: "tier_1",
+    confidence: 0.95,
+    reasoning: "Excellent candidate.",
+    evidence: [
+      { area: "vitals", point: "bp", quote: "I check BP" },
+      { area: "vitals", point: "pulse", quote: "pulse was eighty" },
+      { area: "vitals", point: "hallucination", quote: "I ran the whole hospital alone" },
+    ],
+  };
+  // Case A: Only one quote matches candidate transcript -> unverified dropped, thin evidence (<2) demotes to needs_review
+  const r1 = finalizeModelTier(raw, f, bp, ["Maine kaha I check BP carefully"]);
+  assert.equal(r1.evidence.length, 1);
+  assert.equal(r1.evidence[0].quote, "I check BP");
+  assert.equal(r1.tier, "needs_review");
+  assert.equal(r1.method, "rule_override");
+
+  // Case B: Both valid quotes match candidate transcript -> kept, tier_1 preserved
+  const r2 = finalizeModelTier(raw, f, bp, ["Maine kaha I check BP carefully", "and pulse was eighty per minute"]);
+  assert.equal(r2.evidence.length, 2);
+  assert.equal(r2.tier, "tier_1");
+  assert.equal(r2.method, "model");
+});

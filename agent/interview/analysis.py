@@ -311,6 +311,7 @@ nervousness.
   correct and never a red flag. Saying they would wait for a doctor before starting CPR, giving medicine without an
   order, or hiding an error IS a red flag.
 - needs_clarification = true when the answer is too vague to grade fairly.
+- Thin or generic answers (e.g. "I check vitals", "patient care", "normal checkup" with no numbers, values, or specific actions) must NOT be marked "correct". Set quality = "partial" or needs_clarification = true, and answer_depth = "thin", so the interviewer probes for specific numbers or procedures.
 - quote = the most informative phrase (at most 12 words), verbatim in the original language. summary_en = one short
   English line.
 - If they said they do not know, quality = "none" and intent = "dont_know".
