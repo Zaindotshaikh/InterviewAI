@@ -13,7 +13,7 @@ from interview.analysis import (
     heuristic_analysis,
 )
 from interview.blueprint import Blueprint
-from interview.flow import InterviewFlow
+from interview.flow import CROWD_HELP_LINES, InterviewFlow
 from interview.flow_state import FlowState
 from interview.plan import InterviewPlan, classify_answer
 
@@ -102,17 +102,18 @@ def drain_experience_probes(flow: InterviewFlow, *, gist: str | None = None) -> 
         "I check vitals every hour, give medicines after the five rights, "
         "inform the doctor when readings drop, and document in the chart."
     )
-    for _ in range(24):
+    for idx in range(24):
         if flow.stage == "clinical" or flow.state.experience_dive_done:
             return
         if flow.state.focus.get("type") != "experience_probe":
             return
+        ans = f"{text} (step {idx})"
         flow.apply(
             TurnAnalysis(
                 intent="answer",
-                gist_en=text,
+                gist_en=ans,
                 answer_depth="sufficient",
-                raw_utterance=text,
+                raw_utterance=ans,
             )
         )
 
@@ -950,6 +951,8 @@ def test_salary_holdout_does_not_invent_numbers(blueprint):
     )
     assert move.kind == "salary_holdout"
     assert "cannot quote" in move.directive.lower() or "recruitment team" in move.directive.lower()
+    assert move.verbatim is not None
+    assert "वेतन" in move.verbatim or "salary" in move.verbatim.lower()
 
 
 def test_diaper_idk_on_care_intro_persuades_before_skipping(blueprint):
@@ -1029,6 +1032,22 @@ def test_strong_first_answer_deepens_once_then_moves_on(blueprint):
     m2 = flow.apply(grade("correct"))
     assert m2.kind == "clinical_question"
     assert flow.state.areas[first].outcome == "adequate" or flow.state.areas[first].outcome == "strong"
+
+
+def test_thin_clinical_answer_probes_for_specifics(blueprint):
+    """P2-09: A thin answer like 'I check vitals' without numbers or actions triggers probe instead of finishing."""
+    flow, _ = make_flow(blueprint)
+    reach_clinical(flow, experience=("2", "ward"))
+    first = flow.state.current_area
+    # Candidate gives thin complete-sounding answer with 3 words and no numbers
+    thin = TurnAnalysis(
+        raw_utterance="I check vitals",
+        answer_depth="thin",
+        clinical=ClinicalGrade(area_id=first, quality="correct", covered=["x"], missing=["y"]),
+    )
+    m = flow.apply(thin)
+    assert m.kind == "probe"
+    assert "thin" in m.directive.lower() or "specific" in m.directive.lower()
 
 
 def test_wrong_answer_is_challenged_not_corrected(blueprint):
@@ -1116,8 +1135,8 @@ def test_contradiction_probes_are_capped(blueprint):
 # ----------------------------------------------------------------------------------- candidate behaviour
 
 
-def test_unclear_audio_asks_to_repeat_then_soft_skips_stuck_field(blueprint):
-    """Garbled audio clarifies twice, then soft-skips the stuck focus (no infinite loop)."""
+def test_unclear_audio_asks_to_repeat_then_crowd_help_then_soft_skips(blueprint):
+    """Garbled audio clarifies twice, then a crowd line, then soft-skips (no infinite loop)."""
     flow, _ = make_flow(blueprint)
     flow.opening()
     assert flow.state.focus.get("type") == "slots"
@@ -1126,13 +1145,35 @@ def test_unclear_audio_asks_to_repeat_then_soft_skips_stuck_field(blueprint):
     m2 = flow.apply(bad)
     m3 = flow.apply(bad)
     assert m1.kind == "ask_repeat" and m2.kind == "ask_repeat"
-    # Third unclear on same focus soft-skips (city → unknown) and advances.
-    assert m3.kind in ("ask_field", "ask_repeat", "noise_help", "confirm")
-    assert any(e[0] == "focus.soft_skip" for e in m3.events) or flow.state.slots["city"].status == "unknown"
+    assert m3.kind == "crowd_help"
+    assert m3.verbatim == CROWD_HELP_LINES["hi-IN"]
+    assert "last question" not in m3.directive.lower()
+    asked = (flow.state.last_question or "").strip()
+    if asked:
+        assert asked not in (m3.directive or "")
+        assert asked not in (m3.verbatim or "")
+    assert any(e[0] == "audio.crowd_help" for e in m3.events)
     assert flow.state.unclear_total == 3
+    m4 = flow.apply(bad)
+    assert m4.kind in ("ask_field", "confirm")
+    assert any(e[0] == "focus.soft_skip" for e in m4.events) or flow.state.slots["city"].status == "unknown"
     # Clear answer still captures; never stores garbage from unclear turns.
     flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     assert flow.state.unclear_streak == 0
+
+
+def test_crowd_help_english_line_has_no_question_replay(blueprint):
+    flow, _ = make_flow(blueprint, language="en-IN")
+    flow.opening()
+    flow.state.last_question = "Which city are you applying for?"
+    bad = TurnAnalysis(intelligibility="unclear")
+    flow.apply(bad)
+    flow.apply(bad)
+    move = flow.apply(bad)
+    assert move.kind == "crowd_help"
+    assert move.verbatim == CROWD_HELP_LINES["en-IN"]
+    assert "which city" not in (move.directive or "").lower()
+    assert "which city" not in (move.verbatim or "").lower()
 
 
 def test_filler_haan_with_care_updates_is_not_treated_as_unclear(blueprint):

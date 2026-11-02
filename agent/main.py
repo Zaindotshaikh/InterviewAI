@@ -59,6 +59,7 @@ from interview import (
     native_script_reminder,
     sanitize_candidate_text,
     spoken_style,
+    OutputGuard,
 )
 from interview.director import Director
 from interview.listen import ListenFloor, is_candidate_speech
@@ -67,6 +68,8 @@ from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_te
 from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
+from interview.speech import SpeechArbiter, await_playout, source_for_move
+from interview.flow import CROWD_COOLDOWN_S, RECOVERY_SPEECH_KINDS
 from interview.voice_tone import tone_for_kind
 from providers import (
     SessionRefused,
@@ -375,6 +378,8 @@ class InterviewAgent(Agent):
         self._previous_empathy = False
         # After LiveKit resumes a false barge-in, briefly discard ambient STT fragments.
         self._discard_user_until: float = 0.0
+        self._last_move_kind = ""
+        self._crowd_quiet_until: float = 0.0
         self._delegation_wired = False
         # GPT-Live: drive Flow from user transcripts (like cascade). Delegation is backup only —
         # the voice model often acks without ever emitting delegation_created.
@@ -391,9 +396,53 @@ class InterviewAgent(Agent):
         self._gpt_live_ignore_until: float = 0.0
         self._gpt_live_held_voice: bool = False
         self._floor_watch_started = False
+        # P2-01: every cascade TTS start goes through speak() / this arbiter.
+        self._speech = SpeechArbiter()
+        # P2-08: pre-TTS deterministic guard against salary/hiring leaks and redundant asks.
+        self._guard = OutputGuard()
 
     def is_listening_armed(self) -> bool:
         return bool(self._listening_armed)
+
+    def speech_busy(self) -> bool:
+        return self._speech.busy()
+
+    def _in_crowd_cooldown(self) -> bool:
+        if self._crowd_quiet_until <= 0:
+            return False
+        try:
+            return asyncio.get_running_loop().time() < self._crowd_quiet_until
+        except RuntimeError:
+            return False
+
+    def recovery_speech_blocked(self) -> bool:
+        """Watchdog / silence must not stack another please-repeat after Flow already recovered."""
+        if self._in_crowd_cooldown():
+            return True
+        return self._last_move_kind in RECOVERY_SPEECH_KINDS
+
+    def _begin_crowd_cooldown(self) -> None:
+        try:
+            self._crowd_quiet_until = asyncio.get_running_loop().time() + float(CROWD_COOLDOWN_S)
+        except RuntimeError:
+            self._crowd_quiet_until = 0.0
+        logger.info("crowd cooldown %.0fs after crowd_help", CROWD_COOLDOWN_S)
+
+    def _remember_move(self, move: Move) -> None:
+        self._last_move_kind = move.kind
+        if move.kind == "crowd_help":
+            self._begin_crowd_cooldown()
+        elif move.kind not in RECOVERY_SPEECH_KINDS:
+            self._crowd_quiet_until = 0.0
+
+    def _drop_recovery_during_cooldown(self, move: Move) -> bool:
+        if move.kind == "crowd_help" and not self._in_crowd_cooldown():
+            return False
+        return self._in_crowd_cooldown() and move.kind in RECOVERY_SPEECH_KINDS
+
+    async def speak(self, source: str, *starts: Any, wait: bool = True, detail: str = "") -> bool:
+        """Only function allowed to start agent TTS. Sources: director, filler, silence, verbatim, watchdog."""
+        return await self._speech.play(source, *starts, wait=wait, detail=detail)
 
     def _set_candidate_mic(self, enabled: bool, *, reason: str) -> None:
         """Gate candidate audio so ward noise cannot steal the turn before the greeting.
@@ -461,16 +510,7 @@ class InterviewAgent(Agent):
 
     async def _await_playout(self, handle: Any) -> None:
         """Wait until a SpeechHandle finishes playing (say / generate_reply return handles, not coroutines)."""
-        if handle is None:
-            return
-        wait = getattr(handle, "wait_for_playout", None)
-        try:
-            if callable(wait):
-                await wait()
-            elif hasattr(handle, "__await__"):
-                await handle
-        except Exception:  # noqa: BLE001
-            logger.exception("speech playout wait failed")
+        await await_playout(handle)
 
     async def _gpt_live_wait_quiet(self, *, min_quiet_s: float = 1.2, timeout_s: float = 14.0) -> None:
         """GPT-Live splits one directive into several spoken beats; wait until speech has truly stopped.
@@ -614,17 +654,27 @@ class InterviewAgent(Agent):
 
         # Collect LLM raw + spoken for transcript split.
         raw_chunks: list[str] = []
+        async for chunk in text:
+            raw_chunks.append(chunk)
+        full_raw = "".join(raw_chunks)
+
+        # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
+        captured = {k for k, v in self.flow.state.slots.items() if v.value is not None}
+        is_blocked, guarded_text, reason = self._guard.inspect_text(
+            full_raw,
+            language=self.flow.state.language,
+            captured_slots=captured,
+            single_question=not opening,
+        )
+
+        async def _iter_guarded() -> Any:
+            yield guarded_text
+
         spoken_chunks: list[str] = []
-
-        async def _tee_raw() -> Any:
-            async for chunk in text:
-                raw_chunks.append(chunk)
-                yield chunk
-
         use_engine = is_el and self._expressiveness_mode == "engine"
         if use_engine:
             shaped = self._engine.apply(
-                _tee_raw(),
+                _iter_guarded(),
                 language=self.flow.state.language,
                 tone=self._current_tone,
                 opening=opening,
@@ -633,7 +683,7 @@ class InterviewAgent(Agent):
             )
         else:
             shaped = self._disfluency.apply(
-                _tee_raw(),
+                _iter_guarded(),
                 self.flow.state.language,
                 skip_first=skip_first,
                 opening=opening,
@@ -813,8 +863,14 @@ class InterviewAgent(Agent):
         self.spawn(self._persist(move.events))
         self._finish_if_needed(move)
         # First silence level is intentional quiet — do not invent a "no hurry" line.
-        if move.kind == "silence_hold" or not (move.directive or "").strip():
+        if move.kind == "silence_hold" or move.kind == "crowd_hold" or not (move.directive or "").strip():
+            self._remember_move(move)
             return
+        if move.kind.startswith("silence") and self.recovery_speech_blocked():
+            logger.info("silence skip — recovery already spoken or crowd cooldown")
+            return
+        self._remember_move(move)
+        source = source_for_move(move.kind)
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
             self._empathy_hint = self._current_tone in ("gentle", "reassuring")
@@ -830,8 +886,11 @@ class InterviewAgent(Agent):
                 # Still request no barge-in; mic is muted until listening is armed.
                 if move.kind == "opening":
                     reply_kwargs["allow_interruptions"] = False
-                reply_handle = self.session.generate_reply(**reply_kwargs)
-                await self._await_playout(reply_handle)
+                await self.speak(
+                    source,
+                    lambda: self.session.generate_reply(**reply_kwargs),
+                    detail=move.kind,
+                )
                 if move.kind == "opening":
                     # Wait out multi-beat openings. 0.55s was too short: quiet gap between
                     # greeting beats → focus_lock / retry re-asked the same question.
@@ -849,23 +908,35 @@ class InterviewAgent(Agent):
                     elevenlabs=self._tts_provider == "elevenlabs",
                     engine=self._expressiveness_mode == "engine",
                 )
-                seed_handle = self.session.say(seed, allow_interruptions=not block)
                 directive_text = (
                     f"CONTROLLER DIRECTIVE: {move.directive}\n"
                     f"{native_script_reminder(self.flow.state.language)}"
                 )
-                reply_handle = self.session.generate_reply(
-                    instructions=directive_text,
-                    allow_interruptions=not block,
+                await self.speak(
+                    source,
+                    lambda: self.session.say(seed, allow_interruptions=not block),
+                    lambda: self.session.generate_reply(
+                        instructions=directive_text,
+                        allow_interruptions=not block,
+                    ),
+                    detail=move.kind,
                 )
-                await self._await_playout(seed_handle)
-                await self._await_playout(reply_handle)
                 # Playout already finished — do NOT poll agent_state (that used to hang ~45s).
                 await self._arm_listening(reason="opening_complete")
+            elif move.verbatim:
+                # P2-08: Force verbatim (skip generate_reply) for high-risk / deterministic moves
+                await self.speak(
+                    source,
+                    lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                    detail=move.kind,
+                )
             else:
                 directive_text = f"CONTROLLER DIRECTIVE: {move.directive}"
-                reply_handle = self.session.generate_reply(instructions=directive_text)
-                await self._await_playout(reply_handle)
+                await self.speak(
+                    source,
+                    lambda: self.session.generate_reply(instructions=directive_text),
+                    detail=move.kind,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("generate_reply failed for %s", move.kind)
             if move.kind == "opening" and not self._listening_armed:
@@ -1207,6 +1278,11 @@ class InterviewAgent(Agent):
             len(joined),
             joined[:80],
         )
+        if self._drop_recovery_during_cooldown(move):
+            logger.info("gpt_live crowd cooldown skip move=%s", move.kind)
+            self._remember_move(move)
+            raise StopResponse()
+        self._remember_move(move)
 
         # Phase 2: one CONTROLLER DIRECTIVE only (no generate_reply double-speak).
         self._gpt_live_append(_gpt_live_commentary(move, self.flow.state.language), delegation_id=delegation_id)
@@ -1459,22 +1535,35 @@ class InterviewAgent(Agent):
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
-        # Ack filler BEFORE Director — bucket from STT heuristics / prior turn, never Director sentiment.
+        # P2-04: Ack filler BEFORE Director is strictly neutral (latency ack, not emotional coaching).
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
-        bucket = filler_bucket_from_text(text, previous_empathy=self._previous_empathy)
-        if fillers is not None and not self.flow.done and classify_answer(text) == "substantive":
+        bucket = "neutral"
+        if (
+            fillers is not None
+            and not self.flow.done
+            and classify_answer(text) == "substantive"
+            and not self.recovery_speech_blocked()
+        ):
             picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
             if picked is not None:
                 filler_text, frames = picked
-                if self.latency is not None:
-                    self.latency.on_filler_start()
-                self.session.say(filler_text, audio=frames_iter(frames), add_to_chat_ctx=False)
-                self._suppress_lead = True
-                filler_note = (
-                    f'\nYou have already said "{filler_text}" out loud as your reaction. Do not open with another '
-                    "acknowledgement; continue straight on from it."
+                played = await self.speak(
+                    "filler",
+                    lambda: self.session.say(
+                        filler_text, audio=frames_iter(frames), add_to_chat_ctx=False
+                    ),
+                    wait=False,
+                    detail="ack",
                 )
+                if played:
+                    if self.latency is not None:
+                        self.latency.on_filler_start()
+                    self._suppress_lead = True
+                    filler_note = (
+                        f'\nYou have already said "{filler_text}" out loud as your reaction. Do not open with another '
+                        "acknowledgement; continue straight on from it."
+                    )
 
         elapsed_min = (datetime.now(timezone.utc) - self._started_at).total_seconds() / 60.0
         t0 = datetime.now(timezone.utc)
@@ -1486,14 +1575,23 @@ class InterviewAgent(Agent):
         if self.latency is not None:
             self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
         self._current_tone = move.tone or tone_for_kind(move.kind)
-        self._empathy_hint = bucket == "empathetic" or self._current_tone in ("gentle", "reassuring")
-        self._previous_empathy = self._empathy_hint
+        # P2-04: Empathy allowed only when Move.tone dictates gentle/reassuring, never sticky across turns.
+        self._empathy_hint = self._current_tone in ("gentle", "reassuring")
+        self._previous_empathy = False
         self._interrupted = False
         self.director.note_user(text)
 
         self._record_user_move(move, text, events)
 
         logger.info("move=%s stage=%s", move.kind, self.flow.state.stage)
+        if self._drop_recovery_during_cooldown(move):
+            logger.info("crowd cooldown skip move=%s", move.kind)
+            self._remember_move(move)
+            if self.latency is not None:
+                self.latency.on_hook_end()
+            self._finish_if_needed(move)
+            raise StopResponse()
+        self._remember_move(move)
         if self._interrupted and move.kind not in ("repeat", "rephrase", "ask_repeat", "reask_invalid"):
             move.directive += (
                 " They answered while you were still speaking. Acknowledge what they just said and ask only "
@@ -1503,21 +1601,42 @@ class InterviewAgent(Agent):
             # The mobile step is one fixed sentence. The dialogue model was adding the next
             # question ("what is your age?") in the same breath as the number read-back.
             self.director.note_assistant(move.verbatim)
-            self.session.say(move.verbatim, allow_interruptions=True)
+            await self.speak(
+                "verbatim",
+                lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                wait=False,
+                detail=move.kind,
+            )
             if self.latency is not None:
                 self.latency.on_hook_end()
             self._finish_if_needed(move)
             raise StopResponse()
-        turn_ctx.add_message(
-            role="system",
-            content=(
-                f"CONTROLLER DIRECTIVE: {move.directive}\n"
-                f"{native_script_reminder(self.flow.state.language)}{filler_note}"
-            ),
+        directive = (
+            f"CONTROLLER DIRECTIVE: {move.directive}\n"
+            f"{native_script_reminder(self.flow.state.language)}{filler_note}"
         )
+        turn_ctx.add_message(role="system", content=directive)
         if self.latency is not None:
             self.latency.on_hook_end()
         self._finish_if_needed(move)
+        # Claim the floor here so LiveKit's default generate_reply cannot overlap a filler.
+        # StopResponse skips that default; user_input keeps the candidate turn in this reply.
+        await self.speak(
+            "director",
+            lambda: self._director_reply(turn_ctx, text, directive),
+            wait=False,
+            detail=move.kind,
+        )
+        raise StopResponse()
+
+    def _director_reply(self, turn_ctx: Any, text: str, directive: str) -> Any:
+        try:
+            return self.session.generate_reply(chat_ctx=turn_ctx, user_input=text)
+        except TypeError:
+            try:
+                return self.session.generate_reply(user_input=text, instructions=directive)
+            except TypeError:
+                return self.session.generate_reply(instructions=directive)
 
 
 class CascadeInterviewAgent(InterviewAgent):
@@ -1617,6 +1736,8 @@ async def _run_gpt_live_session(
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
+        speak=agent.speak,
+        recovery_blocked=agent.recovery_speech_blocked,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -1959,6 +2080,8 @@ async def entrypoint(ctx: JobContext) -> None:
         settings=settings,
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
+        speak=agent.speak,
+        recovery_blocked=agent.recovery_speech_blocked,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -2004,6 +2127,7 @@ async def entrypoint(ctx: JobContext) -> None:
         language=language,
         enabled=bool(settings.voice_early_filler),
         on_start=(latency.on_filler_start if latency else None),
+        speak=agent.speak,
     )
     early.attach()
 

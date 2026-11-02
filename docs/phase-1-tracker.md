@@ -1,11 +1,12 @@
 # Phase 1 tracker — cascade demo and language voices
 
+**Status banner (28 October 2026):** Phase 1 is **complete** (confirmed 21 Oct 2026). This file is historical. Do not add quality tasks here. New work is Phase 2 conversation quality and Phase 3 assessment quality in `docs/phase-2-quality-tracker.md`. Execution plan: `docs/poc-implementation-plan.md`.
+
 **Plan:** `docs/poc-implementation-plan.md`  
 **Phase goal:** `/elevenlabs-interviewer` is reliable enough to start a call in every major language the product already claims, with an Indian-accent English voice or a matching Indian-language voice, and Scribe accepting that language.  
-**Status values:** `Not started` · `In progress` · `Blocked` · `Done`  
-**Do not start Phase 2 (brain feedback)** until the exit line under the status table is true.
+**Status values:** `Not started` · `In progress` · `Blocked` · `Done`
 
-This file is the implementation guide for Phase 1. An engineer should not need to reread the whole plan to do these tasks. Brain-loop and hardening work stay in the plan.
+This file is the implementation guide for Phase 1 (Done). An engineer should not need to reread the whole plan to regress a language or Rejoin station. Quality work (speech arbiter, fillers, parsers, TTS guard, clinical) lives in the Phase 2 tracker.
 
 ---
 
@@ -43,7 +44,7 @@ P1-03, P1-04, and P1-05 are stop-conditions inside P1-02. P1-08 must be Pass bef
 
 **Phase 1 exit:** P1-24 is Done, and every critical-path row is Done. A Fail on the matrix with a written stop (section “Risks and stop conditions”) blocks the exit. “Investigate” is not a closed row. Brain-quality scoring does not block this exit.
 
-**Progress:** Phase 1 rows are Done. Confirmed 21 Oct 2026. Every language used voice id `4mCfn38CsM9hGLvDrPxv` (the persona that was on the calls). Odia TTS and Scribe stay `or`. Endpointing stays `0.25` / `0.55` / `2.3`. Phase 2 shows each `flow.move` beside the candidate line on the complete page. Phase 3 keeps a scorecard quote only when that quote is in the transcript, and a drop past 120 seconds ends that interview incomplete.
+**Progress:** Phase 1 rows are Done. Confirmed 21 Oct 2026. Every language used voice id `4mCfn38CsM9hGLvDrPxv` (the persona that was on the calls). Odia TTS and Scribe stay `or`. Endpointing stays `0.25` / `0.55` / `2.3`. The 19 Oct plan’s old “Phase 2/3” (move display on the complete page; scorecard quote only if it is in the transcript; drop past 120s ends incomplete) were called out here as done. Current quality work uses new names in `docs/phase-2-quality-tracker.md`.
 
 ---
 

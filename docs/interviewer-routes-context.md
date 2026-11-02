@@ -12,6 +12,8 @@ Context for the two public candidate join pages this repo ships and that are dep
 
 The deployed HTML shell for both URLs is the same SPA (`title` InterviewAI, same `/assets/index-*.js`, `#root`). The rendered join screen matches `V2TestPage` when either prop is set: heading “Join your interview”, Staff Nurse screening copy, name, language, editable sample nurse resume, microphone preflight, DPDP consent, and “Join interview”.
 
+**POC (28 Oct 2026):** Demo and quality work stay on `/elevenlabs-interviewer` only. Plan: `docs/poc-implementation-plan.md`. Tracker: `docs/phase-2-quality-tracker.md`. Do not collect language, policy, or clinical feedback on `/gpt-live-interviewer`.
+
 TA users do **not** run these URLs. TA login, roles, and scorecards live on `/login`, `/dashboard`, `/roles/:roleId`, and `/candidates/:candidateId/scorecard`.
 
 ---

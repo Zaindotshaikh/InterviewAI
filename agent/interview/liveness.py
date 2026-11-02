@@ -34,13 +34,24 @@ class SilenceMonitor:
             self._task.cancel()
         self._task = None
 
+    def _agent_is_speaking(self) -> bool:
+        if getattr(self._session, "agent_state", "listening") in ("speaking", "thinking"):
+            return True
+        busy = getattr(self._agent, "speech_busy", None)
+        if callable(busy):
+            try:
+                return bool(busy())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
     async def _run(self) -> None:
         level = 0
         try:
             while not self._flow.done:
                 level += 1
-                # Never talk over ourselves.
-                while getattr(self._session, "agent_state", "listening") in ("speaking", "thinking"):
+                # Never talk over ourselves (session state or the P2-01 arbiter).
+                while self._agent_is_speaking():
                     await asyncio.sleep(0.4)
                 # Candidate started talking again while we were waiting to nudge.
                 if getattr(self._session, "user_state", None) == "speaking":

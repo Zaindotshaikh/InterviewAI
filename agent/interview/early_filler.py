@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from interview.fillers import FillerPlayer, frames_iter
@@ -19,12 +21,14 @@ class EarlyFiller:
         language: str,
         enabled: bool,
         on_start: Any | None = None,
+        speak: Callable[..., Awaitable[bool]] | None = None,
     ) -> None:
         self._session = session
         self._fillers = fillers
         self._language = language
         self._enabled = enabled
         self._on_start = on_start
+        self._speak = speak
         self._interim = ""
         self._started = False
         self._false_starts = 0
@@ -58,8 +62,11 @@ class EarlyFiller:
             if self._on_start:
                 self._on_start()
             try:
-                self._session.say(text, audio=frames_iter(frames), add_to_chat_ctx=False)
-                logger.info("early filler started false_starts=%s starts=%s", self._false_starts, self._starts)
+                if self._speak is not None:
+                    asyncio.get_running_loop().create_task(self._play(text, frames))
+                else:
+                    self._session.say(text, audio=frames_iter(frames), add_to_chat_ctx=False)
+                    logger.info("early filler started false_starts=%s starts=%s", self._false_starts, self._starts)
             except Exception:  # noqa: BLE001
                 logger.exception("early filler say failed")
                 self._started = False
@@ -73,6 +80,22 @@ class EarlyFiller:
                 self._false_starts,
                 self._starts,
             )
+
+    async def _play(self, text: str, frames: Any) -> None:
+        try:
+            ok = await self._speak(
+                "filler",
+                lambda: self._session.say(text, audio=frames_iter(frames), add_to_chat_ctx=False),
+                wait=False,
+                detail="early",
+            )
+            if not ok:
+                self._started = False
+                return
+            logger.info("early filler started false_starts=%s starts=%s", self._false_starts, self._starts)
+        except Exception:  # noqa: BLE001
+            logger.exception("early filler say failed")
+            self._started = False
 
     def stats(self) -> dict[str, float | int]:
         return {

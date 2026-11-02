@@ -26,11 +26,12 @@ _SIGH: dict[str, str] = {
     "en-IN": "[sighs] ",
 }
 
+# P2-04: Genuine distress / anxiety only. Simple negations ("no", "don't", "नहीं") are neutral.
 _EMPATHY_WORDS = re.compile(
-    r"\b(no|not|never|uncomfortable|scared|afraid|nervous|don'?t|cant|can'?t|"
-    r"नहीं|नही|डरा|डर|परेशान|मुश्किल|"
-    r"नाही|नको|भीती|अवघड|"
-    r"નથી|બીક|ડર|મુશ્કેલ|ગભરાયેલ|ચિંતા)\b",
+    r"\b(uncomfortable|scared|afraid|nervous|anxious|"
+    r"not comfortable|डरा|डर|परेशान|घबराहट|मुश्किल|"
+    r"भीती|अवघड|घाबरलो|घाबरले|"
+    r"બીક|ડર|મુશ્કેલ|ગભરાયેલ|ચિંતા)\b",
     re.I,
 )
 

@@ -63,6 +63,9 @@ def test_no_consecutive_same_tag():
 def test_filler_bucket_heuristic():
     assert filler_bucket_from_text("I am not comfortable with that") == "empathetic"
     assert filler_bucket_from_text("I worked in ICU for three years") == "neutral"
+    assert filler_bucket_from_text("नहीं, मुझे नहीं पता") == "neutral"
+    assert filler_bucket_from_text("I don't know") == "neutral"
+    assert filler_bucket_from_text("मुझे बहुत डर लग रहा है") == "empathetic"
 
 
 def test_a_played_reaction_does_not_get_another_hesitation():
