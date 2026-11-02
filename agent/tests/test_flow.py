@@ -13,7 +13,7 @@ from interview.analysis import (
     heuristic_analysis,
 )
 from interview.blueprint import Blueprint
-from interview.flow import InterviewFlow
+from interview.flow import CROWD_HELP_LINES, InterviewFlow
 from interview.flow_state import FlowState
 from interview.plan import InterviewPlan, classify_answer
 
@@ -1135,8 +1135,8 @@ def test_contradiction_probes_are_capped(blueprint):
 # ----------------------------------------------------------------------------------- candidate behaviour
 
 
-def test_unclear_audio_asks_to_repeat_then_soft_skips_stuck_field(blueprint):
-    """Garbled audio clarifies twice, then soft-skips the stuck focus (no infinite loop)."""
+def test_unclear_audio_asks_to_repeat_then_crowd_help_then_soft_skips(blueprint):
+    """Garbled audio clarifies twice, then a crowd line, then soft-skips (no infinite loop)."""
     flow, _ = make_flow(blueprint)
     flow.opening()
     assert flow.state.focus.get("type") == "slots"
@@ -1145,13 +1145,35 @@ def test_unclear_audio_asks_to_repeat_then_soft_skips_stuck_field(blueprint):
     m2 = flow.apply(bad)
     m3 = flow.apply(bad)
     assert m1.kind == "ask_repeat" and m2.kind == "ask_repeat"
-    # Third unclear on same focus soft-skips (city → unknown) and advances.
-    assert m3.kind in ("ask_field", "ask_repeat", "noise_help", "confirm")
-    assert any(e[0] == "focus.soft_skip" for e in m3.events) or flow.state.slots["city"].status == "unknown"
+    assert m3.kind == "crowd_help"
+    assert m3.verbatim == CROWD_HELP_LINES["hi-IN"]
+    assert "last question" not in m3.directive.lower()
+    asked = (flow.state.last_question or "").strip()
+    if asked:
+        assert asked not in (m3.directive or "")
+        assert asked not in (m3.verbatim or "")
+    assert any(e[0] == "audio.crowd_help" for e in m3.events)
     assert flow.state.unclear_total == 3
+    m4 = flow.apply(bad)
+    assert m4.kind in ("ask_field", "confirm")
+    assert any(e[0] == "focus.soft_skip" for e in m4.events) or flow.state.slots["city"].status == "unknown"
     # Clear answer still captures; never stores garbage from unclear turns.
     flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     assert flow.state.unclear_streak == 0
+
+
+def test_crowd_help_english_line_has_no_question_replay(blueprint):
+    flow, _ = make_flow(blueprint, language="en-IN")
+    flow.opening()
+    flow.state.last_question = "Which city are you applying for?"
+    bad = TurnAnalysis(intelligibility="unclear")
+    flow.apply(bad)
+    flow.apply(bad)
+    move = flow.apply(bad)
+    assert move.kind == "crowd_help"
+    assert move.verbatim == CROWD_HELP_LINES["en-IN"]
+    assert "which city" not in (move.directive or "").lower()
+    assert "which city" not in (move.verbatim or "").lower()
 
 
 def test_filler_haan_with_care_updates_is_not_treated_as_unclear(blueprint):

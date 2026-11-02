@@ -68,6 +68,22 @@ STYLE_FOOTER = (
 )
 
 MAX_FOCUS_RETRIES = 3  # repeat / rephrase / unclear on the same focus before soft-skip
+# After this many unusable turns, say the crowd line once instead of replaying the question.
+CROWD_COOLDOWN_S = 10.0
+RECOVERY_SPEECH_KINDS = frozenset({"ask_repeat", "crowd_help", "noise_help", "crowd_hold"})
+CROWD_HELP_LINES = {
+    "hi-IN": "मुझे एक से ज़्यादा आवाज़ें आ रही हैं। कृपया केवल उम्मीदवार ही बोलें।",
+    "en-IN": "I can hear more than one voice. Please have only the candidate speak.",
+    "mr-IN": "मला एकापेक्षा जास्त आवाज ऐकू येत आहेत. कृपया फक्त उमेदवार बोलावे.",
+    "gu-IN": "મને એક કરતાં વધુ અવાજ સંભળાય છે. કૃપા કરીને ફક્ત ઉમેદવાર જ બોલે.",
+    "te-IN": "నాకు ఒకటి కంటే ఎక్కువ గళాలు వినిపిస్తున్నాయి. దయచేసి అభ్యర్థి మాత్రమే మాట్లాడండి.",
+    "ta-IN": "எனக்கு ஒன்றுக்கு மேற்பட்ட குரல்கள் கேட்கின்றன. தயவுசெய்து வேட்பாளர் மட்டும் பேசவும்.",
+    "kn-IN": "ನನಗೆ ಒಂದಕ್ಕಿಂತ ಹೆಚ್ಚು ಧ್ವನಿಗಳು ಕೇಳುತ್ತಿವೆ. ದಯವಿಟ್ಟು ಅಭ್ಯರ್ಥಿ ಮಾತ್ರ ಮಾತನಾಡಿ.",
+    "ml-IN": "എനിക്ക് ഒന്നിലധികം ശബ്ദങ്ങൾ കേൾക്കുന്നു. ദയവായി അപേക്ഷകൻ മാത്രം സംസാരിക്കുക.",
+    "bn-IN": "আমি একাধিক কণ্ঠস্বর শুনতে পাচ্ছি। অনুগ্রহ করে শুধু প্রার্থীই কথা বলুন।",
+    "pa-IN": "ਮੈਨੂੰ ਇੱਕ ਤੋਂ ਵੱਧ ਆਵਾਜ਼ਾਂ ਆ ਰਹੀਆਂ ਹਨ। ਕਿਰਪਾ ਕਰਕੇ ਸਿਰਫ਼ ਉਮੀਦਵਾਰ ਹੀ ਬੋਲੇ।",
+    "od-IN": "ମୁଁ ଗୋଟିଏ ରୁ ଅଧିକ ସ୍ୱର ଶୁଣୁଛି। ଦୟାକରି କେବଳ ପ୍ରାର୍ଥୀ କୁହନ୍ତୁ।",
+}
 
 # Spoken English digit words GPT-Live often emits for phone numbers.
 _PHONE_DIGIT_WORDS = frozenset(
@@ -470,33 +486,60 @@ class InterviewFlow:
         """Nothing usable was heard (empty transcript or noise marker)."""
         return self._unclear()
 
-    def _unclear(self) -> Move:
-        """Unrecognised speech: clarify, then soft-skip the stuck focus (never loop forever).
+    def _crowd_help_line(self) -> str:
+        return CROWD_HELP_LINES.get(self.state.language) or CROWD_HELP_LINES["en-IN"]
 
-        Production voice agents treat garbled audio as non-consent — ask once, then move on
-        rather than inventing an answer or re-asking the same field indefinitely.
+    def _crowd_help(self) -> Move:
+        """One room-too-busy line. Do not replay the interview question."""
+        line = self._crowd_help_line()
+        if isinstance(self.state.focus, dict):
+            self.state.focus["crowd_help"] = True
+        move = self._move(
+            "crowd_help",
+            "Say exactly this and nothing more: "
+            f"{line} "
+            "Forbidden: restating the interview question, asking a new question, pace reassurances, "
+            "or saying you could not hear them.",
+            events=[
+                (
+                    "audio.crowd_help",
+                    {"stage": self.state.stage, "total": self.state.unclear_total},
+                )
+            ],
+        )
+        move.verbatim = line
+        return move
+
+    def _unclear(self) -> Move:
+        """Unrecognised speech: clarify, then a crowd/noise line, then soft-skip (never loop forever).
+
+        Overlapping voices and garbled STT look the same here — we do not count speakers.
+        After max_unclear_streak, speak crowd_help once and wait; do not replay last_question.
         """
         st = self.state
         st.unclear_streak += 1
         st.unclear_total += 1
+        already_warned = bool(st.focus.get("crowd_help")) if isinstance(st.focus, dict) else False
         # Same focus retried too often → mark unknown / skip area and continue the interview.
-        skip = self._bump_focus_retry()
-        if skip is not None:
-            st.unclear_streak = 0
-            skip.directive = (
-                "You could not make out their answer after a few tries. In one short warm sentence say you will "
-                "note that for now and move on — no blame. Then continue with: "
-            ) + skip.directive
-            return skip
+        # Crowd warning gets this turn without a retry bump so we do not skip in the same breath.
+        if already_warned or st.unclear_streak < self.bp.limits.max_unclear_streak:
+            skip = self._bump_focus_retry()
+            if skip is not None:
+                st.unclear_streak = 0
+                skip.directive = (
+                    "You could not make out their answer after a few tries. In one short warm sentence say you will "
+                    "note that for now and move on — no blame. Then continue with: "
+                ) + skip.directive
+                return skip
+        if already_warned:
+            return self._move(
+                "crowd_hold",
+                "",
+                events=[("audio.crowd_hold", {"stage": st.stage, "streak": st.unclear_streak})],
+            )
         if st.unclear_streak >= self.bp.limits.max_unclear_streak:
             st.unclear_streak = 0
-            return self._move(
-                "noise_help",
-                "Say kindly that you are having trouble hearing them. Suggest moving somewhere quieter, closer to the "
-                "phone, or using earphones. Then ask your last question again, simply. "
-                "Forbidden: pace reassurances.",
-                events=[("audio.noise_help", {"stage": st.stage, "total": st.unclear_total})],
-            )
+            return self._crowd_help()
         last = f" Then ask this once: {st.last_question}" if st.last_question else " Then ask your last question once."
         # Mid-answer pauses on height/weight or work history often look like "unclear" to STT.
         # Do not claim you missed them on the first miss — that interrupts them.

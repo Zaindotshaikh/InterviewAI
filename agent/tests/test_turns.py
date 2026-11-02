@@ -191,6 +191,26 @@ def test_transcription_timeout_skips_salvage_before_listening_is_armed():
     asyncio.run(run())
 
 
+def test_watchdog_skips_repeat_when_recovery_already_spoken():
+    async def run():
+        session, backend = _FakeSession(), _FakeBackend()
+        wd = TurnWatchdog(
+            session=session,
+            backend=backend,
+            interview_id="i1",
+            settings=_settings(),
+            speak=SpeechArbiter().play,
+            recovery_blocked=lambda: True,
+        )
+        wd.attach()
+        session.handlers["user_transcription_timeout"](SimpleNamespace(speech_duration=8.0))
+        await asyncio.sleep(0.05)
+        assert session.replies == []
+        assert wd.summary()["repeat_prompts"] == 0
+
+    asyncio.run(run())
+
+
 def test_does_not_talk_over_the_agent():
     async def run():
         session = _FakeSession(agent_state="speaking")

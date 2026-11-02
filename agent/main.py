@@ -69,6 +69,7 @@ from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
 from interview.speech import SpeechArbiter, await_playout, source_for_move
+from interview.flow import CROWD_COOLDOWN_S, RECOVERY_SPEECH_KINDS
 from interview.voice_tone import tone_for_kind
 from providers import (
     SessionRefused,
@@ -377,6 +378,8 @@ class InterviewAgent(Agent):
         self._previous_empathy = False
         # After LiveKit resumes a false barge-in, briefly discard ambient STT fragments.
         self._discard_user_until: float = 0.0
+        self._last_move_kind = ""
+        self._crowd_quiet_until: float = 0.0
         self._delegation_wired = False
         # GPT-Live: drive Flow from user transcripts (like cascade). Delegation is backup only —
         # the voice model often acks without ever emitting delegation_created.
@@ -403,6 +406,39 @@ class InterviewAgent(Agent):
 
     def speech_busy(self) -> bool:
         return self._speech.busy()
+
+    def _in_crowd_cooldown(self) -> bool:
+        if self._crowd_quiet_until <= 0:
+            return False
+        try:
+            return asyncio.get_running_loop().time() < self._crowd_quiet_until
+        except RuntimeError:
+            return False
+
+    def recovery_speech_blocked(self) -> bool:
+        """Watchdog / silence must not stack another please-repeat after Flow already recovered."""
+        if self._in_crowd_cooldown():
+            return True
+        return self._last_move_kind in RECOVERY_SPEECH_KINDS
+
+    def _begin_crowd_cooldown(self) -> None:
+        try:
+            self._crowd_quiet_until = asyncio.get_running_loop().time() + float(CROWD_COOLDOWN_S)
+        except RuntimeError:
+            self._crowd_quiet_until = 0.0
+        logger.info("crowd cooldown %.0fs after crowd_help", CROWD_COOLDOWN_S)
+
+    def _remember_move(self, move: Move) -> None:
+        self._last_move_kind = move.kind
+        if move.kind == "crowd_help":
+            self._begin_crowd_cooldown()
+        elif move.kind not in RECOVERY_SPEECH_KINDS:
+            self._crowd_quiet_until = 0.0
+
+    def _drop_recovery_during_cooldown(self, move: Move) -> bool:
+        if move.kind == "crowd_help" and not self._in_crowd_cooldown():
+            return False
+        return self._in_crowd_cooldown() and move.kind in RECOVERY_SPEECH_KINDS
 
     async def speak(self, source: str, *starts: Any, wait: bool = True, detail: str = "") -> bool:
         """Only function allowed to start agent TTS. Sources: director, filler, silence, verbatim, watchdog."""
@@ -827,8 +863,13 @@ class InterviewAgent(Agent):
         self.spawn(self._persist(move.events))
         self._finish_if_needed(move)
         # First silence level is intentional quiet — do not invent a "no hurry" line.
-        if move.kind == "silence_hold" or not (move.directive or "").strip():
+        if move.kind == "silence_hold" or move.kind == "crowd_hold" or not (move.directive or "").strip():
+            self._remember_move(move)
             return
+        if move.kind.startswith("silence") and self.recovery_speech_blocked():
+            logger.info("silence skip — recovery already spoken or crowd cooldown")
+            return
+        self._remember_move(move)
         source = source_for_move(move.kind)
         try:
             self._current_tone = move.tone or tone_for_kind(move.kind)
@@ -1237,6 +1278,11 @@ class InterviewAgent(Agent):
             len(joined),
             joined[:80],
         )
+        if self._drop_recovery_during_cooldown(move):
+            logger.info("gpt_live crowd cooldown skip move=%s", move.kind)
+            self._remember_move(move)
+            raise StopResponse()
+        self._remember_move(move)
 
         # Phase 2: one CONTROLLER DIRECTIVE only (no generate_reply double-speak).
         self._gpt_live_append(_gpt_live_commentary(move, self.flow.state.language), delegation_id=delegation_id)
@@ -1493,7 +1539,12 @@ class InterviewAgent(Agent):
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
         bucket = "neutral"
-        if fillers is not None and not self.flow.done and classify_answer(text) == "substantive":
+        if (
+            fillers is not None
+            and not self.flow.done
+            and classify_answer(text) == "substantive"
+            and not self.recovery_speech_blocked()
+        ):
             picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
             if picked is not None:
                 filler_text, frames = picked
@@ -1533,6 +1584,14 @@ class InterviewAgent(Agent):
         self._record_user_move(move, text, events)
 
         logger.info("move=%s stage=%s", move.kind, self.flow.state.stage)
+        if self._drop_recovery_during_cooldown(move):
+            logger.info("crowd cooldown skip move=%s", move.kind)
+            self._remember_move(move)
+            if self.latency is not None:
+                self.latency.on_hook_end()
+            self._finish_if_needed(move)
+            raise StopResponse()
+        self._remember_move(move)
         if self._interrupted and move.kind not in ("repeat", "rephrase", "ask_repeat", "reask_invalid"):
             move.directive += (
                 " They answered while you were still speaking. Acknowledge what they just said and ask only "
@@ -1678,6 +1737,7 @@ async def _run_gpt_live_session(
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
         speak=agent.speak,
+        recovery_blocked=agent.recovery_speech_blocked,
     )
     watchdog.attach()
     latency = LatencyTracker(
@@ -2021,6 +2081,7 @@ async def entrypoint(ctx: JobContext) -> None:
         is_listening_armed=agent.is_listening_armed,
         get_language=lambda: agent.flow.state.language,
         speak=agent.speak,
+        recovery_blocked=agent.recovery_speech_blocked,
     )
     watchdog.attach()
     latency = LatencyTracker(

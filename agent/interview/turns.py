@@ -141,6 +141,7 @@ class TurnWatchdog:
         is_listening_armed: Callable[[], bool] | None = None,
         get_language: Callable[[], str] | None = None,
         speak: Callable[..., Awaitable[bool]] | None = None,
+        recovery_blocked: Callable[[], bool] | None = None,
     ) -> None:
         self._session = session
         self._backend = backend
@@ -149,6 +150,7 @@ class TurnWatchdog:
         self._is_listening_armed = is_listening_armed
         self._get_language = get_language
         self._speak = speak
+        self._recovery_blocked = recovery_blocked
         self._eou_delays: list[float] = []
         self._counters = {
             "transcription_timeouts": 0,
@@ -258,6 +260,13 @@ class TurnWatchdog:
             return
         if self._speech_busy():
             return
+        if self._recovery_blocked is not None:
+            try:
+                if self._recovery_blocked():
+                    logger.info("watchdog skip repeat — Flow already asked to repeat or crowd-help is in cooldown")
+                    return
+            except Exception:  # noqa: BLE001
+                logger.debug("recovery_blocked check failed", exc_info=True)
         instructions = REPEAT_DIRECTIVE
         if self._get_language is not None:
             lang = self._get_language()
