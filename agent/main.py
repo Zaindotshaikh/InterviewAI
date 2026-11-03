@@ -293,12 +293,15 @@ def _switch_tts_language(tts: Any, code: str, settings) -> None:  # noqa: ANN001
     elif isinstance(tts, _sarvam_plugin.TTS):
         tts.update_options(language_code=code, speaker=get_profile(code).tts_speaker)
     elif _elevenlabs_plugin is not None and isinstance(tts, _elevenlabs_plugin.TTS):
-        from providers import elevenlabs_language, elevenlabs_voice_for
+        from providers import elevenlabs_language, pinned_elevenlabs_voice_id
 
+        current_id = getattr(getattr(tts, "_opts", None), "voice_id", None)
+        voice_id = pinned_elevenlabs_voice_id(current_id, code, settings)
         tts.update_options(
             language=elevenlabs_language(code),
-            voice_id=elevenlabs_voice_for(code, settings),
+            voice_id=voice_id,
         )
+        logger.info("ElevenLabs TTS language=%s voice pinned=%s", elevenlabs_language(code), voice_id)
 
 
 class InterviewAgent(Agent):
@@ -660,11 +663,26 @@ class InterviewAgent(Agent):
 
         # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
         captured = {k for k, v in self.flow.state.slots.items() if v.value is not None}
+        height = self.flow.state.slot("height_cm")
+        weight = self.flow.state.slot("weight_kg")
+        from interview.normalize import height_said_in_cm, spoken_height_phrase
+        from interview.phone_speech import body_confirm_line
+
+        forbid_cm = bool(height.value) and not height_said_in_cm(height.evidence or "")
+        cm_fallback = ""
+        if forbid_cm and weight.value is not None:
+            cm_fallback = body_confirm_line(
+                self.flow.state.language,
+                spoken_height_phrase(height.evidence, height.value),
+                weight.value,
+            )
         is_blocked, guarded_text, reason = self._guard.inspect_text(
             full_raw,
             language=self.flow.state.language,
             captured_slots=captured,
             single_question=not opening,
+            forbid_centimetres=forbid_cm,
+            fallback_text=cm_fallback,
         )
 
         async def _iter_guarded() -> Any:
@@ -701,7 +719,9 @@ class InterviewAgent(Agent):
             # Phase 7: optional Chirp fallback — never on /elevenlabs-interviewer (locked EL).
             settings = get_settings()
             if getattr(self, "_tts_locked_el", False):
-                logger.exception("ElevenLabs TTS failed; EL interview mode is locked (no Chirp fallback)")
+                logger.exception(
+                    "ElevenLabs TTS failed; EL interview mode is locked (no Chirp/OpenAI voice fallback)"
+                )
                 raise
             if is_el and settings.tts_fallback_on_error == "google":
                 logger.exception("ElevenLabs TTS failed; falling back to Google Chirp")
@@ -727,6 +747,8 @@ class InterviewAgent(Agent):
 
         Do not call this because their answer contains English words. language_code is en-IN, hi-IN, te-IN, ta-IN, kn-IN, ml-IN, bn-IN, mr-IN, gu-IN, pa-IN, or od-IN.
         """
+        from interview.language import explicit_language_switch_request
+
         profile = get_profile(language_code)
         current = self.flow.state.language
         if profile.code == current:
@@ -736,6 +758,17 @@ class InterviewAgent(Agent):
             if turn.get("role") == "user":
                 last_user = turn.get("text") or ""
                 break
+        # /elevenlabs-interviewer: join language is locked unless they asked to change it.
+        if self._tts_locked_el and not explicit_language_switch_request(last_user):
+            logger.info(
+                "language switch refused (EL lock) requested=%s current=%s",
+                profile.code,
+                current,
+            )
+            return (
+                f"Stay on {current}. Keep this same voice. "
+                "English words in an answer are not a language change."
+            )
         spoken = detect_script_language(last_user)
         # A Hindi sentence with a few English words is still Hindi. Do not change the voice.
         if spoken and spoken != profile.code:
@@ -1648,7 +1681,7 @@ class CascadeInterviewAgent(InterviewAgent):
 
     @function_tool()
     async def switch_language(self, language_code: str) -> str:
-        """Switch interview language mid-call. language_code is en-IN, hi-IN, te-IN, ta-IN, kn-IN, ml-IN, bn-IN, mr-IN, gu-IN, pa-IN, or od-IN."""
+        """Switch interview language only if the candidate clearly asked. Never because of English job words."""
         return await super().switch_language(language_code)
 
 

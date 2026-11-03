@@ -30,6 +30,11 @@ _OFFER_PATTERNS = [
     re.compile(r"\b(?:you\s*got\s*the\s*job|we\s*are\s*hiring\s*you)\b", re.I),
 ]
 
+_CM_SPOKEN = re.compile(
+    r"centimet(?:er|re)s?|\bcm\b|सेंटीमीटर|सेन्टीमीटर|सेमी",
+    re.I,
+)
+
 # 3. Redundant slot asks patterns
 _SLOT_PATTERNS = {
     "city": re.compile(
@@ -112,6 +117,7 @@ class OutputGuard:
         captured_slots: set[str] | None = None,
         single_question: bool = True,
         fallback_text: str = "",
+        forbid_centimetres: bool = False,
     ) -> tuple[bool, str, str]:
         """Inspect text before TTS.
 
@@ -147,7 +153,14 @@ class OutputGuard:
                     safe = fallback_text.strip() or _SAFE_TRANSITION_REPLACEMENTS[lang]
                     return True, safe, f"redundant_slot_{slot_name}"
 
-        # Check 4: Enforce single question when requested
+        # Check 4: Do not speak centimetres when the candidate used feet (or unit was defaulted to feet).
+        if forbid_centimetres and _CM_SPOKEN.search(raw):
+            safe = (fallback_text or "").strip()
+            if safe and not _CM_SPOKEN.search(safe):
+                logger.warning("guard.blocked class=height_cm_spoken")
+                return True, safe, "height_cm_spoken"
+
+        # Check 5: Enforce single question when requested
         if single_question:
             q_count = raw.count("?")
             if q_count > 1:

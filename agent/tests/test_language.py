@@ -1,6 +1,11 @@
 """Language detection unit tests."""
 
-from interview.language import detect_script_language, get_profile, native_script_reminder
+from interview.language import (
+    detect_script_language,
+    explicit_language_switch_request,
+    get_profile,
+    native_script_reminder,
+)
 from interview.prompts import spoken_style
 
 
@@ -26,6 +31,27 @@ def test_gujarati_opening_seed():
     assert "નમસ્તે" in opening_seed("gu-IN", elevenlabs=True)
     assert "[warmly]" in opening_seed("gu-IN", elevenlabs=True)
     assert "नमस्ते" not in opening_seed("gu-IN")
+
+
+def test_english_job_words_are_not_a_language_switch_request():
+    assert not explicit_language_switch_request("I did GNM in 2019 in ICU")
+    assert not explicit_language_switch_request("हाँ, comfortable हूँ diaper care में")
+    assert explicit_language_switch_request("please speak in English")
+    assert explicit_language_switch_request("हिंदी में बोलिए")
+
+
+def test_pinned_voice_ignores_language_map():
+    from config import Settings
+    from providers.elevenlabs_voices import pinned_elevenlabs_voice_id
+
+    s = Settings(
+        elevenlabs_voice_id="fallback",
+        elevenlabs_voice_id_local="fallback",
+        elevenlabs_voice_by_lang="hi-IN:hindi-voice,en-IN:english-voice",
+    )
+    assert pinned_elevenlabs_voice_id("join-sujata", "en-IN", s) == "join-sujata"
+    assert pinned_elevenlabs_voice_id("join-sujata", "hi-IN", s) == "join-sujata"
+    assert pinned_elevenlabs_voice_id("", "hi-IN", s) == "hindi-voice"
 
 
 def test_elevenlabs_voice_is_sujata_for_every_language():

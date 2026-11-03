@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# Candidate clearly asked to change language — not English job words in a Hindi answer.
+_EXPLICIT_LANGUAGE_SWITCH = re.compile(
+    r"\b(?:speak|talk|switch|change)\b.{0,24}\b(?:language|english|hindi|tamil|telugu|"
+    r"kannada|malayalam|marathi|bengali|gujarati|punjabi|odia|oriya)\b|"
+    r"\b(?:english|hindi|tamil|telugu)\s+(?:please|bolo|में बोल)|"
+    r"(?:भाषा\s*बदल|भाषा\s*चेंज|अंग्रेजी\s*में\s*बोल|हिंदी\s*में\s*बोल|"
+    r"इंग्लिश\s*में|english\s*mein|hindi\s*mein)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +122,11 @@ def detect_script_language(text: str) -> str | None:
     if best[0] == "mr-IN" and counts["hi-IN"] == counts["mr-IN"]:
         return "hi-IN"
     return best[0]
+
+
+def explicit_language_switch_request(text: str | None) -> bool:
+    """True only when the candidate asked to change language, not when they used English terms."""
+    return bool(_EXPLICIT_LANGUAGE_SWITCH.search(str(text or "")))
 
 
 def native_script_reminder(language: str) -> str:

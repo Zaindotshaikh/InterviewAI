@@ -124,9 +124,55 @@ def _feet_inches_to_cm(feet: int, inches: int) -> Normalized:
     return _check_height(round((feet * 12 + inches) * 2.54))
 
 
+_INDIC_HEIGHT_WORDS: tuple[tuple[str, str], ...] = (
+    ("ग्यारह", "11"),
+    ("बारह", "12"),
+    ("दस", "10"),
+    ("नौ", "9"),
+    ("आठ", "8"),
+    ("सात", "7"),
+    ("छः", "6"),
+    ("छह", "6"),
+    ("पाँच", "5"),
+    ("पांच", "5"),
+    ("चार", "4"),
+    ("तीन", "3"),
+    ("इंच", "inches"),
+    ("फीट", "feet"),
+    ("फिट", "feet"),
+    ("फुट", "feet"),
+)
+
+
+def _fold_indic_height_words(text: str) -> str:
+    out = text
+    for word, repl in _INDIC_HEIGHT_WORDS:
+        out = out.replace(word, f" {repl} ")
+    return out
+
+
+def height_said_in_cm(raw: Any) -> bool:
+    return bool(
+        re.search(
+            r"\bcm\b|cms\b|centimet(?:er|re)s?|सेंटीमीटर|सेन्टीमीटर|सेमी",
+            str(raw or ""),
+            re.I,
+        )
+    )
+
+
+def cm_to_feet_inches(cm: int | str) -> tuple[int, int]:
+    total = int(round(int(cm) / 2.54))
+    feet, inches = divmod(total, 12)
+    if inches == 12:
+        feet += 1
+        inches = 0
+    return feet, inches
+
+
 def _parse_feet_inches(text: str) -> tuple[int, int] | None:
     """Return (feet, inches) when the text is a feet-inches height, else None."""
-    raw = str(text or "").lower().replace("’", "'").replace("”", '"')
+    raw = _fold_indic_height_words(str(text or "")).lower().replace("’", "'").replace("”", '"')
     if re.search(r"\bcm\b|सेंटीमीटर|सेमी", raw, re.IGNORECASE):
         return None
     m = re.search(r"(\d)\s*(?:'|ft|feet|foot|फुट|फीट)\s*(\d{1,2})?\s*(?:\"|in|inch|inches|इंच)?", raw)
@@ -164,7 +210,7 @@ def height_said_in_feet(raw: Any) -> bool:
 
 
 def spoken_height_phrase(raw: Any, height_cm: int | str) -> str:
-    """Read-back phrase in the unit the candidate used. Slots stay stored as cm."""
+    """Read-back in the unit they used. Default Indian screening speech is feet, not cm."""
     cm = int(height_cm)
     parsed = _parse_feet_inches(str(raw or ""))
     if parsed is not None:
@@ -172,7 +218,12 @@ def spoken_height_phrase(raw: Any, height_cm: int | str) -> str:
         if inches:
             return f"{feet} feet {inches} inches"
         return f"{feet} feet"
-    return f"{cm} centimetres"
+    if height_said_in_cm(raw):
+        return f"{cm} centimetres"
+    feet, inches = cm_to_feet_inches(cm)
+    if inches:
+        return f"{feet} feet {inches} inches"
+    return f"{feet} feet"
 
 
 def normalize_height_cm(raw: Any) -> Normalized:

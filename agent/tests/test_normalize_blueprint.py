@@ -64,6 +64,7 @@ def test_phone_is_read_as_single_digits():
         ("5 ft 11", 180),
         ("5 11", 180),
         ("5.11", 180),
+        ("पाँच फीट ग्यारह", 180),
         ("162", 162),
         ("162 cm", 162),
         ("1.62 m", 162),
@@ -111,6 +112,7 @@ def test_height_and_weight_stay_on_their_own_units():
     assert parse_height_and_weight("70 kg 5 11") == (180, 70)
     assert parse_height_and_weight("5 11 70") == (180, 70)
     assert parse_height_and_weight("5.11 and 65 kg") == (180, 65)
+    assert parse_height_and_weight("पाँच फीट ग्यारह और 70 किलो") == (180, 70)
 
 
 def test_confirm_phrase_keeps_spoken_height_unit():
@@ -119,6 +121,9 @@ def test_confirm_phrase_keeps_spoken_height_unit():
     assert spoken_height_phrase("5.11 and 65 kg", 180) == "5 feet 11 inches"
     assert spoken_height_phrase("160 cm 55 kg", 160) == "160 centimetres"
     assert spoken_height_phrase("55 kg and 160 cm", 160) == "160 centimetres"
+    assert spoken_height_phrase("पाँच फीट ग्यारह", 180) == "5 feet 11 inches"
+    assert "centimetre" not in spoken_height_phrase("", 180).lower()
+    assert "feet" in spoken_height_phrase("", 180)
 
 
 def test_weight():

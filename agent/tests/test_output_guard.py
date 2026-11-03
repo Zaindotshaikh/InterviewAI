@@ -83,6 +83,28 @@ def test_redundant_slot_blocked_when_already_captured(guard: OutputGuard) -> Non
     assert "Let us continue to the next question." in out
 
 
+def test_height_cm_spoken_replaced_when_candidate_used_feet(guard: OutputGuard) -> None:
+    text = "I heard height 173 centimeters and weight 70 kilograms. Is that correct?"
+    fallback = "I heard height 5 feet 11 inches and weight 70 kilograms. Is that correct?"
+    blocked, out, reason = guard.inspect_text(
+        text,
+        language="en-IN",
+        forbid_centimetres=True,
+        fallback_text=fallback,
+    )
+    assert blocked
+    assert reason == "height_cm_spoken"
+    assert out == fallback
+    assert "centimeter" not in out.lower()
+
+
+def test_height_cm_allowed_when_they_said_cm(guard: OutputGuard) -> None:
+    text = "I heard height 160 centimetres and weight 55 kilograms. Is that correct?"
+    blocked, out, reason = guard.inspect_text(text, language="en-IN", forbid_centimetres=False)
+    assert not blocked
+    assert out == text
+
+
 def test_slot_allowed_when_not_captured(guard: OutputGuard) -> None:
     text = "Which city are you currently located in?"
     # When city is not yet captured, asking city is allowed

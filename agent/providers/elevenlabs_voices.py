@@ -55,3 +55,11 @@ def elevenlabs_voice_for(language: str, settings: Settings) -> str:
             if key.strip().lower() in wanted and value.strip():
                 return value.strip()
     return settings.elevenlabs_voice_id_local or settings.elevenlabs_voice_id
+
+
+def pinned_elevenlabs_voice_id(current_voice_id: str | None, language: str, settings: Settings) -> str:
+    """Keep the join-session voice. Never look up a new id from the language map mid-call."""
+    current = (current_voice_id or "").strip()
+    if current:
+        return current
+    return elevenlabs_voice_for(language, settings)
