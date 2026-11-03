@@ -13,6 +13,11 @@ const FALLBACK: V2LanguageOption[] = [
   { code: "te-IN", label: "Telugu", sttMode: "codemix", ttsSpeaker: "priya" },
   { code: "kn-IN", label: "Kannada", sttMode: "codemix", ttsSpeaker: "ishita" },
   { code: "ml-IN", label: "Malayalam", sttMode: "codemix", ttsSpeaker: "pooja" },
+  { code: "mr-IN", label: "Marathi", sttMode: "codemix", ttsSpeaker: "priya" },
+  { code: "bn-IN", label: "Bengali", sttMode: "codemix", ttsSpeaker: "roopa" },
+  { code: "gu-IN", label: "Gujarati", sttMode: "codemix", ttsSpeaker: "priya" },
+  { code: "pa-IN", label: "Punjabi", sttMode: "codemix", ttsSpeaker: "roopa" },
+  { code: "od-IN", label: "Odia", sttMode: "codemix", ttsSpeaker: "ritu" },
 ];
 
 export default function LanguagePicker({ value, onChange }: Props) {
