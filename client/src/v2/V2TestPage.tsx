@@ -425,6 +425,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         }}
         lk={lk}
         showAvatar={avatar}
+        showPortrait={eleven}
         allowRejoin={eleven}
         rejoinLeftMs={rejoinLeftMs(rejoin, clock)}
         onDropped={onDropped}

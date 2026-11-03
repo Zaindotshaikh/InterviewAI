@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import interviewerPortrait from "../../assets/interviewer-portrait.png";
 import { COMPANY_NAME } from "../../config/brand";
 import IntegrityWarningBanner from "../../components/IntegrityWarningBanner";
 import LiveCaptions from "../../components/LiveCaptions";
@@ -24,6 +25,8 @@ type Props = {
   lk: Hook;
   onEnded: (integrity: IntegrityReport) => void;
   showAvatar?: boolean;
+  /** ElevenLabs demo: still portrait inside the presence orb. */
+  showPortrait?: boolean;
   /** Cascade demo: hard drop offers Rejoin and must not open the scorecard. */
   allowRejoin?: boolean;
   /** Milliseconds left in the 120s window. Null until the drop is recorded. */
@@ -58,6 +61,7 @@ export default function LiveInterview({
   lk,
   onEnded,
   showAvatar = false,
+  showPortrait = false,
   allowRejoin = false,
   rejoinLeftMs = null,
   onDropped,
@@ -220,19 +224,19 @@ export default function LiveInterview({
   }
 
   return (
-    <div className="relative flex h-dvh max-h-dvh flex-col overflow-hidden bg-[#070908]">
+    <div className="relative flex h-dvh max-h-dvh flex-col overflow-hidden bg-[var(--color-panel)] text-[var(--color-fg)]">
       <IntegrityWarningBanner warnings={liveWarnings} />
 
-      <div className="hud-grid pointer-events-none absolute inset-0 opacity-70" />
+      <div className="hud-grid pointer-events-none absolute inset-0 opacity-40" />
       <div
         className="pointer-events-none absolute inset-0"
         style={{
           background:
             presenceMode === "speaking"
-              ? "radial-gradient(ellipse 55% 45% at 18% 42%, rgba(155,227,70,0.18), transparent 62%)"
+              ? "radial-gradient(ellipse 55% 45% at 22% 46%, var(--bg-glow-1), transparent 62%)"
               : presenceMode === "listening"
-                ? "radial-gradient(ellipse 70% 55% at 72% 45%, rgba(107,184,47,0.14), transparent 60%)"
-                : "radial-gradient(ellipse 50% 40% at 50% 0%, rgba(107,184,47,0.1), transparent 55%)",
+                ? "radial-gradient(ellipse 70% 55% at 72% 45%, var(--bg-glow-2), transparent 60%)"
+                : "radial-gradient(ellipse 50% 40% at 50% 0%, var(--bg-glow-2), transparent 55%)",
         }}
       />
 
@@ -254,7 +258,7 @@ export default function LiveInterview({
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-accent)]/30 bg-black/40 px-2.5 py-1 text-[10px] font-semibold tracking-[0.18em] text-[var(--color-accent)] uppercase">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-accent-dim)] px-2.5 py-1 text-[10px] font-semibold tracking-[0.18em] text-[var(--color-accent)] uppercase">
             <span
               className={`h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] ${live ? "hud-rec" : ""}`}
             />
@@ -268,21 +272,22 @@ export default function LiveInterview({
       </header>
 
       <div className="relative z-10 flex min-h-0 flex-1 flex-col gap-3 p-3 sm:p-4 md:flex-row">
-        <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-black shadow-[0_0_80px_rgba(107,184,47,0.08)] ring-1 ring-[var(--color-accent)]/25">
+        <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)] shadow-[var(--shadow-card)]">
           {showAvatar ? (
             <video
               ref={avatarVideoRef}
-              className="h-full w-full bg-black object-cover"
+              className="h-full w-full bg-[var(--color-panel-deep)] object-cover"
               playsInline
               muted
               autoPlay
             />
           ) : (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-4 bg-black/50 px-4">
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 pt-16 pb-4">
               <PresenceOrb
                 mode={presenceMode}
                 localStream={lk.localStream}
                 remoteStream={lk.remoteStream}
+                avatarSrc={showPortrait ? interviewerPortrait : undefined}
               />
               {lk.connectionQuality !== "unknown" && (
                 <p className="text-[10px] tracking-[0.16em] text-[var(--color-muted)] uppercase">
@@ -292,7 +297,9 @@ export default function LiveInterview({
             </div>
           )}
 
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/40" />
+          {showAvatar && (
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/40" />
+          )}
           <HudCorners />
 
           {showAvatar && !lk.remoteVideoStream && (
@@ -307,18 +314,18 @@ export default function LiveInterview({
             <p className="text-[10px] font-semibold tracking-[0.22em] text-[var(--color-accent)] uppercase">
               {showAvatar ? "Interviewer avatar" : "Interviewer"}
             </p>
-            <p className="mt-0.5 text-base font-medium text-white">{interviewer}</p>
+            <p className="mt-0.5 text-base font-medium text-[var(--color-fg)]">{interviewer}</p>
             {session.interviewerTitle ? (
-              <p className="text-[11px] text-white/55">{session.interviewerTitle}</p>
+              <p className="text-[11px] text-[var(--color-muted)]">{session.interviewerTitle}</p>
             ) : null}
           </div>
         </section>
 
         <section
-          className={`relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-black shadow-[0_0_80px_rgba(107,184,47,0.08)] ${
+          className={`relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl border bg-[var(--color-panel-deep)] shadow-[var(--shadow-card)] ${
             liveWarnings.length
-              ? "ring-2 ring-[var(--color-danger)]"
-              : "ring-1 ring-[var(--color-accent)]/25"
+              ? "border-[var(--color-danger)] ring-2 ring-[var(--color-danger)]"
+              : "border-[var(--color-line)]"
           }`}
         >
           <video
@@ -389,7 +396,7 @@ export default function LiveInterview({
         <div className="relative z-10 flex justify-center px-4 pb-1">
           <button
             type="button"
-            className="rounded-full border border-amber-400/50 bg-amber-500/20 px-4 py-2 text-[10px] font-semibold tracking-[0.18em] text-amber-200 uppercase"
+            className="rounded-full border border-[var(--color-warn)] bg-[var(--color-warn-surface)] px-4 py-2 text-[10px] font-semibold tracking-[0.18em] text-[var(--color-warn)] uppercase"
             onClick={() => void lk.unlockAudio()}
           >
             Tap to enable interviewer audio
@@ -404,19 +411,19 @@ export default function LiveInterview({
       )}
 
       {!session.livekit && (
-        <p className="relative z-10 px-4 pb-1 text-center text-sm text-amber-300">
+        <p className="relative z-10 px-4 pb-1 text-center text-sm text-[var(--color-warn)]">
           LiveKit is not configured — session {session.id} was created, but voice cannot connect yet.
         </p>
       )}
 
       <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
-      <div className="relative z-10 flex shrink-0 flex-col items-center gap-2 border-t border-[var(--color-accent)]/10 bg-black/40 px-4 py-3">
+      <div className="relative z-10 flex shrink-0 flex-col items-center gap-2 border-t border-[var(--color-line)] bg-[var(--color-panel)] px-4 py-3">
         {dropped && (
           <div className="flex max-w-lg flex-col items-center gap-2 text-center">
             {rejoinOpen ? (
               <>
-                <p className="text-xs text-white/70">
+                <p className="text-xs text-[var(--color-muted)]">
                   Same interview
                   {rejoinLeftMs != null ? ` · ${Math.ceil(rejoinLeftMs / 1000)}s left to rejoin` : ""}. Ending is
                   separate and opens the result.
@@ -425,13 +432,13 @@ export default function LiveInterview({
                   type="button"
                   disabled={rejoining}
                   onClick={() => void rejoinInterview()}
-                  className="rounded-full bg-[var(--color-accent)] px-5 py-2 text-[10px] font-semibold tracking-[0.2em] text-black uppercase disabled:opacity-50"
+                  className="rounded-full bg-[var(--color-accent)] px-5 py-2 text-[10px] font-semibold tracking-[0.2em] text-[var(--color-on-accent)] uppercase disabled:opacity-50"
                 >
                   {rejoining ? "Rejoining…" : "Rejoin"}
                 </button>
               </>
             ) : (
-              <p className="text-xs text-white/70">
+              <p className="text-xs text-[var(--color-muted)]">
                 {rejoinNote || "This interview can no longer be rejoined. Start a new interview."}
               </p>
             )}
@@ -439,7 +446,7 @@ export default function LiveInterview({
             <button
               type="button"
               onClick={() => onAbandon?.()}
-              className="text-[10px] font-semibold tracking-[0.16em] text-white/45 uppercase hover:text-white"
+              className="text-[10px] font-semibold tracking-[0.16em] text-[var(--color-muted)] uppercase hover:text-[var(--color-fg)]"
             >
               Start a new interview
             </button>
@@ -449,7 +456,7 @@ export default function LiveInterview({
           type="button"
           disabled={ending}
           onClick={() => void endInterview()}
-          className="rounded-full border border-white/15 px-5 py-2 text-[10px] font-semibold tracking-[0.2em] text-white/55 uppercase transition hover:border-[var(--color-danger)]/60 hover:text-white disabled:opacity-50"
+          className="rounded-full border border-[var(--color-line)] px-5 py-2 text-[10px] font-semibold tracking-[0.2em] text-[var(--color-muted)] uppercase transition hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
         >
           {ending ? "Closing…" : "End session"}
         </button>

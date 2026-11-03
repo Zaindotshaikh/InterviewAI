@@ -10,6 +10,8 @@ type Props = {
   /** Remote AI audio: drives speaking amplitude */
   remoteStream: MediaStream | null;
   compact?: boolean;
+  /** Headshot shown inside the orb. Green fill stays when this is omitted. */
+  avatarSrc?: string;
 };
 
 function useAmplitude(stream: MediaStream | null, enabled: boolean) {
@@ -70,7 +72,13 @@ const accent: Record<PresenceMode, string> = {
   thinking: "rgba(251, 191, 36, 0.5)",
 };
 
-export default function PresenceOrb({ mode, localStream, remoteStream, compact }: Props) {
+export default function PresenceOrb({
+  mode,
+  localStream,
+  remoteStream,
+  compact,
+  avatarSrc,
+}: Props) {
   const listenLevel = useAmplitude(localStream, mode === "listening");
   const speakLevel = useAmplitude(remoteStream, mode === "speaking");
   const level = mode === "listening" ? listenLevel : mode === "speaking" ? speakLevel : 0;
@@ -80,8 +88,16 @@ export default function PresenceOrb({ mode, localStream, remoteStream, compact }
   const glow = reactive ? 36 + level * 48 : mode === "thinking" ? 28 : mode === "connecting" ? 22 : 18;
   const ring = accent[mode];
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const size = compact ? "h-44 w-44" : "h-56 w-56";
-  const core = compact ? "h-32 w-32" : "h-40 w-40";
+  const size = compact
+    ? "h-44 w-44"
+    : avatarSrc
+      ? "h-44 w-44 sm:h-56 sm:w-56 lg:h-64 lg:w-64"
+      : "h-56 w-56";
+  const core = compact
+    ? "h-32 w-32"
+    : avatarSrc
+      ? "h-32 w-32 sm:h-40 sm:w-40 lg:h-48 lg:w-48"
+      : "h-40 w-40";
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -173,31 +189,43 @@ export default function PresenceOrb({ mode, localStream, remoteStream, compact }
             />
           ))}
 
-        {/* Core — fully filled sphere, no crescent */}
+        {/* Core — portrait when provided, otherwise a filled green sphere */}
         <motion.div
-          className={`relative ${core} overflow-hidden rounded-full`}
+          className={`relative ${core} overflow-hidden rounded-full ${
+            avatarSrc ? "border-[3px] border-[var(--color-panel)] ring-2 ring-[var(--color-accent)]" : ""
+          }`}
           animate={{ scale }}
           transition={{ type: "spring", stiffness: 160, damping: 16 }}
           style={{
-            background:
-              mode === "thinking"
+            background: avatarSrc
+              ? "var(--color-panel-deep)"
+              : mode === "thinking"
                 ? "radial-gradient(circle at 38% 32%, #f5e08a 0%, #d4a017 38%, #8a6a12 100%)"
                 : mode === "speaking"
                   ? "radial-gradient(circle at 38% 32%, #c8f06a 0%, #7ec32e 38%, #3d7a14 100%)"
                   : "radial-gradient(circle at 38% 32%, #b4e05a 0%, #6bb82f 40%, #2f6410 100%)",
-            boxShadow: `0 0 ${glow}px ${ring}`,
+            boxShadow: avatarSrc
+              ? `0 10px 28px rgba(18, 20, 18, 0.12), 0 0 ${glow}px ${ring}`
+              : `0 0 ${glow}px ${ring}`,
           }}
         >
-          {/* Soft top-left sheen — stays inside the green fill */}
-          <div
-            className="pointer-events-none absolute inset-0 rounded-full"
-            style={{
-              background:
-                "radial-gradient(circle at 34% 30%, rgba(255,255,255,0.38) 0%, rgba(255,255,255,0.08) 28%, transparent 52%)",
-            }}
-          />
+          {avatarSrc ? (
+            <img
+              src={avatarSrc}
+              alt=""
+              className="h-full w-full object-cover object-[center_18%]"
+            />
+          ) : (
+            <div
+              className="pointer-events-none absolute inset-0 rounded-full"
+              style={{
+                background:
+                  "radial-gradient(circle at 34% 30%, rgba(255,255,255,0.38) 0%, rgba(255,255,255,0.08) 28%, transparent 52%)",
+              }}
+            />
+          )}
 
-          {mode === "thinking" && (
+          {mode === "thinking" && !avatarSrc && (
             <div className="absolute inset-0 flex items-center justify-center gap-1.5">
               {[0, 1, 2].map((i) => (
                 <motion.span
