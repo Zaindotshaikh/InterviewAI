@@ -882,12 +882,14 @@ class InterviewFlow:
                 weight = st.slot("weight_kg").value
                 if height is not None and weight is not None:
                     height_phrase = self._body_height_phrase()
+                    line = body_confirm_line(self.state.language, height_phrase, weight)
                     move = self._move(
                         "confirm",
-                        f"Say exactly: I heard height {height_phrase} and weight {weight} kilograms. "
-                        "Is that correct?",
+                        "Say exactly this one sentence and nothing else. Forbidden: converting the height unit, "
+                        "changing the numbers, or asking a second question. Sentence: "
+                        f"{line}",
                     )
-                    move.verbatim = body_confirm_line(self.state.language, height_phrase, weight)
+                    move.verbatim = line
                     return move
             field_id = str(focus.get("field") or "")
             spec = self.bp.field_spec(field_id)
@@ -1722,13 +1724,15 @@ class InterviewFlow:
                 ids=["height_cm", "weight_kg"],
                 body=True,
             )
+            line = body_confirm_line(st.language, height_phrase, weight.value)
             move = self._move(
                 "confirm",
-                f"Say exactly: I heard height {height_phrase} and weight {weight.value} kilograms. "
-                "Is that correct?",
+                "Say exactly this one sentence and nothing else. Forbidden: converting the height unit, "
+                "changing the numbers, or asking a second question. Sentence: "
+                f"{line}",
                 events=events,
             )
-            move.verbatim = body_confirm_line(st.language, height_phrase, weight.value)
+            move.verbatim = line
             return move
 
         # 3. A captured value that needs reading back (phone numbers).

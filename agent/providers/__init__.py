@@ -9,11 +9,16 @@ from __future__ import annotations
 from typing import Any
 
 # Pure helpers — safe without LiveKit
-from providers.elevenlabs_voices import elevenlabs_language, elevenlabs_voice_for
+from providers.elevenlabs_voices import (
+    elevenlabs_language,
+    elevenlabs_voice_for,
+    pinned_elevenlabs_voice_id,
+)
 
 __all__ = [
     "elevenlabs_language",
     "elevenlabs_voice_for",
+    "pinned_elevenlabs_voice_id",
     "build_fallback_stt",
     "build_llm",
     "build_noise_cancellation",
@@ -29,7 +34,11 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in __all__ and name not in {"elevenlabs_language", "elevenlabs_voice_for"}:
+    if name in __all__ and name not in {
+        "elevenlabs_language",
+        "elevenlabs_voice_for",
+        "pinned_elevenlabs_voice_id",
+    }:
         from providers import factory
 
         return getattr(factory, name)
