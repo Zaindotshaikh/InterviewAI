@@ -466,6 +466,20 @@ def test_enrich_is_scheduled_after_the_move(blueprint):
     assert "clinical" not in client.schemas[0]["properties"]
 
 
+def test_screening_analyst_model_stays_mini_until_set(monkeypatch):
+    from config import get_settings
+
+    monkeypatch.delenv("SCREENING_ANALYST_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().screening_analyst_model == "gpt-4o-mini"
+        monkeypatch.setenv("SCREENING_ANALYST_MODEL", "gpt-4.1-mini")
+        get_settings.cache_clear()
+        assert get_settings().screening_analyst_model == "gpt-4.1-mini"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_analyst_eval_fixture_has_labeled_rows():
     from pathlib import Path
 

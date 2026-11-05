@@ -1941,7 +1941,7 @@ async def entrypoint(ctx: JobContext) -> None:
     analyzer = TurnAnalyzer(
         blueprint,
         api_key=settings.openai_api_key,
-        model=settings.director_model,
+        model=settings.screening_analyst_model or settings.director_model,
         clinical_model=settings.clinical_director_model,
         timeout_s=settings.director_timeout_seconds,
     )

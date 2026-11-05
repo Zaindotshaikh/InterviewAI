@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     # Reads each answer (intent, extracted facts, clinical grade, contradictions) as structured JSON.
     # Screening turns. Clinical grading stays on clinical_director_model.
     director_model: str = "gpt-4o-mini"
+    # Screening analyst only. Default matches director_model; flip SCREENING_ANALYST_MODEL to change it.
+    screening_analyst_model: str = "gpt-4o-mini"
     # Model used while grading clinical answers.
     clinical_director_model: str = "gpt-4o"
     # Give up on the analyst after this long and use the rule-based fallback so the call never stalls.
