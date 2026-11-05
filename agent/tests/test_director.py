@@ -21,6 +21,7 @@ class FakeClient:
         self.systems: list[str] = []
         self.schemas: list[dict] = []
         self.payloads: list[str] = []
+        self.max_tokens: list[int] = []
         self.delay = delay
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
@@ -31,11 +32,17 @@ class FakeClient:
         self.systems.append(str(messages[0]["content"]) if messages else "")
         self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
         self.payloads.append(str(messages[1]["content"]) if len(messages) > 1 else "")
+        self.max_tokens.append(int(kwargs.get("max_tokens") or 0))
         await asyncio.sleep(self.delay)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         if isinstance(reply, Exception):
             raise reply
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(reply)))])
+
+
+def analysis_calls(client: FakeClient) -> int:
+    """Count move-path requests. The background enrich call is separate."""
+    return sum("new_claims" not in schema.get("properties", {}) for schema in client.schemas)
 
 
 CITY = {
@@ -70,15 +77,20 @@ def test_screening_uses_fast_model_and_clinical_uses_stronger_model(blueprint): 
     asyncio.run(go())
     assert client.models == ["gpt-4o-mini", "gpt-4o"]
     assert "slot_updates" in client.schemas[0]["properties"]
+    assert "clinical" not in client.schemas[0]["properties"]
+    assert "quality" not in client.schemas[0]["properties"]
     assert "Screening extraction" in client.systems[0]
+    assert "Clinical grading" not in client.systems[0]
     clinical_props = client.schemas[1]["properties"]
-    assert "clinical" in clinical_props
+    assert "quality" in clinical_props
+    assert "clinical" not in clinical_props
     assert "slot_updates" not in clinical_props
     assert "care_updates" not in clinical_props
     assert "confirmation" not in clinical_props
     assert "experience_level" not in clinical_props
     assert "Screening extraction" not in client.systems[1]
     assert "Clinical grading" in client.systems[1]
+    assert client.max_tokens == [300, 300]
 
 
 def test_decide_uses_analysis_and_records_slot(blueprint):  # noqa: F811
@@ -103,7 +115,7 @@ def test_early_analysis_is_reused_when_transcript_matches(blueprint):  # noqa: F
         await director.decide("Pune ke liye apply kar rahi hoon")
 
     asyncio.run(go())
-    assert client.calls == 1
+    assert analysis_calls(client) == 1
     assert flow.state.slots["city"].value == "Pune"
 
 
@@ -119,8 +131,14 @@ def test_two_finals_in_one_turn_are_analyzed_once(blueprint):  # noqa: F811
         await director.decide("nine eight seven six five four")
 
     asyncio.run(go())
-    assert client.calls == 1
-    assert "nine eight seven six five four" in client.payloads[0]
+    assert analysis_calls(client) == 1
+    payloads = [
+        payload
+        for payload, schema in zip(client.payloads, client.schemas, strict=True)
+        if "new_claims" not in schema.get("properties", {})
+    ]
+    assert len(payloads) == 1
+    assert "nine eight seven six five four" in payloads[0]
 
 
 def test_punctuation_only_keeps_the_running_grade(blueprint):  # noqa: F811
@@ -134,7 +152,7 @@ def test_punctuation_only_keeps_the_running_grade(blueprint):  # noqa: F811
         await director.decide("I check the pulse")
 
     asyncio.run(go())
-    assert client.calls == 1
+    assert analysis_calls(client) == 1
 
 
 def test_changed_transcript_reruns_analysis(blueprint):  # noqa: F811
@@ -148,7 +166,7 @@ def test_changed_transcript_reruns_analysis(blueprint):  # noqa: F811
         await director.decide("Pune ke liye apply kar rahi hoon")
 
     asyncio.run(go())
-    assert client.calls == 2
+    assert analysis_calls(client) == 2
 
 
 def test_analyst_failure_falls_back_and_never_raises(blueprint):  # noqa: F811
@@ -188,3 +206,147 @@ def test_resume_from_persisted_state_does_not_regreet(blueprint):  # noqa: F811
     move = flow2.opening()
     assert move.kind == "resume"
     assert flow2.state.slots["city"].value == "Pune"
+
+
+def test_full_schema_keeps_nested_clinical_fields(blueprint, monkeypatch):
+    monkeypatch.setenv("ANALYST_SCHEMA", "full")
+    client = FakeClient([CITY, CITY])
+    analyzer = TurnAnalyzer(
+        blueprint,
+        api_key="x",
+        model="gpt-4o-mini",
+        clinical_model="gpt-4o",
+        client=client,
+        timeout_s=1.0,
+    )
+
+    async def go():
+        fallback = heuristic_analysis("Pune")
+        await analyzer.analyze("city", clinical=False, fallback=fallback)
+        await analyzer.analyze("clinical", clinical=True, fallback=fallback)
+
+    asyncio.run(go())
+    assert "clinical" in client.schemas[0]["properties"]
+    assert "new_claims" in client.schemas[0]["properties"]
+    assert "Clinical grading" in client.systems[0]
+    assert "slot_updates" not in client.schemas[1]["properties"]
+    assert client.max_tokens == [900, 900]
+
+
+def test_lean_schema_drops_grading_and_slots(blueprint):
+    from interview.analysis import CLINICAL_LEAN_FIELDS, SCREENING_LEAN_FIELDS, build_clinical_lean_schema, build_screening_lean_schema
+
+    screening = build_screening_lean_schema(blueprint)["properties"]
+    clinical = build_clinical_lean_schema(blueprint)["properties"]
+    assert set(screening) == set(SCREENING_LEAN_FIELDS)
+    assert set(clinical) == set(CLINICAL_LEAN_FIELDS)
+    for key in ("clinical", "quality", "covered_point_ids", "missing_point_ids", "red_flags", "needs_clarification"):
+        assert key not in screening
+    assert "slot_updates" not in clinical
+    assert "care_updates" not in clinical
+
+
+def test_lean_fields_keep_the_same_move_kind(blueprint):
+    from tests.test_flow import care, grade, make_flow, reach_care, reach_clinical, say
+
+    def kind(analysis, prep):
+        flow, _ = make_flow(blueprint)
+        prep(flow)
+        return flow.apply(analysis).kind
+
+    def opened(flow):
+        flow.opening()
+
+    city_full = say(("city", "Pune"), gist_en="from Pune", aside="the room is cold", new_claims=["lives in Pune"])
+    assert kind(city_full, opened) == kind(say(("city", "Pune")), opened)
+
+    def at_care(flow):
+        reach_care(flow)
+
+    refused = care("diaper_care", "refuses", "not comfortable")
+    refused.gist_en = "will not do diaper care"
+    refused.new_claims = ["refused diaper care"]
+    assert kind(refused, at_care) == kind(care("diaper_care", "refuses", "not comfortable"), at_care)
+
+    def at_clinical(flow):
+        reach_clinical(flow, experience=("1", "ward"))
+
+    full_grade = grade("partial", covered=["a"], missing=["b"])
+    full_grade.gist_en = "checked the pulse"
+    full_grade.new_claims = ["checks pulse"]
+    lean_grade = grade("partial", covered=["a"], missing=["b"])
+    assert lean_grade.clinical is not None and full_grade.clinical is not None
+    lean_grade.clinical.quote = ""
+    lean_grade.clinical.summary_en = ""
+    assert kind(full_grade, at_clinical) == kind(lean_grade, at_clinical)
+
+
+def test_previous_turn_enrichment_still_picks_contradiction_and_resume(blueprint):
+    from tests.test_flow import grade, make_flow, reach_clinical, say
+
+    clinical, _ = make_flow(blueprint)
+    reach_clinical(clinical, experience=("1", "ward"))
+    clinical.state.claims.append("3 years in ICU")
+    clinical.note_enrichment(
+        {
+            "new_claims": [],
+            "contradictions": [
+                {"claim_a": "3 years in ICU", "claim_b": "never worked in ICU", "note": "conflict"}
+            ],
+            "gist_en": "",
+            "aside": "",
+            "resume_mismatch": "",
+            "quote": "",
+            "summary_en": "",
+        }
+    )
+    probed = clinical.apply(grade("partial", covered=["x"], missing=["y"]))
+    assert probed.kind == "probe_contradiction"
+
+    bare, _ = make_flow(blueprint)
+    reach_clinical(bare, experience=("1", "ward"))
+    bare.state.claims.append("3 years in ICU")
+    assert bare.apply(grade("partial", covered=["x"], missing=["y"])).kind != "probe_contradiction"
+
+    resume, _ = make_flow(blueprint, resume="Staff nurse, 3 years ICU, Apollo Hospital Pune")
+    resume.opening()
+    resume.note_enrichment(
+        {
+            "new_claims": [],
+            "contradictions": [],
+            "gist_en": "",
+            "aside": "",
+            "resume_mismatch": "resume says 3 years ICU at Apollo; they said 1 year on a ward",
+            "quote": "",
+            "summary_en": "",
+        }
+    )
+    checked = resume.apply(say(("experience_years", "1"), ("experience_settings", "ward")))
+    assert checked.kind == "resume_check"
+
+
+def test_enrich_is_scheduled_after_the_move(blueprint):
+    enrich = {
+        "new_claims": ["lives in Pune"],
+        "contradictions": [],
+        "gist_en": "from Pune",
+        "aside": "",
+        "resume_mismatch": "",
+        "quote": "",
+        "summary_en": "",
+    }
+    client = FakeClient([CITY, enrich, CITY])
+    director, flow = build(blueprint, client)
+    flow.opening()
+
+    async def go():
+        await director.decide("Pune")
+        if director._enrich_tasks:
+            await asyncio.gather(*director._enrich_tasks)
+        await director.decide("Pune and Baner")
+
+    asyncio.run(go())
+    assert "lives in Pune" in flow.state.claims
+    assert "new_claims" in client.schemas[1]["properties"]
+    assert "slot_updates" not in client.schemas[1]["properties"]
+    assert "clinical" not in client.schemas[0]["properties"]

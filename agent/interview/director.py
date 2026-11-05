@@ -48,6 +48,7 @@ class Director:
         self.last_agent_text = ""
         self._finals: list[str] = []
         self._early: tuple[str, str, asyncio.Task[Any]] | None = None  # (text, payload, task)
+        self._enrich_tasks: list[asyncio.Task[Any]] = []
         self._is_listening_armed = is_listening_armed
 
     def _armed(self) -> bool:
@@ -115,8 +116,30 @@ class Director:
             self._early[2].cancel()
             self._early = None
 
+    def _collect_enrichment(self) -> None:
+        still: list[asyncio.Task[Any]] = []
+        for task in self._enrich_tasks:
+            if not task.done():
+                still.append(task)
+                continue
+            try:
+                data = task.result()
+            except Exception:  # noqa: BLE001
+                data = None
+            if isinstance(data, dict) and data:
+                self.flow.note_enrichment(data)
+        self._enrich_tasks = still
+
+    def _schedule_enrich(self, payload: str, *, clinical: bool) -> None:
+        if getattr(self.analyzer, "schema_mode", "full") != "lean" or not self.analyzer.available:
+            return
+        self._enrich_tasks.append(
+            asyncio.get_running_loop().create_task(self.analyzer.enrich(payload, clinical=clinical))
+        )
+
     async def decide(self, text: str) -> Move:
         """Turn the confirmed utterance into the next move."""
+        self._collect_enrichment()
         early, self._early = self._early, None
         self._finals = []
         if not self._armed():
@@ -129,6 +152,7 @@ class Director:
             return self.flow.noise_move()
 
         payload, fallback = self._prepare(text)
+        clinical = self.flow.wants_clinical_model
         if early and (early[1] == payload or same_spoken_words(early[0], text)):
             try:
                 analysis = await early[2]
@@ -137,9 +161,7 @@ class Director:
         else:
             if early:
                 early[2].cancel()
-            analysis = await self.analyzer.analyze(
-                payload, clinical=self.flow.wants_clinical_model, fallback=fallback
-            )
+            analysis = await self.analyzer.analyze(payload, clinical=clinical, fallback=fallback)
         # Care focus (intro or single item): recover clear हाँ/नहीं if the LLM omitted care_updates.
         # Experience-dump हाँ is still rejected inside recover_care_updates / infer_care_accept.
         if self.flow.state.focus.get("type") == "care":
@@ -150,6 +172,7 @@ class Director:
                 logger.info("care stance recovered from utterance for items=%s", items)
 
         analysis.raw_utterance = text
+        self.analyzer.last_source = analysis.source
         logger.info(
             "analysis source=%s intent=%s clarity=%s stage=%s model=%s latency=%.0fms",
             analysis.source,
@@ -181,4 +204,5 @@ class Director:
             )
         except Exception:  # noqa: BLE001
             logger.debug("tone resolve skipped", exc_info=True)
+        self._schedule_enrich(payload, clinical=clinical)
         return move

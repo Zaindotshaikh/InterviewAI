@@ -141,6 +141,9 @@ class InterviewFlow:
         self._phone_agree_rejects = 0
         self._last_user = ""
         self._pending_aside = ""
+        self._deferred_aside = ""
+        self._deferred_gist = ""
+        self._enrich_events: list[tuple[str, dict[str, Any]]] = []
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -174,7 +177,87 @@ class InterviewFlow:
         shown = ", ".join(f"{k}={v}" for k, v in facts.items() if k != "phone")
         return f"\nWhat you already know about the candidate (do not ask again): {shown}."
 
+    def note_enrichment(self, data: dict[str, Any]) -> None:
+        """Merge a finished enrich() into state. Move selection reads it on the next turn."""
+        st = self.state
+        for claim in data.get("new_claims") or []:
+            text = str(claim).strip()
+            if text and text not in st.claims:
+                st.claims.append(text)
+        del st.claims[:-30]
+        contras: list[dict[str, str]] = []
+        for item in data.get("contradictions") or []:
+            if not isinstance(item, dict) or not item.get("claim_a") or not item.get("claim_b"):
+                continue
+            contras.append({key: str(item.get(key) or "") for key in ("claim_a", "claim_b", "note")})
+        if contras:
+            st.pending_contradictions = contras[:3]
+        mismatch = " ".join(str(data.get("resume_mismatch") or "").split())[:240]
+        if mismatch:
+            st.pending_resume_mismatch = mismatch
+        gist = " ".join(str(data.get("gist_en") or "").split())[:300]
+        if gist:
+            for row in reversed(st.contradictions):
+                if row.get("resolved") and not str(row.get("resolution") or "").strip():
+                    row["resolution"] = gist
+                    break
+            self._deferred_gist = gist
+        aside = " ".join(str(data.get("aside") or "").split())[:200]
+        if aside:
+            self._deferred_aside = aside
+        quote = str(data.get("quote") or "").strip()[:300]
+        summary = str(data.get("summary_en") or "").strip()[:300]
+        if quote or summary:
+            self._fill_latest_grade_text(quote, summary)
+        self._enrich_events.append(
+            (
+                "analysis.enriched",
+                {
+                    "claims": len([c for c in (data.get("new_claims") or []) if str(c).strip()]),
+                    "contradictions": len(contras),
+                    "resume_mismatch": bool(mismatch),
+                },
+            )
+        )
+
+    def _fill_latest_grade_text(self, quote: str, summary: str) -> None:
+        area_id = self.state.current_area
+        if not area_id:
+            return
+        evidence = self.state.area_progress(area_id).evidence
+        if not evidence:
+            return
+        last = evidence[-1]
+        if quote and not str(last.get("quote") or "").strip():
+            last["quote"] = quote
+        if summary and not str(last.get("summary") or "").strip():
+            last["summary"] = summary
+
+    def _consume_deferred_enrich(self, a: TurnAnalysis) -> None:
+        """Apply the previous turn's enrich when this turn's analysis does not already have it.
+
+        Same-turn contradiction and resume checks live in `_screening` and `_clinical`.
+        The enrich call finishes after the move, so those checks use the previous turn.
+        """
+        st = self.state
+        if not a.contradictions and st.pending_contradictions:
+            a.contradictions = [dict(item) for item in st.pending_contradictions]
+            st.pending_contradictions = []
+        if not (a.resume_mismatch or "").strip() and st.pending_resume_mismatch:
+            a.resume_mismatch = st.pending_resume_mismatch
+            st.pending_resume_mismatch = ""
+        if not (a.aside or "").strip() and self._deferred_aside:
+            a.aside = self._deferred_aside
+            self._deferred_aside = ""
+        if not (a.gist_en or "").strip() and self._deferred_gist:
+            if a.intent == "off_topic" or (st.focus or {}).get("type") == "contradiction":
+                a.gist_en = self._deferred_gist
+            self._deferred_gist = ""
+
     def _wrap(self, move: Move, nervous: bool) -> Move:
+        if self._enrich_events:
+            move.events = list(self._enrich_events) + list(move.events)
+            self._enrich_events = []
         aside = (self._pending_aside or "").strip()
         self._pending_aside = ""
         if aside and move.verbatim and move.kind != "salary_holdout":
@@ -674,6 +757,7 @@ class InterviewFlow:
     # ------------------------------------------------------------------------------------------------- apply
 
     def apply(self, a: TurnAnalysis) -> Move:
+        self._consume_deferred_enrich(a)
         st = self.state
         st.turns += 1
         st.silence_level = 0

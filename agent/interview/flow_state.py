@@ -67,6 +67,9 @@ class FlowState:
     current_area: str | None = None
     claims: list[str] = field(default_factory=list)
     contradictions: list[dict[str, Any]] = field(default_factory=list)
+    # Filled by the background enrich call and applied on the next turn.
+    pending_contradictions: list[dict[str, Any]] = field(default_factory=list)
+    pending_resume_mismatch: str = ""
     contradiction_probes: int = 0
     pending_probe: str | None = None
     focus: dict[str, Any] = field(default_factory=dict)  # what the last question was about

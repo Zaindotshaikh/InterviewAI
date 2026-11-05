@@ -22,20 +22,15 @@ from pathlib import Path
 # Allow `python scripts/bench_analyst.py` from agent/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from interview.analysis import SYSTEM_PROMPT, build_schema, build_user_payload  # noqa: E402
+from interview.analysis import (  # noqa: E402
+    SYSTEM_PROMPT,
+    build_schema,
+    build_screening_lean_schema,
+    build_user_payload,
+    screening_lean_prompt,
+)
 from interview.blueprint import Blueprint  # noqa: E402
 from interview.latency import percentile  # noqa: E402
-
-LEAN_FIELDS = (
-    "intelligibility",
-    "intent",
-    "nervous",
-    "slot_updates",
-    "confirmation",
-    "care_updates",
-    "experience_level",
-    "answer_depth",
-)
 
 UTTERANCES = (
     ("city_hinglish", "main Pune se hoon, wahi city ke liye apply kar rahi hoon"),
@@ -54,28 +49,6 @@ def _redact(text: str) -> str:
         if secret and secret in text:
             text = text.replace(secret, "[redacted]")
     return text
-
-
-def _lean_schema(full: dict) -> dict:
-    props = {key: full["properties"][key] for key in LEAN_FIELDS}
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": list(props),
-        "properties": props,
-    }
-
-
-def _lean_prompt(full: str) -> str:
-    head = full.split("\n## Clinical grading", 1)[0].rstrip()
-    return (
-        head
-        + "\n\n## answer_depth\n"
-        + "When the interviewer asked an experience or nursing-practice probe (not a one-word screening "
-        + "slot), set sufficient if they gave concrete steps, checks, or duties; thin if only a vague yes / "
-        + "one short phrase with no detail; none when the question was not that kind of probe.\n\n"
-        + 'If a section does not apply, return empty arrays, "none" or false for it.'
-    )
 
 
 def _where() -> str:
@@ -152,8 +125,8 @@ async def main() -> None:
 
     blueprint = Blueprint.from_api(json.loads(BLUEPRINT_PATH.read_text(encoding="utf-8")))
     current = build_schema(blueprint)
-    lean = _lean_schema(current)
-    prompts = {"current": SYSTEM_PROMPT, "lean": _lean_prompt(SYSTEM_PROMPT)}
+    lean = build_screening_lean_schema(blueprint)
+    prompts = {"current": SYSTEM_PROMPT, "lean": screening_lean_prompt()}
     schemas = {"current": current, "lean": lean}
     limits = {"current": 900, "lean": 300}
     place = _where()
