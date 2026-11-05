@@ -85,6 +85,35 @@ CROWD_HELP_LINES = {
     "od-IN": "ମୁଁ ଗୋଟିଏ ରୁ ଅଧିକ ସ୍ୱର ଶୁଣୁଛି। ଦୟାକରି କେବଳ ପ୍ରାର୍ଥୀ କୁହନ୍ତୁ।",
 }
 
+# Spoken only after two heuristic care re-asks. No digits, so it can be cached later.
+CARE_YES_NO_LINES = {
+    "hi-IN": "कृपया सिर्फ हाँ या नहीं बोलिए। क्या आप यह देखभाल करने को तैयार हैं?",
+    "en-IN": "Please answer only yes or no. Are you willing to do this care?",
+    "mr-IN": "कृपया फक्त होय किंवा नाही सांगा. तुम्ही ही काळजी घ्यायला तयार आहात का?",
+    "gu-IN": "કૃપા કરીને ફક્ત હા અથવા ના કહો. શું તમે આ સંભાળ કરવા તૈયાર છો?",
+    "te-IN": "దయచేసి అవును లేదా కాదు మాత్రమే చెప్పండి. మీరు ఈ సంరక్షణ చేయడానికి సిద్ధంగా ఉన్నారా?",
+    "ta-IN": "தயவுசெய்து ஆம் அல்லது இல்லை மட்டும் சொல்லுங்கள். இந்த பராமரிப்பை செய்ய நீங்கள் தயாரா?",
+    "kn-IN": "ದಯವಿಟ್ಟು ಹೌದು ಅಥವಾ ಇಲ್ಲ ಮಾತ್ರ ಹೇಳಿ. ಈ ಆರೈಕೆ ಮಾಡಲು ನೀವು ಸಿದ್ಧರಿದ್ದೀರಾ?",
+    "ml-IN": "ദയവായി അതെ അല്ലെങ്കിൽ ഇല്ല എന്ന് മാത്രം പറയുക. ഈ പരിചരണം ചെയ്യാൻ നിങ്ങൾ തയ്യാറാണോ?",
+    "bn-IN": "অনুগ্রহ করে শুধু হ্যাঁ বা না বলুন। আপনি কি এই যত্ন করতে রাজি?",
+    "pa-IN": "ਕਿਰਪਾ ਕਰਕੇ ਸਿਰਫ਼ ਹਾਂ ਜਾਂ ਨਹੀਂ ਬੋਲੋ। ਕੀ ਤੁਸੀਂ ਇਹ ਦੇਖਭਾਲ ਕਰਨ ਲਈ ਤਿਆਰ ਹੋ?",
+    "od-IN": "ଦୟାକରି କେବଳ ହଁ କିମ୍ବା ନା କୁହନ୍ତୁ। ଆପଣ ଏହି ଯତ୍ନ କରିବାକୁ ପ୍ରସ୍ତୁତ କି?",
+}
+
+NEUTRAL_STOP_LINES = {
+    "hi-IN": "हम यहीं रुकते हैं। टीम का कोई व्यक्ति आपसे बात करेगा। धन्यवाद।",
+    "en-IN": "We'll stop here. A person from the team will follow up with you. Thank you.",
+    "mr-IN": "आपण इथे थांबतो. टीममधून कोणी तरी तुमच्याशी संपर्क करेल. धन्यवाद.",
+    "gu-IN": "અમે અહીં અટકીએ છીએ. ટીમમાંથી કોઈ તમારો સંપર્ક કરશે. આભાર.",
+    "te-IN": "మేము ఇక్కడ ఆపుతాం. బృందం నుండి ఎవరో మీకు తెలియజేస్తారు. ధన్యవాదాలు.",
+    "ta-IN": "நாங்கள் இங்கே நிறுத்துகிறோம். குழுவிலிருந்து ஒருவர் உங்களைத் தொடர்பு கொள்வார். நன்றி.",
+    "kn-IN": "ನಾವು ಇಲ್ಲಿಗೆ ನಿಲ್ಲಿಸುತ್ತೇವೆ. ತಂಡದಿಂದ ಯಾರೋ ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ. ಧನ್ಯವಾದ.",
+    "ml-IN": "ഞങ്ങൾ ഇവിടെ നിർത്തുന്നു. ടീമിൽ നിന്ന് ആരെങ്കിലും നിങ്ങളെ ബന്ധപ്പെടും. നന്ദി.",
+    "bn-IN": "আমরা এখানে থামছি। দলের কেউ আপনার সঙ্গে যোগাযোগ করবে। ধন্যবাদ।",
+    "pa-IN": "ਅਸੀਂ ਇੱਥੇ ਰੁਕਦੇ ਹਾਂ। ਟੀਮ ਵਿੱਚੋਂ ਕੋਈ ਤੁਹਾਡੇ ਨਾਲ ਗੱਲ ਕਰੇਗਾ। ਧੰਨਵਾਦ।",
+    "od-IN": "ଆମେ ଏଠାରେ ରୁହୁଛୁ। ଦଳରୁ କେହି ଜଣେ ଆପଣଙ୍କୁ ଯୋଗାଯୋଗ କରିବେ। ଧନ୍ୟବାଦ।",
+}
+
 # Spoken English digit words GPT-Live often emits for phone numbers.
 _PHONE_DIGIT_WORDS = frozenset(
     {
@@ -144,6 +173,8 @@ class InterviewFlow:
         self._deferred_aside = ""
         self._deferred_gist = ""
         self._enrich_events: list[tuple[str, dict[str, Any]]] = []
+        self._care_heuristic_streak = 0
+        self._care_confirm_asked = False
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -781,6 +812,16 @@ class InterviewFlow:
                 spec = self.bp.field_spec(u.field)
                 if spec is not None and spec.confirm:
                     u.confidence = min(float(u.confidence or 0.8), LOW_CONFIDENCE - 0.05)
+
+        if self._care_review_unresolved(a):
+            return self._wrap(self._needs_human_review([]), a.nervous)
+        if (
+            self._care_confirm_asked
+            and a.source != "heuristic"
+            and a.intelligibility != "unclear"
+        ):
+            self._care_heuristic_streak = 0
+            self._care_confirm_asked = False
 
         if a.intelligibility == "unclear":
             return self._wrap(self._unclear(), a.nervous)
@@ -1762,6 +1803,35 @@ class InterviewFlow:
             slot.status = "confirmed"
         return None
 
+    def _care_review_unresolved(self, a: TurnAnalysis) -> bool:
+        """The yes/no care line was already asked, and this turn still is not a real answer."""
+        if not self._care_confirm_asked or (self.state.focus or {}).get("type") != "care":
+            return False
+        return a.source == "heuristic" or a.intelligibility == "unclear"
+
+    def _care_yes_no(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        line = CARE_YES_NO_LINES.get(self.state.language, CARE_YES_NO_LINES["en-IN"])
+        move = self._move(
+            "ask_care_confirm",
+            "Ask only a yes or no about this care duty. Say exactly this and nothing more: " + line,
+            events=events,
+        )
+        move.verbatim = line
+        return move
+
+    def _needs_human_review(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        line = NEUTRAL_STOP_LINES.get(self.state.language, NEUTRAL_STOP_LINES["en-IN"])
+        move = self._close(
+            "needs_human_review",
+            "The care answer could not be heard clearly. Stop politely. Say a person from the team will follow up. "
+            "Do not say they failed and do not set a gate failure. Say exactly: "
+            + line,
+            "needs_human_review",
+        )
+        move.verbatim = line
+        move.events = events + move.events
+        return move
+
     def _reask_care_focus(self, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
         """Ask the current care question again without counting a persuasion or failing the gate."""
         st = self.state
@@ -1788,7 +1858,16 @@ class InterviewFlow:
         lim = self.bp.limits
 
         # A fallback is not a real answer. Do not persuade or fail the care gate on it.
-        if source == "heuristic":
+        # Two heuristic re-asks, then a verbatim yes/no. The next unresolved turn stops the call.
+        if source == "heuristic" and st.focus.get("type") == "care":
+            self._care_heuristic_streak += 1
+            if self._care_heuristic_streak >= 2:
+                self._care_confirm_asked = True
+                return self._care_yes_no(events)
+            reask = self._reask_care_focus(events)
+            if reask is not None:
+                return reask
+        elif source == "heuristic":
             reask = self._reask_care_focus(events)
             if reask is not None:
                 return reask

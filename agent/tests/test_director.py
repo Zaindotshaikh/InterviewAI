@@ -227,6 +227,28 @@ def test_care_fallback_does_not_fail_the_gate(blueprint):
     assert move.kind in ("ask_care", "ask_care_item")
 
 
+def test_three_heuristic_care_turns_need_human_review(blueprint):
+    from tests.test_flow import reach_care
+
+    client = FakeClient([RuntimeError("analyst down")])
+    director, flow = build(blueprint, client)
+    reach_care(flow)
+
+    async def go():
+        first = await director.decide("I won't answer")
+        second = await director.decide("I won't answer")
+        third = await director.decide("I won't answer")
+        return first, second, third
+
+    first, second, third = asyncio.run(go())
+    assert first.kind in ("ask_care", "ask_care_item")
+    assert second.kind == "ask_care_confirm"
+    assert second.verbatim
+    assert third.kind == "needs_human_review"
+    assert flow.state.outcome == "needs_human_review"
+    assert flow.state.gate_failed is None
+
+
 def test_llm_care_refusals_still_fail_the_gate(blueprint):
     from tests.test_flow import reach_care
 
