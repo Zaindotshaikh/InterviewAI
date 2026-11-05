@@ -17,11 +17,14 @@ class FakeClient:
     def __init__(self, replies: list[object], delay: float = 0.0) -> None:
         self.replies = list(replies)
         self.calls = 0
+        self.payloads: list[str] = []
         self.delay = delay
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def _create(self, **kwargs):  # noqa: ANN003
         self.calls += 1
+        messages = kwargs.get("messages") or []
+        self.payloads.append(str(messages[1]["content"]) if len(messages) > 1 else "")
         await asyncio.sleep(self.delay)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         if isinstance(reply, Exception):
@@ -51,6 +54,22 @@ def test_decide_uses_analysis_and_records_slot(blueprint):  # noqa: F811
 
     asyncio.run(go())
     assert flow.state.slots["city"].value == "Pune"
+
+
+def test_two_finals_in_one_turn_are_analyzed_once(blueprint):  # noqa: F811
+    """Scribe can commit 'nine eight seven' then 'six five four'. That is one turn."""
+    client = FakeClient([CITY], delay=0.05)
+    director, flow = build(blueprint, client)
+    flow.opening()
+
+    async def go():
+        director.on_final_transcript("nine eight seven")
+        director.on_final_transcript("six five four")
+        await director.decide("nine eight seven six five four")
+
+    asyncio.run(go())
+    assert client.calls == 1
+    assert "nine eight seven six five four" in client.payloads[0]
 
 
 def test_early_analysis_is_reused_when_transcript_matches(blueprint):  # noqa: F811

@@ -151,6 +151,18 @@ def build_llm(settings: Settings | None = None):
     return primary
 
 
+def _scribe_vad_silence_secs() -> float:
+    """Silence before Scribe commits a final. SCRIBE_VAD_SILENCE_SECS, default 0.5."""
+    raw = (os.environ.get("SCRIBE_VAD_SILENCE_SECS") or "0.5").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.5
+    if value <= 0:
+        return 0.5
+    return value
+
+
 def _scribe_language_hints(language: str) -> tuple[str, list[str]]:
     """Primary + secondary language codes for Scribe v2 realtime code-mix."""
     from providers.elevenlabs_voices import scribe_language_hints
@@ -180,7 +192,7 @@ def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: lis
     # and LiveKit fires transcription_timeout. Server VAD commits on silence so Flow
     # sees FINAL transcripts (digits, city, yes/no) on each pause.
     server_vad = {
-        "vad_silence_threshold_secs": 1.0,
+        "vad_silence_threshold_secs": _scribe_vad_silence_secs(),
         "vad_threshold": 0.4,
         "min_speech_duration_ms": 100,
         "min_silence_duration_ms": 100,
