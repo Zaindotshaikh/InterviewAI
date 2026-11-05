@@ -168,11 +168,23 @@ class LatencyTracker:
             return
         self._mark("filler_start")
 
-    def on_director_done(self, duration_s: float) -> None:
+    def on_director_done(
+        self,
+        duration_s: float,
+        *,
+        analyst_ms: float | None = None,
+        analyst_source: str | None = None,
+        hedged: bool | None = None,
+        schema: str | None = None,
+    ) -> None:
         if not self._enabled:
             return
         cur = self._ensure_turn()
         cur["director_ms"] = round(max(0.0, duration_s) * 1000, 1)
+        cur["analyst_ms"] = round(float(analyst_ms), 1) if isinstance(analyst_ms, (int, float)) else None
+        cur["analyst_source"] = analyst_source or None
+        cur["hedged"] = bool(hedged) if hedged is not None else None
+        cur["schema"] = schema if schema in ("lean", "full") else None
 
     def on_hook_end(self) -> None:
         if not self._enabled:
@@ -221,6 +233,10 @@ class LatencyTracker:
             "ttfa_confirm_ms": delta_ms("turn_confirm", "first_audio"),
             "filler_from_vad_ms": delta_ms("vad_speech_end", "filler_start"),
             "director_ms": cur.get("director_ms"),
+            "analyst_ms": cur.get("analyst_ms"),
+            "analyst_source": cur.get("analyst_source"),
+            "hedged": cur.get("hedged"),
+            "schema": cur.get("schema"),
             "llm_ttft_ms": cur.get("llm_ttft_ms"),
             "tts_ttfb_ms": cur.get("tts_ttfb_ms"),
             "eou_delay_ms": cur.get("eou_delay_ms"),

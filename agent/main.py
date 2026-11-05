@@ -1606,7 +1606,14 @@ class InterviewAgent(Agent):
             move = await self.director.decide(text)
         self._retune_endpointing()
         if self.latency is not None:
-            self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
+            analyzer = self.director.analyzer
+            self.latency.on_director_done(
+                (datetime.now(timezone.utc) - t0).total_seconds(),
+                analyst_ms=analyzer.last_latency_ms,
+                analyst_source=analyzer.last_source or None,
+                hedged=analyzer.hedged,
+                schema=analyzer.schema_mode if analyzer.schema_mode in ("lean", "full") else None,
+            )
         self._current_tone = move.tone or tone_for_kind(move.kind)
         # P2-04: Empathy allowed only when Move.tone dictates gentle/reassuring, never sticky across turns.
         self._empathy_hint = self._current_tone in ("gentle", "reassuring")

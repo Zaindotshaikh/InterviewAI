@@ -273,6 +273,33 @@ def test_llm_care_refusals_still_fail_the_gate(blueprint):
     assert director.analyzer.last_source == "llm"
 
 
+def test_turn_latency_event_includes_analyst_fields():
+    from interview.latency import LatencyTracker
+
+    class Backend:
+        async def post_event(self, interview_id, event_type, data=None):
+            return None
+
+    tracker = LatencyTracker(backend=Backend(), interview_id="i", enabled=True, spawn=lambda coro: coro.close())
+    tracker.on_hook_start(3)
+    tracker.on_director_done(
+        0.2,
+        analyst_ms=123.4,
+        analyst_source="llm",
+        hedged=True,
+        schema="lean",
+    )
+    tracker._finalize(force=True)
+    payload = tracker._turns[-1]
+    assert payload["director_ms"] == 200.0
+    assert payload["analyst_ms"] == 123.4
+    assert payload["analyst_source"] == "llm"
+    assert payload["hedged"] is True
+    assert payload["schema"] == "lean"
+    assert "ttfa_confirm_ms" in payload
+    assert "llm_ttft_ms" in payload
+
+
 def test_slow_first_call_is_hedged(blueprint, monkeypatch):
     monkeypatch.setenv("ANALYST_HEDGE_AFTER_SECS", "0.15")
     slow = {
