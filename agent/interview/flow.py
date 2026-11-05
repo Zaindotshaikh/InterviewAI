@@ -1575,12 +1575,15 @@ class InterviewFlow:
             care.stance, care.reason, care.evidence = u.stance, u.reason[:200], u.evidence[:200]
             events.append(("care.stance", {"item": u.item, "stance": u.stance}))
 
-    def _mark_care_focus_negative(self, intent: str) -> None:
+    def _mark_care_focus_negative(self, intent: str, *, source: str = "llm") -> None:
         """Apply no/idk on the current care focus when the analyst omitted care_updates.
 
         Essential (gate) items must land in a negative stance so persuasion can run. Non-gate
         items are marked too and then skipped — only gate_items enter the persuade loop.
+        A heuristic fallback is not a real refusal: leave the stance alone and re-ask.
         """
+        if source == "heuristic":
+            return
         st = self.state
         for item_id in st.focus.get("items", []):
             if self.bp.care_item(item_id) is None:
@@ -1620,7 +1623,7 @@ class InterviewFlow:
         elif a.intent in ("dont_know", "refusal") and focus_type == "care":
             # Gate duties (diaper): no/idk → hesitant/refuses so persuasion runs (up to max_persuasions).
             # Non-gate care: mark and move on — _screening_next only persuades gate_items.
-            self._mark_care_focus_negative(a.intent)
+            self._mark_care_focus_negative(a.intent, source=a.source)
         elif a.intent == "refusal" and focus_type in ("slots", "confirm"):
             # A denied phone read-back is "that number is wrong", not "skip my mobile".
             if not (focus_type == "confirm" and a.confirmation == "denied"):
@@ -1643,7 +1646,7 @@ class InterviewFlow:
             heard = self._could_not_hear(missed, events)
             if heard is not None:
                 return heard
-        return self._screening_next(events)
+        return self._screening_next(events, source=a.source)
 
     def _unheard_slot(self, a: TurnAnalysis) -> FieldSpec | None:
         """The focused fact is still empty after an answer that was not a real value."""
@@ -1759,9 +1762,36 @@ class InterviewFlow:
             slot.status = "confirmed"
         return None
 
-    def _screening_next(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+    def _reask_care_focus(self, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
+        """Ask the current care question again without counting a persuasion or failing the gate."""
+        st = self.state
+        if st.focus.get("type") != "care":
+            return None
+        items = [str(i) for i in (st.focus.get("items") or [])]
+        if not items:
+            return None
+        if all(st.care_state(i).stance in ("comfortable", "willing_with_training") for i in items):
+            return None
+        if len(items) > 1 or not st.care_intro_done:
+            return self._move(
+                "ask_care",
+                self.bp.care_intro or "Ask how comfortable they are with hands-on patient care.",
+                events=events,
+            )
+        item = self.bp.care_item(items[0])
+        if item is None:
+            return None
+        return self._move("ask_care_item", item.ask, events=events)
+
+    def _screening_next(self, events: list[tuple[str, dict[str, Any]]], *, source: str = "llm") -> Move:
         st = self.state
         lim = self.bp.limits
+
+        # A fallback is not a real answer. Do not persuade or fail the care gate on it.
+        if source == "heuristic":
+            reask = self._reask_care_focus(events)
+            if reask is not None:
+                return reask
 
         # 1. Essential duty the candidate is uncomfortable with: persuade up to the limit, then gate.
         for item in self.bp.gate_items:

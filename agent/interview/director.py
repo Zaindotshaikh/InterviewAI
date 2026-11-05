@@ -158,6 +158,8 @@ class Director:
                 analysis = await early[2]
             except Exception:  # noqa: BLE001
                 analysis = fallback
+            if analysis.source == "llm":
+                analysis.source = "early_reused"
         else:
             if early:
                 early[2].cancel()

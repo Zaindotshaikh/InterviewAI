@@ -119,6 +119,7 @@ def test_early_analysis_is_reused_when_transcript_matches(blueprint):  # noqa: F
     asyncio.run(go())
     assert analysis_calls(client) == 1
     assert flow.state.slots["city"].value == "Pune"
+    assert director.analyzer.last_source == "early_reused"
 
 
 def test_two_finals_in_one_turn_are_analyzed_once(blueprint):  # noqa: F811
@@ -208,6 +209,68 @@ def test_resume_from_persisted_state_does_not_regreet(blueprint):  # noqa: F811
     move = flow2.opening()
     assert move.kind == "resume"
     assert flow2.state.slots["city"].value == "Pune"
+
+
+def test_care_fallback_does_not_fail_the_gate(blueprint):
+    from tests.test_flow import reach_care
+
+    client = FakeClient([RuntimeError("analyst down")])
+    director, flow = build(blueprint, client)
+    reach_care(flow)
+    flow.state.care["diaper_care"].stance = "refuses"
+    flow.state.care["diaper_care"].persuasions = flow.bp.limits.max_persuasions
+
+    move = asyncio.run(director.decide("I won't answer"))
+    assert director.analyzer.last_source == "heuristic"
+    assert flow.state.gate_failed is None
+    assert flow.state.care["diaper_care"].persuasions == flow.bp.limits.max_persuasions
+    assert move.kind in ("ask_care", "ask_care_item")
+
+
+def test_llm_care_refusals_still_fail_the_gate(blueprint):
+    from tests.test_flow import reach_care
+
+    refusal = {
+        "intent": "refusal",
+        "intelligibility": "clear",
+        "nervous": False,
+        "slot_updates": [],
+        "confirmation": {"field": "", "result": "none"},
+        "care_updates": [{"item": "diaper_care", "stance": "refuses", "reason": "no"}],
+        "experience_level": "unknown",
+        "answer_depth": "none",
+    }
+    blank = {
+        "new_claims": [],
+        "contradictions": [],
+        "gist_en": "",
+        "aside": "",
+        "resume_mismatch": "",
+        "quote": "",
+        "summary_en": "",
+    }
+    client = FakeClient([refusal, blank, refusal, blank, refusal, blank])
+    director, flow = build(blueprint, client)
+    reach_care(flow)
+
+    async def turn(text: str):
+        move = await director.decide(text)
+        if director._enrich_tasks:
+            await asyncio.gather(*director._enrich_tasks)
+        return move
+
+    async def go():
+        first = await turn("I won't answer")
+        second = await turn("I will not tell")
+        third = await turn("I refuse to answer")
+        return first, second, third
+
+    first, second, third = asyncio.run(go())
+    assert first.kind == "persuade"
+    assert second.kind == "persuade"
+    assert third.kind == "gate_failed"
+    assert flow.state.gate_failed == "diaper_care"
+    assert director.analyzer.last_source == "llm"
 
 
 def test_slow_first_call_is_hedged(blueprint, monkeypatch):
