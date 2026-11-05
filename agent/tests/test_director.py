@@ -545,6 +545,64 @@ def test_enrich_is_scheduled_after_the_move(blueprint):
     assert "clinical" not in client.schemas[0]["properties"]
 
 
+def test_verbatim_cache_plays_static_lines_and_misses_dynamic_ones(caplog):
+    import logging
+
+    from interview.flow import CROWD_HELP_LINES, SALARY_HOLDOUT_LINES
+    from interview.phone_speech import phone_again_line, phone_ask_line, phone_confirm_line, phone_invalid_line
+    from interview.verbatim_cache import VerbatimCache, static_verbatim_lines
+
+    class _Stream:
+        def __init__(self) -> None:
+            self._done = False
+
+        def push_text(self, text: str) -> None:
+            self.text = text
+
+        def end_input(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return SimpleNamespace(frame=b"audio")
+
+    class _TTS:
+        def stream(self):
+            return _Stream()
+
+    lines = static_verbatim_lines("en-IN")
+    assert phone_ask_line("en-IN") in lines
+    assert phone_again_line("en-IN") in lines
+    assert SALARY_HOLDOUT_LINES["en-IN"] in lines
+    assert CROWD_HELP_LINES["en-IN"] in lines
+    assert phone_invalid_line("en-IN", "98765") not in lines
+    assert phone_confirm_line("en-IN", "98765 43210") not in lines
+    assert "{" not in "".join(lines)
+
+    cache = VerbatimCache(_TTS())
+
+    async def render():
+        cache.prepare("en-IN")
+        await cache._tasks["en-IN"]
+
+    asyncio.run(render())
+    with caplog.at_level(logging.INFO, logger="interview-agent"):
+        hit = cache.lookup(phone_ask_line("en-IN"), language="en-IN")
+        miss = cache.lookup(phone_confirm_line("en-IN", "98 76"), language="en-IN")
+    assert hit == [b"audio"]
+    assert miss is None
+    assert any("verbatim cache hit" in rec.message for rec in caplog.records)
+    assert any("verbatim cache miss" in rec.message for rec in caplog.records)
+
+
 def test_screening_analyst_model_stays_mini_until_set(monkeypatch):
     from config import get_settings
 

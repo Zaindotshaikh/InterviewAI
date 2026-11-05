@@ -70,6 +70,7 @@ from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
 from interview.speech import SpeechArbiter, await_playout, source_for_move
 from interview.flow import CROWD_COOLDOWN_S, RECOVERY_SPEECH_KINDS
+from interview.verbatim_cache import VerbatimCache
 from interview.voice_tone import tone_for_kind
 from providers import (
     SessionRefused,
@@ -788,6 +789,8 @@ class InterviewAgent(Agent):
             self.flow.state.language = profile.code
             if (fillers := self.session_ref.get("fillers")) is not None:
                 fillers.prepare(profile.code)
+            if (verbatim_cache := self.session_ref.get("verbatim_cache")) is not None:
+                verbatim_cache.prepare(profile.code)
             apply_language_profile(session, profile.code, settings)
             await self.backend.update_controller(
                 self.plan.interview_id,
@@ -891,6 +894,16 @@ class InterviewAgent(Agent):
         if (job_ctx := self.session_ref.get("job_ctx")) is not None:
             job_ctx.shutdown(reason="interview_complete")
 
+    def _verbatim_say(self, text: str):
+        """Play a cached clip when this exact sentence was rendered. Otherwise live TTS."""
+        cache = self.session_ref.get("verbatim_cache")
+        frames = None
+        if cache is not None:
+            frames = cache.lookup(text, language=self.flow.state.language)
+        if frames:
+            return lambda: self.session.say(text, audio=frames_iter(frames), allow_interruptions=True)
+        return lambda: self.session.say(text, allow_interruptions=True)
+
     async def speak_move(self, move: Move) -> None:
         """Say something unprompted (resume, silence nudges, goodbyes)."""
         self.spawn(self._persist(move.events))
@@ -960,7 +973,7 @@ class InterviewAgent(Agent):
                 # P2-08: Force verbatim (skip generate_reply) for high-risk / deterministic moves
                 await self.speak(
                     source,
-                    lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                    self._verbatim_say(move.verbatim),
                     detail=move.kind,
                 )
             else:
@@ -1643,7 +1656,7 @@ class InterviewAgent(Agent):
             self.director.note_assistant(move.verbatim)
             await self.speak(
                 "verbatim",
-                lambda: self.session.say(move.verbatim, allow_interruptions=True),
+                self._verbatim_say(move.verbatim),
                 wait=False,
                 detail=move.kind,
             )
@@ -2160,6 +2173,9 @@ async def entrypoint(ctx: JobContext) -> None:
         fillers = FillerPlayer(tts, settings.thinking_filler_probability)
         fillers.prepare(language)
         session_ref["fillers"] = fillers
+        verbatim_cache = VerbatimCache(tts)
+        verbatim_cache.prepare(language)
+        session_ref["verbatim_cache"] = verbatim_cache
 
     early = EarlyFiller(
         session=session,
