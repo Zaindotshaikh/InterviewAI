@@ -14,7 +14,7 @@ from tests.test_flow import blueprint, make_plan  # noqa: F401  (fixture re-expo
 
 
 class FakeClient:
-    def __init__(self, replies: list[object], delay: float = 0.0) -> None:
+    def __init__(self, replies: list[object], delay: float = 0.0, delays: list[float] | None = None) -> None:
         self.replies = list(replies)
         self.calls = 0
         self.models: list[str] = []
@@ -23,6 +23,7 @@ class FakeClient:
         self.payloads: list[str] = []
         self.max_tokens: list[int] = []
         self.delay = delay
+        self.delays = list(delays or [])
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def _create(self, **kwargs):  # noqa: ANN003
@@ -33,8 +34,9 @@ class FakeClient:
         self.schemas.append(kwargs["response_format"]["json_schema"]["schema"])
         self.payloads.append(str(messages[1]["content"]) if len(messages) > 1 else "")
         self.max_tokens.append(int(kwargs.get("max_tokens") or 0))
-        await asyncio.sleep(self.delay)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        delay = self.delays[self.calls - 1] if self.calls - 1 < len(self.delays) else self.delay
+        await asyncio.sleep(delay)
         if isinstance(reply, Exception):
             raise reply
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(reply)))])
@@ -206,6 +208,28 @@ def test_resume_from_persisted_state_does_not_regreet(blueprint):  # noqa: F811
     move = flow2.opening()
     assert move.kind == "resume"
     assert flow2.state.slots["city"].value == "Pune"
+
+
+def test_slow_first_call_is_hedged(blueprint, monkeypatch):
+    monkeypatch.setenv("ANALYST_HEDGE_AFTER_SECS", "0.15")
+    slow = {
+        "intent": "answer",
+        "intelligibility": "clear",
+        "slot_updates": [{"field": "city", "value": "Slow", "confidence": 0.9}],
+    }
+    fast = {
+        "intent": "answer",
+        "intelligibility": "clear",
+        "slot_updates": [{"field": "city", "value": "Pune", "confidence": 0.9}],
+    }
+    client = FakeClient([slow, fast], delays=[2.0, 0.01])
+    analyzer = TurnAnalyzer(blueprint, api_key="x", model="m", client=client, timeout_s=1.0)
+
+    result = asyncio.run(analyzer.analyze("Pune", clinical=False, fallback=heuristic_analysis("Pune")))
+    assert analyzer.hedged is True
+    assert client.calls == 2
+    assert result.slot_updates and result.slot_updates[0].value == "Pune"
+    assert result.source == "llm"
 
 
 def test_full_schema_keeps_nested_clinical_fields(blueprint, monkeypatch):

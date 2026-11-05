@@ -903,14 +903,12 @@ class TurnAnalyzer:
             system = CLINICAL_SYSTEM_PROMPT if clinical else SYSTEM_PROMPT
         schema = self._clinical_schema if clinical else self._schema
         self.last_model = model
+        self.hedged = False
         loop = asyncio.get_running_loop()
         started = loop.time()
         try:
             # Static system text first, per-turn JSON last, so the prefix can be cached.
-            resp = await asyncio.wait_for(
-                self._request(model, system, payload, schema, "turn_analysis"),
-                timeout=self._timeout,
-            )
+            resp = await self._hedged_request(model, system, payload, schema, "turn_analysis")
             data = json.loads(resp.choices[0].message.content or "{}")
             self.last_latency_ms = (loop.time() - started) * 1000
             analysis = TurnAnalysis.from_dict(data)
@@ -921,6 +919,66 @@ class TurnAnalyzer:
             self.last_source = fallback.source
             logger.warning("turn analysis failed (%s): %s", type(err).__name__, err)
             return fallback
+
+    def _hedge_after(self) -> float:
+        raw = (os.environ.get("ANALYST_HEDGE_AFTER_SECS") or "1.6").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            return 1.6
+        return value if value > 0 else 1.6
+
+    async def _hedged_request(
+        self,
+        model: str,
+        system: str,
+        payload: str,
+        schema: dict[str, Any],
+        name: str,
+    ) -> Any:
+        """One request, then a twin if the first is still quiet. The first valid body wins."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
+        first = asyncio.create_task(self._request(model, system, payload, schema, name))
+        second: asyncio.Task[Any] | None = None
+
+        def cancel_rest(winner: asyncio.Task[Any]) -> None:
+            for task in (first, second):
+                if task is not None and task is not winner and not task.done():
+                    task.cancel()
+
+        try:
+            quiet = min(self._hedge_after(), max(0.0, deadline - loop.time()))
+            done, _pending = await asyncio.wait({first}, timeout=quiet)
+            if first in done and not first.cancelled():
+                cancel_rest(first)
+                return first.result()
+            self.hedged = True
+            second = asyncio.create_task(self._request(model, system, payload, schema, name))
+            pending = {first, second}
+            errors: list[BaseException] = []
+            while pending:
+                left = deadline - loop.time()
+                if left <= 0:
+                    raise TimeoutError()
+                done, pending = await asyncio.wait(pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    raise TimeoutError()
+                for task in done:
+                    if task.cancelled():
+                        continue
+                    exc = task.exception()
+                    if exc is None:
+                        cancel_rest(task)
+                        return task.result()
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+            raise TimeoutError()
+        finally:
+            for task in (first, second):
+                if task is not None and not task.done():
+                    task.cancel()
 
     def _request(self, model: str, system: str, payload: str, schema: dict[str, Any], name: str) -> Any:
         return self._get_client().chat.completions.create(
