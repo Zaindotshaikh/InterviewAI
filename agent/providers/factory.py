@@ -143,10 +143,11 @@ def build_llm(settings: Settings | None = None):
             logger.exception("LLM FallbackAdapter unavailable; using primary only")
 
     logger.info(
-        "voice LLM model=%s http_read=%.0fs (Director stays %s)",
+        "voice LLM model=%s http_read=%.0fs (screening analyst=%s clinical analyst=%s)",
         settings.llm_model,
         settings.llm_http_timeout_seconds,
         settings.director_model,
+        settings.clinical_director_model,
     )
     return primary
 

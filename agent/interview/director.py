@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +21,16 @@ from interview.plan import classify_answer
 logger = logging.getLogger("interview-v2.director")
 
 RECENT_TURNS = 8
+
+
+def same_spoken_words(left: str, right: str) -> bool:
+    """True when only case, punctuation, or apostrophes differ."""
+    return _spoken_words(left) == _spoken_words(right)
+
+
+def _spoken_words(text: str) -> tuple[str, ...]:
+    cleaned = (text or "").casefold().replace("'", "").replace("’", "").replace("`", "")
+    return tuple(part for part in re.split(r"[^\w]+", cleaned) if part)
 
 
 class Director:
@@ -89,6 +100,9 @@ class Director:
         joined = " ".join(t for t in self._finals if t).strip()
         if classify_answer(joined) == "noise":
             return
+        # A period or a repeated commit is the same answer. Keep the grade already running.
+        if self._early is not None and same_spoken_words(self._early[0], joined):
+            return
         self._cancel_early()
         payload, fallback = self._prepare(joined)
         task = asyncio.get_running_loop().create_task(
@@ -115,7 +129,7 @@ class Director:
             return self.flow.noise_move()
 
         payload, fallback = self._prepare(text)
-        if early and early[1] == payload:
+        if early and (early[1] == payload or same_spoken_words(early[0], text)):
             try:
                 analysis = await early[2]
             except Exception:  # noqa: BLE001
@@ -137,11 +151,12 @@ class Director:
 
         analysis.raw_utterance = text
         logger.info(
-            "analysis source=%s intent=%s clarity=%s stage=%s latency=%.0fms",
+            "analysis source=%s intent=%s clarity=%s stage=%s model=%s latency=%.0fms",
             analysis.source,
             analysis.intent,
             analysis.intelligibility,
             self.flow.stage,
+            self.analyzer.last_model,
             self.analyzer.last_latency_ms,
         )
         move = self.flow.apply(analysis)

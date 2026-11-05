@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     stt_provider: SttProvider | None = None
     tts_provider: TtsProvider | None = None
     llm_provider: LlmProvider | None = None
-    # Voice wording only — keep Director on director_model (stronger).
+    # Spoken wording only. Screening analysis uses director_model; clinical uses clinical_director_model.
     llm_model: str = "gpt-4o-mini"
     # httpx read timeout for streaming voice LLM (plugin default 5s is too tight under load).
     llm_http_timeout_seconds: float = 25.0
@@ -118,8 +118,9 @@ class Settings(BaseSettings):
     v2_max_minutes: int = 25
     # --- Interview director (per-turn analyst that reads the candidate and steers the flow) ---
     # Reads each answer (intent, extracted facts, clinical grade, contradictions) as structured JSON.
-    director_model: str = "gpt-4o"
-    # Model used while grading clinical answers; same default.
+    # Screening turns. Clinical grading stays on clinical_director_model.
+    director_model: str = "gpt-4o-mini"
+    # Model used while grading clinical answers.
     clinical_director_model: str = "gpt-4o"
     # Give up on the analyst after this long and use the rule-based fallback so the call never stalls.
     director_timeout_seconds: float = 4.5
