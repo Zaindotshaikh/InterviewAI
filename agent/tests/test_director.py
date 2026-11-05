@@ -464,3 +464,24 @@ def test_enrich_is_scheduled_after_the_move(blueprint):
     assert "new_claims" in client.schemas[1]["properties"]
     assert "slot_updates" not in client.schemas[1]["properties"]
     assert "clinical" not in client.schemas[0]["properties"]
+
+
+def test_analyst_eval_fixture_has_labeled_rows():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "fixtures" / "analyst_eval.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) >= 30
+    languages = {row["language"] for row in rows}
+    assert {"hi-IN", "mr-IN", "ta-IN"} <= languages
+    assert any(row["id"] == "phone_digit_groups" for row in rows)
+    assert any(row["id"] == "garbled_heuristic" for row in rows)
+    assert sum(1 for row in rows if row["stage"] == "clinical") >= 6
+    stances = {row["expected_care_stance"] for row in rows}
+    assert {"comfortable", "refuses", "hesitant"} <= stances
+    for row in rows:
+        assert row["expected_intent"]
+        assert isinstance(row["expected_slot_updates"], list)
+        assert "expected_care_stance" in row
+        assert "expected_clinical_quality" in row
+    assert any(row.get("needs_review") for row in rows)
