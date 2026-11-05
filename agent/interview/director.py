@@ -50,6 +50,7 @@ class Director:
         self._early: tuple[str, str, asyncio.Task[Any]] | None = None  # (text, payload, task)
         self._enrich_tasks: list[asyncio.Task[Any]] = []
         self._is_listening_armed = is_listening_armed
+        self.last_analysis = None
 
     def _armed(self) -> bool:
         if self._is_listening_armed is None:
@@ -146,6 +147,7 @@ class Director:
 
     async def decide(self, text: str) -> Move:
         """Turn the confirmed utterance into the next move."""
+        self.last_analysis = None
         self._collect_enrichment()
         early, self._early = self._early, None
         self._finals = []
@@ -191,6 +193,7 @@ class Director:
             self.analyzer.last_model,
             self.analyzer.last_latency_ms,
         )
+        self.last_analysis = analysis
         move = self.flow.apply(analysis)
         # Tone is outside Flow policy. Empathy override only when DIRECTOR_EMPATHY_TONE=true.
         try:

@@ -70,6 +70,7 @@ from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
 from interview.speech import SpeechArbiter, await_playout, source_for_move
 from interview.flow import CROWD_COOLDOWN_S, RECOVERY_SPEECH_KINDS
+from interview.optimistic import needs_repair, optimistic_eligible, preview_filled_move
 from interview.verbatim_cache import VerbatimCache
 from interview.voice_tone import tone_for_kind
 from providers import (
@@ -894,6 +895,30 @@ class InterviewAgent(Agent):
         if (job_ctx := self.session_ref.get("job_ctx")) is not None:
             job_ctx.shutdown(reason="interview_complete")
 
+    async def _speak_optimistic(self, move: Move, turn_ctx, text: str) -> None:  # noqa: ANN001
+        """Start the next ask before the analyst returns. Cascade only."""
+        if move.verbatim:
+            self.director.note_assistant(move.verbatim)
+            await self.speak(
+                "verbatim",
+                self._verbatim_say(move.verbatim),
+                wait=False,
+                detail=move.kind,
+            )
+            return
+        directive = (
+            f"CONTROLLER DIRECTIVE: {move.directive}\n"
+            f"{native_script_reminder(self.flow.state.language)}\n"
+            "Do not open with अच्छा, ठीक है, हाँ जी, okay, right, or बरं. Start with the question."
+        )
+        turn_ctx.add_message(role="system", content=directive)
+        await self.speak(
+            "director",
+            lambda: self._director_reply(turn_ctx, text, directive),
+            wait=False,
+            detail=move.kind,
+        )
+
     def _verbatim_say(self, text: str):
         """Play a cached clip when this exact sentence was rendered. Otherwise live TTS."""
         cache = self.session_ref.get("verbatim_cache")
@@ -1611,12 +1636,34 @@ class InterviewAgent(Agent):
                         "acknowledgement; continue straight on from it."
                     )
 
+        queued = self.flow.pop_repair()
+        if queued is not None:
+            self.director.note_user(text)
+            self._record_user_move(queued, text, events)
+            self._remember_move(queued)
+            await self._speak_optimistic(queued, turn_ctx, text)
+            if self.latency is not None:
+                self.latency.on_hook_end()
+            self._finish_if_needed(queued)
+            raise StopResponse()
+
         elapsed_min = (datetime.now(timezone.utc) - self._started_at).total_seconds() / 60.0
         t0 = datetime.now(timezone.utc)
-        if elapsed_min >= settings.v2_max_minutes and not self.flow.done:
+        time_up = elapsed_min >= settings.v2_max_minutes and not self.flow.done
+        preview = None
+        if not time_up and settings.optimistic_screening and optimistic_eligible(self.flow, text, enabled=True):
+            preview = preview_filled_move(self.flow, text)
+            if preview is not None:
+                await self._speak_optimistic(preview, turn_ctx, text)
+        if time_up:
             move = self.flow.force_complete("time")
         else:
             move = await self.director.decide(text)
+        if preview is not None and needs_repair(self.director.last_analysis):
+            self.flow.queue_repair(move)
+            move = preview
+        elif preview is not None:
+            move = preview
         self._retune_endpointing()
         if self.latency is not None:
             analyzer = self.director.analyzer
@@ -1650,6 +1697,12 @@ class InterviewAgent(Agent):
                 " They answered while you were still speaking. Acknowledge what they just said and ask only "
                 "what this directive says."
             )
+        if preview is not None:
+            # The next ask is already playing. The live flow was applied after that speech started.
+            if self.latency is not None:
+                self.latency.on_hook_end()
+            self._finish_if_needed(move)
+            raise StopResponse()
         if move.verbatim:
             # The mobile step is one fixed sentence. The dialogue model was adding the next
             # question ("what is your age?") in the same breath as the number read-back.

@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     director_model: str = "gpt-4o-mini"
     # Screening analyst only. Default matches director_model; flip SCREENING_ANALYST_MODEL to change it.
     screening_analyst_model: str = "gpt-4o-mini"
+    # Speak the next non-phone screening question before the analyst returns. Off until flipped.
+    optimistic_screening: bool = False
     # Model used while grading clinical answers.
     clinical_director_model: str = "gpt-4o"
     # Give up on the analyst after this long and use the rule-based fallback so the call never stalls.

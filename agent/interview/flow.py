@@ -190,6 +190,7 @@ class InterviewFlow:
         self._care_heuristic_streak = 0
         self._care_confirm_asked = False
         self._enrich_snapshot: dict[str, Any] | None = None
+        self._repair_queue: list[Move] = []
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -222,6 +223,15 @@ class InterviewFlow:
             return ""
         shown = ", ".join(f"{k}={v}" for k, v in facts.items() if k != "phone")
         return f"\nWhat you already know about the candidate (do not ask again): {shown}."
+
+    def queue_repair(self, move: Move) -> None:
+        """Hold a move for the next turn. Used when an optimistic ask was already spoken."""
+        self._repair_queue.append(move)
+
+    def pop_repair(self) -> Move | None:
+        if not self._repair_queue:
+            return None
+        return self._repair_queue.pop(0)
 
     def enrich_snapshot(self) -> dict[str, Any]:
         """Slot values and claims at the moment an enrich call starts."""

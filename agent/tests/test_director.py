@@ -636,3 +636,72 @@ def test_analyst_eval_fixture_has_labeled_rows():
         assert "expected_care_stance" in row
         assert "expected_clinical_quality" in row
     assert any(row.get("needs_review") for row in rows)
+
+
+def test_optimistic_screening_speaks_before_apply_and_queues_a_repair(blueprint):
+    from interview.analysis import TurnAnalysis
+    from interview.optimistic import optimistic_eligible, run_optimistic_turn
+    from tests.test_flow import make_flow, say
+
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    text = "I live in Pune"
+    assert optimistic_eligible(flow, text, enabled=True)
+    assert not optimistic_eligible(flow, text, enabled=False)
+    assert not optimistic_eligible(flow, "Pune", enabled=True)
+    flow._set_focus("slots", ids=["phone"])
+    assert not optimistic_eligible(flow, text, enabled=True)
+    flow._set_focus("slots", ids=["height_cm", "weight_kg"])
+    assert not optimistic_eligible(flow, text, enabled=True)
+    flow._set_focus("confirm", field="phone", ids=["phone"])
+    assert not optimistic_eligible(flow, text, enabled=True)
+    flow._set_focus("slots", ids=["city"])
+
+    spoken_status: list[str] = []
+
+    def speak(move):
+        spoken_status.append(flow.state.slot("city").status)
+        spoken_status.append(move.kind)
+
+    async def go():
+        move, order = await run_optimistic_turn(
+            flow=flow,
+            text=text,
+            analyze=lambda: _ready(say(("city", "Pune"))),
+            speak=speak,
+            enabled=True,
+        )
+        return move, order
+
+    move, order = asyncio.run(go())
+    assert order == ["speak", "analyze", "apply"]
+    assert spoken_status[0] == "empty"
+    assert move.kind == "ask_field"
+    assert flow.state.slot("city").status != "empty"
+    assert flow.pop_repair() is None
+
+    unclear_flow, _ = make_flow(blueprint)
+    unclear_flow.opening()
+
+    async def repair():
+        spoken, repair_order = await run_optimistic_turn(
+            flow=unclear_flow,
+            text=text,
+            analyze=lambda: _ready(TurnAnalysis(intelligibility="unclear", intent="answer")),
+            speak=lambda _move: None,
+            enabled=True,
+        )
+        return spoken, repair_order
+
+    spoken, repair_order = asyncio.run(repair())
+    assert repair_order == ["speak", "analyze", "apply"]
+    assert spoken.kind == "ask_field"
+    queued = unclear_flow.pop_repair()
+    assert queued is not None
+    assert queued.kind in ("ask_repeat", "crowd_help", "noise_help")
+    assert unclear_flow.state.slot("city").status == "empty"
+    assert unclear_flow.state.gate_failed is None
+
+
+async def _ready(analysis):
+    return analysis
