@@ -175,6 +175,7 @@ class InterviewFlow:
         self._enrich_events: list[tuple[str, dict[str, Any]]] = []
         self._care_heuristic_streak = 0
         self._care_confirm_asked = False
+        self._enrich_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -208,8 +209,17 @@ class InterviewFlow:
         shown = ", ".join(f"{k}={v}" for k, v in facts.items() if k != "phone")
         return f"\nWhat you already know about the candidate (do not ask again): {shown}."
 
-    def note_enrichment(self, data: dict[str, Any]) -> None:
+    def enrich_snapshot(self) -> dict[str, Any]:
+        """Slot values and claims at the moment an enrich call starts."""
+        return {
+            "slots": {fid: slot.value for fid, slot in self.state.slots.items()},
+            "claims": list(self.state.claims),
+        }
+
+    def note_enrichment(self, data: dict[str, Any], *, snapshot: dict[str, Any] | None = None) -> None:
         """Merge a finished enrich() into state. Move selection reads it on the next turn."""
+        if snapshot is not None:
+            self._enrich_snapshot = snapshot
         st = self.state
         for claim in data.get("new_claims") or []:
             text = str(claim).strip()
@@ -264,6 +274,58 @@ class InterviewFlow:
         if summary and not str(last.get("summary") or "").strip():
             last["summary"] = summary
 
+    @staticmethod
+    def _slot_token(value: Any) -> str:
+        text = "" if value is None else str(value).strip()
+        if re.fullmatch(r"\d+\.0+", text):
+            return text.split(".", 1)[0]
+        return text
+
+    def _slot_now(self, field_id: str) -> str:
+        slot = self.state.slots.get(field_id)
+        if slot is None or slot.value is None:
+            return ""
+        return self._slot_token(slot.value)
+
+    def _value_mentioned(self, value: str, blob: str) -> bool:
+        text = " ".join(str(value or "").split())
+        if len(text) >= 2 and text.casefold() in blob.casefold():
+            return True
+        digits = re.sub(r"\D", "", text)
+        blob_digits = re.sub(r"\D", "", blob)
+        return bool(digits) and digits in blob_digits
+
+    def _contradiction_stale(self, item: dict[str, Any]) -> bool:
+        """True when the claim or a slot it names changed after enrich started."""
+        snap = self._enrich_snapshot
+        if not snap:
+            return False
+        claim_a = str(item.get("claim_a") or "").strip()
+        claim_b = str(item.get("claim_b") or "").strip()
+        prior = [str(c) for c in (snap.get("claims") or [])]
+        if claim_a and claim_a in prior and claim_a not in self.state.claims:
+            return True
+        blob = f"{claim_a} {claim_b}"
+        for fid, old in (snap.get("slots") or {}).items():
+            now = self._slot_now(str(fid))
+            old_text = self._slot_token(old)
+            if old_text == now:
+                continue
+            if self._value_mentioned(old_text, blob) or self._value_mentioned(now, blob):
+                return True
+        return False
+
+    def _resume_enrich_stale(self) -> bool:
+        snap = self._enrich_snapshot
+        if not snap:
+            return False
+        slots = snap.get("slots") or {}
+        for fid in ("experience_years", "experience_settings"):
+            old_text = self._slot_token(slots.get(fid))
+            if old_text != self._slot_now(fid):
+                return True
+        return False
+
     def _consume_deferred_enrich(self, a: TurnAnalysis) -> None:
         """Apply the previous turn's enrich when this turn's analysis does not already have it.
 
@@ -272,10 +334,13 @@ class InterviewFlow:
         """
         st = self.state
         if not a.contradictions and st.pending_contradictions:
-            a.contradictions = [dict(item) for item in st.pending_contradictions]
+            fresh = [item for item in st.pending_contradictions if not self._contradiction_stale(item)]
+            if fresh:
+                a.contradictions = [dict(item) for item in fresh]
             st.pending_contradictions = []
         if not (a.resume_mismatch or "").strip() and st.pending_resume_mismatch:
-            a.resume_mismatch = st.pending_resume_mismatch
+            if not self._resume_enrich_stale():
+                a.resume_mismatch = st.pending_resume_mismatch
             st.pending_resume_mismatch = ""
         if not (a.aside or "").strip() and self._deferred_aside:
             a.aside = self._deferred_aside

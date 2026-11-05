@@ -126,16 +126,23 @@ class Director:
                 data = task.result()
             except Exception:  # noqa: BLE001
                 data = None
+            snapshot = None
+            if isinstance(data, tuple) and len(data) == 2:
+                snapshot, data = data
             if isinstance(data, dict) and data:
-                self.flow.note_enrichment(data)
+                self.flow.note_enrichment(data, snapshot=snapshot if isinstance(snapshot, dict) else None)
         self._enrich_tasks = still
 
     def _schedule_enrich(self, payload: str, *, clinical: bool) -> None:
         if getattr(self.analyzer, "schema_mode", "full") != "lean" or not self.analyzer.available:
             return
-        self._enrich_tasks.append(
-            asyncio.get_running_loop().create_task(self.analyzer.enrich(payload, clinical=clinical))
-        )
+        snapshot = self.flow.enrich_snapshot()
+
+        async def _run() -> tuple[dict[str, Any], dict[str, Any] | None]:
+            data = await self.analyzer.enrich(payload, clinical=clinical)
+            return snapshot, data
+
+        self._enrich_tasks.append(asyncio.get_running_loop().create_task(_run()))
 
     async def decide(self, text: str) -> Move:
         """Turn the confirmed utterance into the next move."""

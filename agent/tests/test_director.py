@@ -461,6 +461,63 @@ def test_previous_turn_enrichment_still_picks_contradiction_and_resume(blueprint
     assert checked.kind == "resume_check"
 
 
+def test_stale_enrich_is_skipped_and_fresh_enrich_still_applies(blueprint):
+    from tests.test_flow import grade, make_flow, reach_clinical, say
+
+    contra = {
+        "new_claims": [],
+        "contradictions": [
+            {"claim_a": "3 years in ICU", "claim_b": "never worked in ICU", "note": "conflict"}
+        ],
+        "gist_en": "",
+        "aside": "",
+        "resume_mismatch": "",
+        "quote": "",
+        "summary_en": "",
+    }
+    stale, _ = make_flow(blueprint)
+    reach_clinical(stale, experience=("3", "ICU"))
+    stale.state.claims.append("3 years in ICU")
+    snap = stale.enrich_snapshot()
+    stale.note_enrichment(contra, snapshot=snap)
+    stale.state.slot("experience_years").value = "1"
+    assert stale.apply(grade("partial", covered=["x"], missing=["y"])).kind != "probe_contradiction"
+
+    fresh, _ = make_flow(blueprint)
+    reach_clinical(fresh, experience=("3", "ICU"))
+    fresh.state.claims.append("3 years in ICU")
+    fresh.note_enrichment(contra, snapshot=fresh.enrich_snapshot())
+    assert fresh.apply(grade("partial", covered=["x"], missing=["y"])).kind == "probe_contradiction"
+
+    mismatch = {
+        "new_claims": [],
+        "contradictions": [],
+        "gist_en": "",
+        "aside": "",
+        "resume_mismatch": "resume says 3 years ICU; they said 1 year on a ward",
+        "quote": "",
+        "summary_en": "",
+    }
+    resume_stale, _ = make_flow(blueprint, resume="Staff nurse, 3 years ICU, Apollo Hospital Pune")
+    resume_stale.opening()
+    resume_stale.state.slot("experience_years").value = "1"
+    resume_stale.note_enrichment(mismatch, snapshot=resume_stale.enrich_snapshot())
+    resume_stale.state.slot("experience_years").value = "5"
+    assert (
+        resume_stale.apply(say(("experience_years", "1"), ("experience_settings", "ward"))).kind
+        != "resume_check"
+    )
+
+    resume_fresh, _ = make_flow(blueprint, resume="Staff nurse, 3 years ICU, Apollo Hospital Pune")
+    resume_fresh.opening()
+    resume_fresh.state.slot("experience_years").value = "1"
+    resume_fresh.note_enrichment(mismatch, snapshot=resume_fresh.enrich_snapshot())
+    assert (
+        resume_fresh.apply(say(("experience_years", "1"), ("experience_settings", "ward"))).kind
+        == "resume_check"
+    )
+
+
 def test_enrich_is_scheduled_after_the_move(blueprint):
     enrich = {
         "new_claims": ["lives in Pune"],
