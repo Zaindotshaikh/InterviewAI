@@ -9,7 +9,7 @@ import random
 import re
 from collections.abc import AsyncIterable, AsyncIterator
 
-from interview.fillers import is_speakable, normalize_fillers, um_for
+from interview.fillers import is_speakable, normalize_fillers
 from interview.voice_tone import tag_for_tone
 
 _SENTENCE_END = re.compile(r"(?<!\.)[.?!।॥](?!\.)[\"')\]]*\s+")
@@ -133,12 +133,6 @@ class ExpressivenessEngine:
         sentence, um_hit = normalize_fillers(sentence, language, allow_um=can_um)
         if um_hit:
             used["umm"] = True
-        elif can_um and self._rng.random() < self.umm_rate and not opening:
-            # One hesitation after a short opening word, where a person searches for the question.
-            parts = re.split(r"(,\s+)", sentence, maxsplit=1)
-            if len(parts) == 3 and len(parts[0].split()) <= 4:
-                sentence = f"{parts[0]}{parts[1]}{um_for(language)} {parts[2]}"
-                used["umm"] = True
 
         if used["umm"] or used["sigh"]:
             used["pause"] = False

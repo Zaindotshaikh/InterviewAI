@@ -17,20 +17,25 @@ def _player(probability: float = 1.0) -> FillerPlayer:
     return player
 
 
-def test_short_answers_get_no_reaction():
-    assert _player().pick("mr-IN", "हो") is None
+def test_a_repair_gets_no_receipt():
+    assert _player().pick("mr-IN", "हो", kind="ask_repeat") is None
 
 
-def test_reactions_are_native_words_and_rotate():
+def test_receipts_are_one_word_and_not_every_question():
     player = _player()
-    picks = [player.pick("mr-IN", "मी पाच वर्षे ICU मध्ये काम केले")[0] for _ in range(6)]
-    assert set(picks) <= set(ACKS["mr-IN"])
-    assert all(a != b for a, b in zip(picks, picks[1:]))
+    long = "मी पाच वर्षे ICU मध्ये काम केले"
+    picks = [player.pick("mr-IN", long, kind="ask_field") for _ in range(6)]
+    spoken = [p[0] for p in picks if p is not None]
+    assert spoken
+    assert set(spoken) <= set(ACKS["mr-IN"])
+    assert all("," not in text for text in spoken)
+    assert [p is None for p in picks] == [False, True, False, True, False, True]
+    assert all(a != b for a, b in zip(spoken, spoken[1:]))
     assert "um" not in " ".join(acks_for("hi-IN")).lower()
 
 
 def test_probability_zero_disables():
-    assert _player(probability=0.0).pick("mr-IN", "मी पाच वर्षे ICU मध्ये काम केले") is None
+    assert _player(probability=0.0).pick("mr-IN", "मी पाच वर्षे ICU मध्ये काम केले", kind="ask_field") is None
 
 
 def test_dragged_out_takes_are_rejected():

@@ -75,17 +75,17 @@ Everything you write is read aloud by a text-to-speech voice. Write the way peop
 - Speak in breath-sized pieces: one idea per sentence, about 4 to 12 words. Split long thoughts into two short sentences instead of joining them with "and", "which", or "so that".
 - Active, direct verbs ("आप कहाँ काम करते हैं?"), never passive or corporate phrasing ("आपके द्वारा किस संस्थान में कार्य किया जाता है?").
 - Put a comma at each natural breath point INSIDE a sentence (after the opening words, before "and / but / because" words, after a place or time phrase), so no sentence is one unbroken run. Any sentence over 6 words should have at least one comma. Never pack two questions into one sentence. Contractions in English.
-- Vary sentence length and shape: mix a short reaction, a statement, and a question. Never three sentences that sound alike.
-- Before a new question, one short reaction is enough, then ask. If this turn says you already spoke a reaction, do not add another. Go straight to the question.
-- Vary your acknowledgements; never repeat the same one twice in a row. Do not praise every answer.
-- Pause where a person would breathe. Put a comma there. You may write "..." once in a reply, before the question, as a held beat. Do not write "umm", "uh", "hmm", or any other filler sound. A later step adds one hesitation when the turn does not already have a reaction.
+- Vary sentence length. Never three sentences that sound alike.
+- Do not open with a stock reaction such as अच्छा, ठीक है, हाँ जी, okay, right, or बरं. A receipt, when there is one, has already been spoken. If the directive says to acknowledge what they said, use a detail from their answer, then ask.
+- Do not praise every answer.
+- Pause where a person would breathe. Put a comma there. You may write "..." once in a reply, before the question, as a held beat. Do not write "umm", "uh", or "hmm".
 - You may use a natural spoken connector ("तो", "मतलब", "actually", "बरं") now and then. Not every reply.
 - Write numbers the way you would say them, in words, in the interview language ("પાંચ વર્ષ", "पाँच साल", "twenty-five thousand"). When the directive says "I heard" and then digits, say those digits one by one, in that order.
 - Greet them by their first name once. After that, say "you". A first name now and then is welcome. Do not put their full name before each question.
 - Open the first greeting with the greeting itself as the very first spoken word (e.g. નમસ્તે / नमस्ते / नमस्कार / Hello), then pause — do not race the whole intro in one breath.
 
 ## Reactions played for you
-Sometimes the voice says a one-word reaction ("बरं.", "अच्छा.", "Okay.") the moment the candidate finishes. When a
+Sometimes the voice has already said one word ("अच्छा.", "ठीक है.", "Okay.") before this line. When a
 directive says this happened, treat it as your own words: do not open with another acknowledgement, go straight on.
 """
 
@@ -199,12 +199,12 @@ def spoken_style(language: str, voice: str = "Kore") -> str:
 
 
 # Engine mode (VOICE_EXPRESSIVENESS=engine): the model writes plain speech.
-# Pauses are commas and one "...". One "umm" is added later, and never on a turn that already played a reaction.
+# Pauses are commas and one "...". No extra "umm" is inserted.
 ELEVENLABS_PLAIN_SPEECH_RULES = """
 ## ElevenLabs voice
 Write plain spoken words. Do not write square-bracket tags.
 Pause with a comma. You may write "..." once, where you would hold a beat before the question.
-Do not write filler sounds such as umm, uh, or hmm. Those are added for you, and only on some turns.
+Do not write filler sounds such as umm, uh, or hmm.
 Keep 1-2 short sentences. A greeting starts with the hello itself, with no filler in front of it.
 """
 

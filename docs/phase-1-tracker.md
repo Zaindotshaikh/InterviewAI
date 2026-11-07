@@ -116,7 +116,7 @@ The **agent** worker reads `agent/.env` (pydantic in `agent/config.py`). The API
 | `V2_INTERNAL_SECRET` | Same value on agent and server |
 | `OPENAI_API_KEY` | Present (dialogue model and Director). Not a substitute for the ElevenLabs key |
 | `LLM_MODEL` | `gpt-4o-mini` (example). Do not point the dialogue model at the director model |
-| `DIRECTOR_MODEL`, `CLINICAL_DIRECTOR_MODEL` | Example `gpt-4o`. Leave them |
+| `DIRECTOR_MODEL`, `CLINICAL_DIRECTOR_MODEL` | Screening `gpt-4o-mini`. Clinical `gpt-4o`. Do not point clinical at the screening model |
 
 Leave `SARVAM_API_KEY` unset on this worker. Leave `VOICE_EARLY_FILLER=false`. Do not set `NOISE_PROVIDER=aicoustics`.
 

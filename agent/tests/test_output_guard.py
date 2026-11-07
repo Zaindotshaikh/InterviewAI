@@ -1,7 +1,9 @@
 """Unit tests for OutputGuard (Phase 2 P2-08)."""
 
+import asyncio
+
 import pytest
-from interview.output_guard import OutputGuard
+from interview.output_guard import OutputGuard, iter_guarded_clauses
 
 
 @pytest.fixture
@@ -115,4 +117,89 @@ def test_slot_allowed_when_not_captured(guard: OutputGuard) -> None:
     )
     assert not blocked
     assert out == text
+
+
+def test_first_clause_starts_before_the_rest_of_any_reply(guard: OutputGuard) -> None:
+    # Screening, clinical, and closing all use this path. Nothing here is phone-specific.
+    async def go() -> list[str]:
+        seen_rest = False
+        heard: list[str] = []
+
+        async def source():
+            nonlocal seen_rest
+            yield "Okay. "
+            seen_rest = True
+            yield "What would you do if the diaper was soaked? "
+
+        async for piece in iter_guarded_clauses(source(), guard, language="en-IN"):
+            if not heard:
+                assert seen_rest is False
+            heard.append(piece)
+        return heard
+
+    heard = asyncio.run(go())
+    assert "Okay" in heard[0]
+    assert any("diaper" in piece for piece in heard)
+
+
+def test_unfinished_clause_is_not_spoken(guard: OutputGuard) -> None:
+    async def source():
+        yield "Okay, Del"
+        yield "hi. Where do you work now? "
+
+    async def go() -> list[str]:
+        return [piece async for piece in iter_guarded_clauses(source(), guard, language="en-IN")]
+
+    heard = asyncio.run(go())
+    assert heard[0].strip().endswith("Delhi.") or heard[0].strip() == "Okay, Delhi."
+    joined = "".join(heard)
+    assert "Okay, Del " not in joined
+    assert "Where do you work" in joined
+
+
+def test_later_clause_salary_is_replaced_on_any_turn(guard: OutputGuard) -> None:
+    async def source():
+        yield "Thanks for explaining that. "
+        yield "The salary is 25000 per month. "
+
+    async def go() -> str:
+        return "".join([piece async for piece in iter_guarded_clauses(source(), guard, language="en-IN")])
+
+    spoken = asyncio.run(go())
+    assert "Thanks for explaining" in spoken
+    assert "25000" not in spoken
+    assert "recruitment team" in spoken
+
+
+def test_second_question_is_dropped_on_any_turn(guard: OutputGuard) -> None:
+    async def source():
+        yield "What would you check first? "
+        yield "And what number would you report? "
+
+    async def go() -> str:
+        return "".join(
+            [
+                piece
+                async for piece in iter_guarded_clauses(
+                    source(), guard, language="en-IN", single_question=True
+                )
+            ]
+        )
+
+    spoken = asyncio.run(go())
+    assert spoken.strip() == "What would you check first?"
+    assert "number" not in spoken
+
+
+def test_hindi_clause_is_released_the_same_way(guard: OutputGuard) -> None:
+    async def source():
+        yield "अच्छा। "
+        yield "अभी आप कहाँ काम कर रहे हैं? "
+
+    async def go() -> list[str]:
+        return [piece async for piece in iter_guarded_clauses(source(), guard, language="hi-IN")]
+
+    heard = asyncio.run(go())
+    assert "अच्छा" in heard[0]
+    assert any("काम" in piece for piece in heard)
 

@@ -657,17 +657,13 @@ class InterviewAgent(Agent):
         skip_first, self._suppress_lead = self._suppress_lead, False
         opening, self._greeting_pending = self._greeting_pending, False
 
-        # Collect LLM raw + spoken for transcript split.
-        raw_chunks: list[str] = []
-        async for chunk in text:
-            raw_chunks.append(chunk)
-        full_raw = "".join(raw_chunks)
-
-        # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
+        # P2-08: same guard on every reply. Each finished clause is checked, then spoken,
+        # while the model is still writing the next clause. InterviewFlow is not involved.
         captured = {k for k, v in self.flow.state.slots.items() if v.value is not None}
         height = self.flow.state.slot("height_cm")
         weight = self.flow.state.slot("weight_kg")
         from interview.normalize import height_said_in_cm, spoken_height_phrase
+        from interview.output_guard import iter_guarded_clauses
         from interview.phone_speech import body_confirm_line
 
         forbid_cm = bool(height.value) and not height_said_in_cm(height.evidence or "")
@@ -678,23 +674,29 @@ class InterviewAgent(Agent):
                 spoken_height_phrase(height.evidence, height.value),
                 weight.value,
             )
-        is_blocked, guarded_text, reason = self._guard.inspect_text(
-            full_raw,
+
+        raw_chunks: list[str] = []
+
+        async def _record_raw() -> Any:
+            async for chunk in text:
+                raw_chunks.append(chunk)
+                yield chunk
+
+        guarded = iter_guarded_clauses(
+            _record_raw(),
+            self._guard,
             language=self.flow.state.language,
             captured_slots=captured,
             single_question=not opening,
-            forbid_centimetres=forbid_cm,
             fallback_text=cm_fallback,
+            forbid_centimetres=forbid_cm,
         )
-
-        async def _iter_guarded() -> Any:
-            yield guarded_text
 
         spoken_chunks: list[str] = []
         use_engine = is_el and self._expressiveness_mode == "engine"
         if use_engine:
             shaped = self._engine.apply(
-                _iter_guarded(),
+                guarded,
                 language=self.flow.state.language,
                 tone=self._current_tone,
                 opening=opening,
@@ -703,7 +705,7 @@ class InterviewAgent(Agent):
             )
         else:
             shaped = self._disfluency.apply(
-                _iter_guarded(),
+                guarded,
                 self.flow.state.language,
                 skip_first=skip_first,
                 opening=opening,
@@ -1606,36 +1608,6 @@ class InterviewAgent(Agent):
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
-        # P2-04: Ack filler BEFORE Director is strictly neutral (latency ack, not emotional coaching).
-        filler_note = ""
-        fillers: FillerPlayer | None = self.session_ref.get("fillers")
-        bucket = "neutral"
-        if (
-            fillers is not None
-            and not self.flow.done
-            and classify_answer(text) == "substantive"
-            and not self.recovery_speech_blocked()
-        ):
-            picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
-            if picked is not None:
-                filler_text, frames = picked
-                played = await self.speak(
-                    "filler",
-                    lambda: self.session.say(
-                        filler_text, audio=frames_iter(frames), add_to_chat_ctx=False
-                    ),
-                    wait=False,
-                    detail="ack",
-                )
-                if played:
-                    if self.latency is not None:
-                        self.latency.on_filler_start()
-                    self._suppress_lead = True
-                    filler_note = (
-                        f'\nYou have already said "{filler_text}" out loud as your reaction. Do not open with another '
-                        "acknowledgement; continue straight on from it."
-                    )
-
         queued = self.flow.pop_repair()
         if queued is not None:
             self.director.note_user(text)
@@ -1717,6 +1689,39 @@ class InterviewAgent(Agent):
                 self.latency.on_hook_end()
             self._finish_if_needed(move)
             raise StopResponse()
+        # One receipt, after the move is known, and only on a next-question.
+        # The clip covers the wording model. It does not stack onto a repeat or a read-back.
+        filler_note = (
+            "\nDo not open with अच्छा, ठीक है, हाँ जी, okay, right, or बरं. "
+            "Start with the question."
+        )
+        fillers: FillerPlayer | None = self.session_ref.get("fillers")
+        if (
+            fillers is not None
+            and not self.flow.done
+            and classify_answer(text) == "substantive"
+            and not self.recovery_speech_blocked()
+        ):
+            bucket = "empathetic" if self._empathy_hint else "neutral"
+            picked = fillers.pick(self.flow.state.language, text, bucket=bucket, kind=move.kind)
+            if picked is not None:
+                filler_text, frames = picked
+                played = await self.speak(
+                    "filler",
+                    lambda: self.session.say(
+                        filler_text, audio=frames_iter(frames), add_to_chat_ctx=False
+                    ),
+                    wait=False,
+                    detail="ack",
+                )
+                if played:
+                    if self.latency is not None:
+                        self.latency.on_filler_start()
+                    self._suppress_lead = True
+                    filler_note = (
+                        f'\nYou have already said "{filler_text}" out loud. Do not open with another '
+                        "acknowledgement. Continue straight on from it."
+                    )
         directive = (
             f"CONTROLLER DIRECTIVE: {move.directive}\n"
             f"{native_script_reminder(self.flow.state.language)}{filler_note}"

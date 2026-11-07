@@ -1,15 +1,8 @@
-"""Human-sounding fillers, all spoken by the interview voice itself.
+"""One spoken receipt, and only where an interviewer marks the shift to the next question.
 
-Two moments where people naturally fill speech, and only these:
-  1. Turn start: right after the other person finishes, a short reaction ("बरं.", "अच्छा.", "Okay.")
-     while they think. Pre-rendered with the interview TTS (same voice and accent) and played while
-     the reply is prepared.
-  2. Mid-sentence: one "umm," where the speaker searches for the next words - after an opening
-     connector, before a specific detail, or while rephrasing. The LLM places it; normalize_fillers()
-     makes the spelling canonical, keeps at most one per reply and removes vowel moans.
-
-A standalone "Um" clip is what Chirp stretched into a moan; inside a sentence, with a comma on each
-side, the Indic voices say it short (eval/filler_probe.py: +0.5s in mr-IN).
+A receipt is a single word ("अच्छा.", "ठीक है.", "Okay."). It plays on every other next-question,
+never on a repeat, a read-back, or a goodbye, and never as two words in one clip.
+normalize_fillers() still strips moans and extra "umm" the model wrote.
 """
 
 from __future__ import annotations
@@ -30,21 +23,30 @@ if TYPE_CHECKING:
 INDIC_UM = "umm,"
 ENGLISH_UM = "um,"
 
-# Turn-start reactions, real words only (bare vowels like "आ" are what moaned). Period, not ellipsis,
-# so the voice does not drag the word out. Two words each: Chirp streams a lone word ("बरं.") as silence.
-# Neutral acks (default). Empathetic bucket used when STT/prior-turn heuristics say so.
+# One word each. A second word in the same clip is a second receipt.
+# Neutral is the default. Empathy replaces it only when the move's tone is gentle.
 ACKS_NEUTRAL: dict[str, list[str]] = {
-    "hi-IN": ["ठीक है.", "अच्छा, ठीक है.", "हाँ जी, अच्छा.", "ओके.", "समझ गई."],
-    "mr-IN": ["हो, बरं.", "बरं, ठीक आहे.", "अच्छा, बरं.", "ठीक आहे.", "समजलं."],
-    "ta-IN": ["சரி, சரி.", "ஓகே, சரி.", "சரி.", "புரிஞ்சுது."],
-    "te-IN": ["సరే, సరే.", "ఓకే, సరే.", "సరే.", "అర్థమైంది."],
-    "kn-IN": ["ಸರಿ, ಸರಿ.", "ಓಕೆ, ಸರಿ.", "ಸರಿ.", "ಅರ್ಥವಾಯಿತು."],
-    "ml-IN": ["ശരി, ശരി.", "ഓക്കെ, ശരി.", "ശരി.", "മനസ്സിലായി."],
-    "bn-IN": ["আচ্ছা, ঠিক আছে.", "ঠিক আছে.", "ওকে.", "বুঝেছি."],
-    "gu-IN": ["સારું, સારું.", "અચ્છા, સારું.", "ઠીક છે.", "સમજાયું."],
-    "pa-IN": ["ਠੀਕ ਹੈ.", "ਅੱਛਾ, ਠੀਕ ਹੈ.", "ਓਕੇ.", "ਸਮਝ ਗਈ."],
-    "en-IN": ["Okay, got it.", "Right, okay.", "Okay, sure.", "Got it.", "Alright."],
+    "hi-IN": ["okay", "अच्छा.", "ठीक है.", "हाँ जी."],
+    "mr-IN": ["हो.", "बरं.", "ठीक आहे."],
+    "ta-IN": ["சரி.", "ஓகே."],
+    "te-IN": ["సరే.", "ఓకే."],
+    "kn-IN": ["ಸರಿ.", "ಓಕೆ."],
+    "ml-IN": ["ശരി.", "ഓക്കെ."],
+    "bn-IN": ["আচ্ছা.", "ঠিক আছে."],
+    "gu-IN": ["સારું.", "ઠીક છે."],
+    "pa-IN": ["ਠੀਕ ਹੈ.", "ਅੱਛਾ."],
+    "en-IN": ["Okay.", "Right.", "Got it."],
 }
+
+# Moves that open the next interview question after a real answer.
+# Repair, read-back, challenge, and goodbye carry their own wording.
+RECEIPT_MOVES = frozenset({
+    "ask_field",
+    "ask_care",
+    "ask_care_item",
+    "experience_probe",
+    "clinical_question",
+})
 
 # Reviewed: hi / mr / en. Other langs fall back to hi/en forms via acks_for().
 # P2-04: Pace coaching lines ("take your time", "dheere se") removed from automatic fillers.
@@ -59,7 +61,6 @@ ACKS_EMPATHETIC: dict[str, list[str]] = {
 ACKS: dict[str, list[str]] = ACKS_NEUTRAL
 REVIEWED_FILLER_LANGS = frozenset({"hi-IN", "mr-IN", "en-IN", "gu-IN"})
 
-MIN_WORDS_FOR_FILLER = 4
 MIN_VOICED_SECONDS = 0.15
 MAX_VOICED_SECONDS = 1.6  # two short words measure ~0.6-1.4s; longer means the voice dragged them
 MAX_RENDER_ATTEMPTS = 4
@@ -67,6 +68,13 @@ MAX_RENDER_ATTEMPTS = 4
 
 def um_for(language: str) -> str:
     return ENGLISH_UM if language.startswith("en") else INDIC_UM
+
+
+def receipt_due(kind: str, *, played_last: bool, probability: float) -> bool:
+    """True on every other next-question. Repeats and read-backs stay quiet."""
+    if probability <= 0 or played_last:
+        return False
+    return kind in RECEIPT_MOVES
 
 
 def acks_for(language: str, bucket: str = "neutral") -> list[str]:
@@ -158,6 +166,7 @@ class FillerPlayer:
         self._cache: dict[str, dict[str, list[rtc.AudioFrame]]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._last: str | None = None
+        self._played_last = False
 
     def prepare(self, language: str) -> None:
         if self._tts is None or self._probability <= 0 or language in self._tasks:
@@ -196,9 +205,13 @@ class FillerPlayer:
         candidate_text: str,
         *,
         bucket: str = "neutral",
+        kind: str = "",
     ) -> tuple[str, list[rtc.AudioFrame]] | None:
-        """Return a reaction to play for this turn, or None to stay silent."""
-        if len(candidate_text.split()) < MIN_WORDS_FOR_FILLER or random.random() >= self._probability:
+        """Return one receipt for this next-question, or None to stay silent."""
+        del candidate_text  # placement follows the move, not how many words they used
+        if not receipt_due(kind, played_last=self._played_last, probability=self._probability):
+            if kind in RECEIPT_MOVES and self._probability > 0:
+                self._played_last = False
             return None
         rendered = self._cache.get(language)
         if not rendered:
@@ -213,6 +226,7 @@ class FillerPlayer:
             return None
         key = random.choice(options)
         self._last = key
+        self._played_last = True
         text = key.split(":", 1)[1]
         return text, rendered[key]
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 
 logger = logging.getLogger("interview-v2.output_guard")
@@ -34,6 +35,10 @@ _CM_SPOKEN = re.compile(
     r"centimet(?:er|re)s?|\bcm\b|सेंटीमीटर|सेन्टीमीटर|सेमी",
     re.I,
 )
+
+# Same boundary as Disfluency / Expressiveness: a clause is finished only when
+# punctuation is followed by space, so a half-written phrase is never spoken.
+_CLAUSE_END = re.compile(r"(?<!\.)[.?!।॥](?!\.)[\"')\]]*\s+")
 
 # 3. Redundant slot asks patterns
 _SLOT_PATTERNS = {
@@ -170,3 +175,101 @@ class OutputGuard:
                 return True, truncated, "multiple_questions"
 
         return False, text, ""
+
+
+def split_ready_clauses(buf: str) -> tuple[list[str], str]:
+    """Split finished clauses from the unfinished tail. The tail stays unspoken."""
+    ready: list[str] = []
+    while (match := _CLAUSE_END.search(buf)) is not None:
+        ready.append(buf[: match.end()])
+        buf = buf[match.end() :]
+    return ready, buf
+
+
+def _with_boundary(text: str) -> str:
+    """Trailing whitespace lets the sentence tokenizer start audio on this clause."""
+    if not text:
+        return ""
+    return text if text[-1].isspace() else text + " "
+
+
+def next_spoken_piece(
+    already: str,
+    sentence: str,
+    guard: OutputGuard,
+    *,
+    language: str = "hi-IN",
+    captured_slots: set[str] | None = None,
+    single_question: bool = True,
+    fallback_text: str = "",
+    forbid_centimetres: bool = False,
+) -> tuple[str, str, bool]:
+    """Guard one more clause against everything spoken so far.
+
+    Returns (audio_to_start, text_accounted_for, stop).
+    stop means later model text must not be spoken. The check is the same one used
+    on a finished reply: salary, an offer, a repeated slot, centimetres, a second question.
+    It does not look at which interview question is active.
+    """
+    piece = sentence.strip()
+    if not piece:
+        return "", already, False
+    candidate = f"{already} {piece}".strip() if already else piece
+    blocked, result, _reason = guard.inspect_text(
+        candidate,
+        language=language,
+        captured_slots=captured_slots,
+        single_question=single_question,
+        fallback_text=fallback_text,
+        forbid_centimetres=forbid_centimetres,
+    )
+    result = (result or "").strip()
+    if not blocked:
+        return _with_boundary(sentence), candidate, False
+    if already and result.startswith(already):
+        suffix = result[len(already) :].strip()
+        return (_with_boundary(suffix) if suffix else ""), result, True
+    return (_with_boundary(result) if result else ""), result, True
+
+
+async def iter_guarded_clauses(
+    text: AsyncIterable[str],
+    guard: OutputGuard,
+    *,
+    language: str = "hi-IN",
+    captured_slots: set[str] | None = None,
+    single_question: bool = True,
+    fallback_text: str = "",
+    forbid_centimetres: bool = False,
+) -> AsyncIterator[str]:
+    """Yield each finished clause as soon as the guard accepts it.
+
+    Used for every generated reply. A later clause that fails the guard is replaced
+    or dropped, and the rest of the model text is discarded.
+    """
+    kwargs: dict[str, Any] = {
+        "language": language,
+        "captured_slots": captured_slots,
+        "single_question": single_question,
+        "fallback_text": fallback_text,
+        "forbid_centimetres": forbid_centimetres,
+    }
+    buf = ""
+    already = ""
+    stopped = False
+    async for chunk in text:
+        if stopped:
+            continue
+        buf += chunk
+        ready, buf = split_ready_clauses(buf)
+        for sentence in ready:
+            piece, already, stop = next_spoken_piece(already, sentence, guard, **kwargs)
+            if piece:
+                yield piece
+            if stop:
+                stopped = True
+                break
+    if not stopped and buf.strip():
+        piece, _already, _stop = next_spoken_piece(already, buf, guard, **kwargs)
+        if piece:
+            yield piece

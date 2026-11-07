@@ -48,7 +48,7 @@ API prefix: `server/index.ts` mounts `server/v2/routes/interviewV2.ts` at `/api/
 - Voice: `agent/providers/elevenlabs_voices.py`. Default in `agent/config.py` is one voice id for English and Indic (comments call it Sujata) so the speaker does not change mid-call. Model default `ELEVENLABS_MODEL` / `eleven_v4_turbo`.
 - Expressiveness: when TTS is ElevenLabs, the agent locks that provider for the call (`_tts_locked_el`) and can run the expressiveness engine (`VOICE_EXPRESSIVENESS`) so tags are for TTS while scoring text stays clean. See `docs/voice-refactor.md`.
 - STT is **not** chosen by this route. It follows the agent process: `STT_PROVIDER`, else `PROVIDER_MODE`. The checked-in agent env file sets `STT_PROVIDER=elevenlabs_scribe` (Scribe v2 realtime, word timestamps, medical keyterms, fallback `STT_SCRIBE_FALLBACK`, default `openai` / `gpt-live-transcribe`). `agent/.env.example` defaults `STT_PROVIDER=openai`. A worker started from the example file will speak with ElevenLabs on this URL and transcribe with OpenAI unless Scribe is turned on.
-- LLM for spoken lines: `LLM_PROVIDER` / `LLM_MODEL` (example: OpenAI `gpt-4o-mini`). Turn analysis: `DIRECTOR_MODEL` and `CLINICAL_DIRECTOR_MODEL` (example: `gpt-4o`).
+- LLM for spoken lines: `LLM_PROVIDER` / `LLM_MODEL` (example: OpenAI `gpt-4o-mini`). Turn analysis: `DIRECTOR_MODEL` (`gpt-4o-mini` on screening) and `CLINICAL_DIRECTOR_MODEL` (`gpt-4o` on clinical).
 - Noise: `NOISE_PROVIDER` (`none`, `krisp`, `aicoustics`) on the cascade room input. Example file uses `krisp`.
 
 If `ELEVENLABS_API_KEY` / `ELEVEN_API_KEY` is missing, `build_tts` logs a warning and falls back to OpenAI TTS. The route flag does not by itself guarantee an ElevenLabs voice.
