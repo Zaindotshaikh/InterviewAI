@@ -103,3 +103,17 @@ def test_english_call_does_not_teach_hindi_gender():
     assert "english only" in reminder or "english" in reminder
     hindi = spoken_style("hi-IN")
     assert "कर रहे हैं" in hindi
+    female = spoken_style("hi-IN", candidate_gender="female")
+    assert "कर रही हैं" in female
+    assert "Candidate gender is FEMALE" in female
+    assert "Candidate gender is MALE" not in female
+    neutral = spoken_style("hi-IN", candidate_gender="unspecified")
+    assert "not provided" in neutral.lower()
+    assert "insulin" in hindi
+    assert "potassium chloride" in hindi
+    for code in ("hi-IN", "mr-IN", "ta-IN", "te-IN"):
+        reminder_lang = native_script_reminder(code)
+        assert "insulin" in reminder_lang
+        assert "potassium chloride" in reminder_lang
+        assert "local script" in reminder_lang
+        assert "Latin letters — that switches the voice" not in reminder_lang

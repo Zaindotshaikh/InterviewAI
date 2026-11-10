@@ -5,18 +5,10 @@ import { buildCandidateContext, type CandidateContext } from "../../lib/candidat
 import { listRoles } from "../../lib/store.js";
 import { demoRoleAsConfig, findDemoRole, loadDemoCatalog } from "../../lib/demoCatalog.js";
 import { buildResumeQuestionsPrompt } from "../../prompts/resumeQuestions.js";
-import { buildScorecardPrompt } from "../../prompts/scorecard.js";
 import { inferSeniority, type InterviewSeniority } from "../../prompts/interviewer.js";
 import { buildInterviewPlan } from "../lib/planBuilder.js";
 import { blueprintTargetMinutes, loadBlueprint } from "../lib/blueprint.js";
-import {
-  buildClassificationPrompt,
-  finalizeModelTier,
-  precheck,
-  screeningFacts,
-  summarizeAreas,
-  verifyEvidence,
-} from "../lib/classification.js";
+import { resolveScorecard, ScorecardError } from "../lib/scorecardPrep.js";
 import {
   createCandidateToken,
   ensureRoomAndDispatch,
@@ -26,8 +18,6 @@ import {
 import {
   createV2Interview,
   getV2Interview,
-  saveEnglishTranscript,
-  saveV2Summary,
 } from "../lib/v2Store.js";
 import { withV2StartSlot } from "../lib/concurrency.js";
 import { startInterviewRecording } from "../lib/recording.js";
@@ -45,6 +35,8 @@ function parseCandidateContext(body: {
   noticePeriod?: string;
   currentCompany?: string;
   yearsOfExperience?: string;
+  phone?: string;
+  gender?: string;
 }, opts: { requireResume?: boolean } = {}): CandidateContext | null {
   const nested = body.candidateContext;
   const name = (nested?.name ?? body.candidateName ?? "").trim();
@@ -61,6 +53,8 @@ function parseCandidateContext(body: {
     noticePeriod: nested?.noticePeriod ?? body.noticePeriod,
     currentCompany: nested?.currentCompany ?? body.currentCompany,
     yearsOfExperience: nested?.yearsOfExperience ?? body.yearsOfExperience,
+    phone: nested?.phone ?? body.phone,
+    gender: nested?.gender ?? body.gender,
   });
 }
 
@@ -167,6 +161,8 @@ router.post("/start", async (req, res) => {
       noticePeriod?: string;
       currentCompany?: string;
       yearsOfExperience?: string;
+      phone?: string;
+      gender?: string;
       recordingConsent?: boolean;
       demo?: boolean;
       avatar?: boolean;
@@ -440,176 +436,14 @@ router.get("/:id/transcript", async (req, res) => {
 });
 
 router.post("/:id/summary", async (req, res) => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    res.status(500).json({ error: "OPENAI_API_KEY not configured" });
-    return;
-  }
-
   try {
-    const record = await getV2Interview(req.params.id);
-    if (!record) {
-      res.status(404).json({ error: "Interview not found" });
-      return;
-    }
-
-    const transcript = record.interview.transcript;
-    if (!transcript.length) {
-      res.status(400).json({ error: "No transcript available to score" });
-      return;
-    }
-
-    const openai = new OpenAI({ apiKey });
-
-    // English-normalize non-English turns for TA scorecards
-    const needsTranslate = record.extras.language !== "en-IN";
-    let scoringTranscript = transcript;
-
-    if (needsTranslate) {
-      const translateCompletion = await openai.chat.completions.create({
-        model: process.env.CHAT_MODEL || "gpt-4o",
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "Translate interview turns to clear English for a hiring scorecard. Preserve meaning. Return JSON { turns: [{ role, text, timestamp }] }.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              sourceLanguage: record.extras.language,
-              turns: transcript,
-            }),
-          },
-        ],
-      });
-      const raw = translateCompletion.choices[0]?.message?.content ?? "{}";
-      const parsed = JSON.parse(raw) as {
-        turns?: { role: "user" | "assistant"; text: string; timestamp: string }[];
-      };
-      if (Array.isArray(parsed.turns) && parsed.turns.length) {
-        scoringTranscript = parsed.turns;
-        await saveEnglishTranscript(req.params.id, parsed.turns);
-      }
-    }
-
-    const flow = record.extras.controller.flow;
-    if (flow && record.extras.plan.version >= 2) {
-      const bp = record.extras.plan.blueprint ?? (await loadBlueprint());
-      const haystacks = [...transcript.map((t) => t.text), ...scoringTranscript.map((t) => t.text)];
-      let tier = precheck(flow, bp);
-      let model: Record<string, unknown> = {};
-      if (!tier) {
-        const completion = await openai.chat.completions.create({
-          model: process.env.CLASSIFIER_MODEL || process.env.CHAT_MODEL || "gpt-4o",
-          temperature: 0.1,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You classify nursing candidates for a hiring team from interview evidence. Return ONLY valid JSON matching the requested schema.",
-            },
-            {
-              role: "user",
-              content: buildClassificationPrompt({
-                roleTitle: record.interview.roleTitle,
-                candidateName: record.interview.candidateName,
-                bp,
-                flow,
-              }),
-            },
-          ],
-        });
-        model = JSON.parse(completion.choices[0]?.message?.content ?? "{}") as Record<string, unknown>;
-        tier = finalizeModelTier(model, flow, bp, haystacks);
-      }
-
-      const areas = summarizeAreas(flow, bp).map((a) => ({
-        ...a,
-        evidence: a.evidence.map((e) => {
-          const quote = e.quote ?? "";
-          const ok = quote
-            ? verifyEvidence([{ area: a.title, point: e.quality, quote }], haystacks)[0]?.verified === true
-            : false;
-          return { ...e, quote: ok ? quote : "" };
-        }),
-      }));
-      const scoreByTier: Record<string, number | null> = {
-        tier_1: 9,
-        tier_2: 7,
-        tier_3: 5,
-        not_eligible: 2,
-        needs_review: null,
-      };
-      const modelScore = Number(model.overall_score);
-      const strList = (v: unknown) => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : []);
-      const payload = {
-        // Legacy scorecard fields, so existing dashboards keep working.
-        overall_score:
-          tier.method === "model" && Number.isFinite(modelScore)
-            ? Math.min(10, Math.max(1, Math.round(modelScore)))
-            : (scoreByTier[tier.tier] ?? null),
-        recommendation: `${tier.tier_name}. ${tier.reasoning}`,
-        strengths: strList(model.strengths),
-        gaps: strList(model.gaps),
-        per_question_notes: areas.map((a) => ({
-          question: a.title,
-          note: `${a.outcome}${a.evidence.length ? `. ${a.evidence.map((e) => e.summary).filter(Boolean).join(" ")}` : ""}`,
-        })),
-        // Classification with reasoning and evidence.
-        tier: tier.tier,
-        tier_name: tier.tier_name,
-        tier_confidence: tier.confidence,
-        tier_reasoning: tier.reasoning,
-        tier_method: tier.method,
-        tier_evidence: tier.evidence.filter((e) => e.verified),
-        flags: tier.flags,
-        screening: screeningFacts(flow),
-        clinical_areas: areas,
-        contradictions: flow.contradictions ?? [],
-        outcome: flow.outcome,
-        pipeline: "v2",
-        language: record.extras.language,
-        integrity: record.interview.integrity ?? { available: false, events: [] },
-      };
-      await saveV2Summary(req.params.id, payload);
-      res.json(payload);
-      return;
-    }
-
-    const prompt = buildScorecardPrompt({
-      roleTitle: record.interview.roleTitle,
-      candidateName: record.interview.candidateName,
-      criteria: record.interview.criteria,
-      transcript: scoringTranscript,
-    });
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.CHAT_MODEL || "gpt-4o",
-      temperature: 0.3,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "You score completed job interviews. Return ONLY valid JSON matching the requested schema.",
-        },
-        { role: "user", content: prompt },
-      ],
-    });
-
-    const summary = JSON.parse(completion.choices[0]?.message?.content ?? "{}") as Record<string, unknown>;
-    const payload = {
-      ...summary,
-      pipeline: "v2",
-      language: record.extras.language,
-      integrity: record.interview.integrity ?? { available: false, events: [] },
-    };
-    await saveV2Summary(req.params.id, payload);
+    const payload = await resolveScorecard(req.params.id);
     res.json(payload);
   } catch (err) {
+    if (err instanceof ScorecardError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
     console.error("[v2] summary error:", err);
     res.status(500).json({ error: "Failed to generate scorecard" });
   }

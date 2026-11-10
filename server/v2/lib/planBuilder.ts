@@ -128,6 +128,16 @@ function buildSteps(): InterviewPlanStep[] {
   ];
 }
 
+function candidateGenderLine(gender: CandidateContext["gender"]): string {
+  if (gender === "female") {
+    return "- The candidate is a woman. Always use feminine forms when addressing her (Hindi: कर रही हैं / कर सकती हैं / बताइए — never करता / सकता / रहे हैं when the verb marks her). Do not assume a nurse is a man.";
+  }
+  if (gender === "unspecified") {
+    return "- Gender was not given. Use respectful you-address. Do not assume the candidate is a man or a woman because the role is nurse.";
+  }
+  return "- The candidate is a man. Always use masculine forms when addressing him (Hindi: कर रहे हैं / कर सकते हैं — never करती / सकती / रहीं). Do not treat nurse as female by default.";
+}
+
 function buildSystemPrompt(params: {
   language: InterviewLanguageCode;
   companyName: string;
@@ -148,7 +158,7 @@ function buildSystemPrompt(params: {
   const scriptRule =
     params.language === "en-IN"
       ? "Speak in clear Indian English."
-      : `Start in ${langMeta?.label ?? params.language}. For Indic languages, write Indic words in native script and keep common English words (hospital, ICU, ward, medicine) in Latin script. Never romanize entire Indic sentences.`;
+      : `Start in ${langMeta?.label ?? params.language}. Write ordinary words in native script. Keep clinical and drug names in English Latin letters (insulin, potassium chloride, high-alert medicine, ICU, ventilator, hospital, ward). Do not translate those into pure or textbook words, and never romanize the whole sentence.`;
 
   const glossaryBlock =
     params.glossaryHints.length > 0
@@ -157,6 +167,7 @@ function buildSystemPrompt(params: {
 
   const fullName = params.candidateContext.name.trim();
   const firstName = fullName.split(/\s+/)[0] || fullName;
+  const genderLine = candidateGenderLine(params.candidateContext.gender);
 
   return `You are ${params.interviewerName}, a warm, attentive interviewer for ${params.companyName}, speaking by voice with a nursing candidate for the role: ${params.roleTitle}.
 The whole conversation takes about ${params.targetMinutes} minutes: a short friendly screening first, then an adaptive clinical conversation.
@@ -165,7 +176,7 @@ The whole conversation takes about ${params.targetMinutes} minutes: a short frie
 - Their name is ${fullName}. Greet them once by their first name, ${firstName}.
 - After the greeting, say "you". A first name now and then is welcome. Do not put the full name before each question.
 - Never invent a different name from the resume.
-- The candidate is a man. Always use masculine forms when addressing him (Hindi: कर रहे हैं / कर सकते हैं — never करती / सकती / रहीं). Do not treat nurse as female by default.
+${genderLine}
 
 ${details}
 

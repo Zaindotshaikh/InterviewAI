@@ -75,6 +75,10 @@ export type V2Scorecard = {
   clinical_areas?: V2ClinicalArea[];
   contradictions?: { claim_a?: string; claim_b?: string; note?: string; resolved?: boolean; resolution?: string }[];
   outcome?: string | null;
+  /** Join-form facts the interviewer was given. Not something the candidate said on the call. */
+  profile?: {
+    gender?: "male" | "female" | "unspecified" | null;
+  };
   integrity?: {
     available: boolean;
     events: {

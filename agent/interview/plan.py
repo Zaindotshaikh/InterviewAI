@@ -69,6 +69,10 @@ class InterviewPlan:
     system_prompt: str
     candidate_name: str = ""
     resume_text: str = ""
+    # Join-form mobile (digits). Empty when they left it blank — the call then asks.
+    candidate_phone: str = ""
+    # male | female | unspecified | "" (older sessions: treat as male address).
+    candidate_gender: str = ""
     # Interview blueprint (screening fields, clinical rubric, tiers); parsed by interview.blueprint.Blueprint.
     blueprint: dict[str, Any] = field(default_factory=dict)
     # Last turns of an interrupted call, so a restarted agent can rebuild the conversation.
@@ -102,6 +106,8 @@ class InterviewPlan:
             system_prompt=plan.get("systemPrompt") or "",
             candidate_name=ctx.get("name") or "",
             resume_text=ctx.get("resumeText") or "",
+            candidate_phone=str(ctx.get("phone") or ""),
+            candidate_gender=str(ctx.get("gender") or ""),
             blueprint=plan.get("blueprint") or {},
             recent_transcript=[
                 {"role": t["role"], "text": t["text"]}

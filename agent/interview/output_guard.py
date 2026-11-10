@@ -35,6 +35,17 @@ _CM_SPOKEN = re.compile(
     re.I,
 )
 
+# A read-back ("your number is X, is that correct?") is not another ask.
+_READBACK_RE = re.compile(
+    r"(?:"
+    r"is that correct|is this correct|did i (?:hear|get) that"
+    r"|क्या यह सही है|हे बरोबर आहे का|શું આ સાચ"
+    r"|ఇది సరియైనదేనా|இது சரியா|ಇದು ಸರಿಯಾ|ഇത് ശരിയാണോ"
+    r"|এটা ঠিক আছে|ਕੀ ਇਹ ਠੀਕ ਹੈ|ଏହା ଠିକ୍"
+    r")",
+    re.I,
+)
+
 # 3. Redundant slot asks patterns
 _SLOT_PATTERNS = {
     "city": re.compile(
@@ -144,8 +155,8 @@ class OutputGuard:
                 logger.warning("guard.blocked class=offer_leak")
                 return True, safe, "offer_leak"
 
-        # Check 3: Redundant slot ask
-        if captured_slots:
+        # Check 3: Redundant slot ask. A confirmation of a number already on file is not one.
+        if captured_slots and not _READBACK_RE.search(raw):
             for slot_name, pat in _SLOT_PATTERNS.items():
                 if slot_name in captured_slots and pat.search(raw):
                     logger.warning("guard.blocked class=redundant_slot slot=%s", slot_name)

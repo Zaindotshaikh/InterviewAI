@@ -128,6 +128,72 @@ def test_opening_greets_and_asks_the_first_screening_question(blueprint):
     assert "Priya" in move.directive and "city" in move.directive.lower()
 
 
+def test_form_phone_is_confirmed_after_city_not_asked(blueprint):
+    plan = make_plan()
+    plan.candidate_phone = "9876543210"
+    flow = InterviewFlow(plan, blueprint, clock=Clock())
+    opening = flow.opening()
+    assert "city" in opening.directive.lower()
+    assert flow.state.slot("phone").status == "empty"
+    move = flow.apply(say(("city", "Pune")))
+    assert move.kind == "confirm"
+    assert move.verbatim
+    assert "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.verbatim
+    assert "सुना" not in move.verbatim
+    assert flow.state.slot("phone").value == "9876543210"
+
+
+def test_blank_form_phone_still_asks(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    move = flow.apply(say(("city", "Pune")))
+    assert move.kind == "ask_field"
+    assert move.verbatim and "मोबाइल" in move.verbatim
+
+
+def test_invalid_form_phone_still_asks(blueprint):
+    plan = make_plan()
+    plan.candidate_phone = "12345"
+    flow = InterviewFlow(plan, blueprint, clock=Clock())
+    flow.opening()
+    move = flow.apply(say(("city", "Pune")))
+    assert move.kind == "ask_field"
+    assert move.verbatim and "मोबाइल" in move.verbatim
+
+
+def test_form_phone_stays_when_they_do_not_reject_it(blueprint):
+    """'Yes, ask the question' is not a no. Read the form number again."""
+    plan = make_plan()
+    plan.candidate_phone = "9876543210"
+    flow = InterviewFlow(plan, blueprint, clock=Clock())
+    flow.opening()
+    offered = flow.apply(say(("city", "Pune")))
+    assert offered.kind == "confirm"
+    move = flow.apply(
+        TurnAnalysis(
+            confirmation="denied",
+            intent="answer",
+            raw_utterance="हाँ, पूछिए, question क्या हैं?",
+        )
+    )
+    assert move.kind == "confirm"
+    assert flow.state.slot("phone").value == "9876543210"
+    assert move.verbatim and "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.verbatim
+
+
+def test_denied_form_phone_falls_back_to_asking(blueprint):
+    plan = make_plan()
+    plan.candidate_phone = "+91 98765 43210"
+    flow = InterviewFlow(plan, blueprint, clock=Clock())
+    flow.opening()
+    offered = flow.apply(say(("city", "Pune")))
+    assert offered.kind == "confirm"
+    move = flow.apply(TurnAnalysis(confirmation="denied", raw_utterance="नहीं, गलत है"))
+    assert move.kind == "ask_field"
+    assert move.verbatim and "मोबाइल" in move.verbatim
+    assert flow.state.slot("phone").status == "empty"
+
+
 def test_opening_gujarati_uses_gujarati_script_and_no_hindi(blueprint):
     flow, _ = make_flow(blueprint, language="gu-IN")
     move = flow.opening()
@@ -585,6 +651,26 @@ def test_a_scrap_does_not_rewrite_the_readback(blueprint):
     assert flow2.state.slots["phone"].status == "empty"
     assert move.kind == "ask_field"
     assert "mobile" in move.directive.lower()
+
+
+def test_slow_analyst_still_keeps_a_clear_experience_answer(blueprint):
+    """A timed-out analyst returns no slots. The spoken years and ward are still an answer."""
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.apply(say(("city", "Pune")))
+    flow.apply(say(("phone", "9876543210")))
+    flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
+    flow.apply(say(("qualification", "B.Sc Nursing"), ("qualification_year", "2022")))
+    body = flow.apply(say(("height_cm", "5 feet 11 inches"), ("weight_kg", "80 kg")))
+    assert body.kind == "confirm"
+    flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="सही है।"))
+    spoken = "अ, कुछ तीन साल का experience है मुझे nursing का। ICU ward में भी काम किया है मैंने।"
+    move = flow.apply(TurnAnalysis(intent="answer", source="heuristic", raw_utterance=spoken, slot_updates=[]))
+    assert flow.state.slots["experience_years"].value == 3
+    assert flow.state.slots["experience_settings"].status != "empty"
+    assert "ICU" in str(flow.state.slots["experience_settings"].value)
+    assert move.kind != "ask_repeat"
+    assert "could not hear" not in move.directive.lower()
 
 
 def test_garbled_city_says_it_could_not_hear_then_asks_again(blueprint):

@@ -187,7 +187,7 @@ def _clamp(value: Any, default: float) -> float:
 # --------------------------------------------------------------------------------------------------------------
 
 
-def build_schema(blueprint: Blueprint) -> dict[str, Any]:
+def build_schema(blueprint: Blueprint, *, clinical: bool = True) -> dict[str, Any]:
     str_t = {"type": "string"}
 
     def arr(item: dict[str, Any]) -> dict[str, Any]:
@@ -226,17 +226,23 @@ def build_schema(blueprint: Blueprint) -> dict[str, Any]:
                 )
             ),
             "experience_level": {"type": "string", "enum": list(EXPERIENCE_LEVELS)},
-            "clinical": obj(
+            **(
                 {
-                    "area_id": {"type": "string", "enum": area_ids},
-                    "quality": {"type": "string", "enum": list(QUALITIES)},
-                    "covered_point_ids": arr(str_t),
-                    "missing_point_ids": arr(str_t),
-                    "red_flags": arr(str_t),
-                    "needs_clarification": {"type": "boolean"},
-                    "quote": str_t,
-                    "summary_en": str_t,
+                    "clinical": obj(
+                        {
+                            "area_id": {"type": "string", "enum": area_ids},
+                            "quality": {"type": "string", "enum": list(QUALITIES)},
+                            "covered_point_ids": arr(str_t),
+                            "missing_point_ids": arr(str_t),
+                            "red_flags": arr(str_t),
+                            "needs_clarification": {"type": "boolean"},
+                            "quote": str_t,
+                            "summary_en": str_t,
+                        }
+                    )
                 }
+                if clinical
+                else {}
             ),
             "new_claims": arr(str_t),
             "contradictions": arr(obj({"claim_a": str_t, "claim_b": str_t, "note": str_t})),
@@ -248,7 +254,7 @@ def build_schema(blueprint: Blueprint) -> dict[str, Any]:
     )
 
 
-SYSTEM_PROMPT = """You are the analysis engine inside a voice interviewer for nursing candidates in India.
+_ANALYST_BASE = """You are the analysis engine inside a voice interviewer for nursing candidates in India.
 You never speak to the candidate. Read the candidate's latest utterance and return ONLY the JSON object requested.
 
 ## The input is speech-to-text
@@ -299,7 +305,9 @@ nervousness.
   Do not leave care_updates empty on a clear yes; the interview will wrongly end the gate if you miss it.
 - experience_level (only when stated): fresher = no paid nursing experience, junior = under 3 years, experienced = 3+.
 
-## Clinical grading (only when clinical_context is present and they attempted an answer)
+"""
+
+_CLINICAL_RULES = """## Clinical grading (only when clinical_context is present and they attempted an answer)
 - Compare to key_points. covered_point_ids = points clearly present, even in other words or another language.
   missing_point_ids = the remaining key points.
 - quality: correct = covers the core with nothing unsafe (not every point is required); partial = what they said is
@@ -316,7 +324,9 @@ nervousness.
   English line.
 - If they said they do not know, quality = "none" and intent = "dont_know".
 
-## Consistency
+"""
+
+_CONSISTENCY_RULES = """## Consistency
 - new_claims: short factual claims the candidate makes now about their own background or experience.
 - contradictions: only when this utterance conflicts with something the candidate already said in this call
   (known_claims or known_facts). Leave contradictions empty unless both sides were spoken by them.
@@ -333,6 +343,10 @@ nervousness.
   phrase with no detail; none when the question was not that kind of probe.
 
 If a section does not apply, return empty arrays, "none" or false for it."""
+
+SYSTEM_PROMPT = _ANALYST_BASE + _CLINICAL_RULES + _CONSISTENCY_RULES
+# Screening does not grade clinical scenarios. Omitting that form is what keeps the call under a few seconds.
+SCREENING_SYSTEM_PROMPT = _ANALYST_BASE + _CONSISTENCY_RULES
 
 
 def build_user_payload(
@@ -559,7 +573,8 @@ class TurnAnalyzer:
         timeout_s: float = 4.5,
         client: Any | None = None,
     ) -> None:
-        self._schema = build_schema(blueprint)
+        self._schema = build_schema(blueprint, clinical=True)
+        self._screening_schema = build_schema(blueprint, clinical=False)
         self._model = model
         self._clinical_model = clinical_model or model
         self._timeout = timeout_s
@@ -605,15 +620,19 @@ class TurnAnalyzer:
                 self._get_client().chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": SYSTEM_PROMPT if clinical else SCREENING_SYSTEM_PROMPT},
                         {"role": "user", "content": payload},
                     ],
                     response_format={
                         "type": "json_schema",
-                        "json_schema": {"name": "turn_analysis", "strict": True, "schema": self._schema},
+                        "json_schema": {
+                            "name": "turn_analysis",
+                            "strict": True,
+                            "schema": self._schema if clinical else self._screening_schema,
+                        },
                     },
                     temperature=0,
-                    max_tokens=900,
+                    max_tokens=900 if clinical else 450,
                 ),
                 timeout=self._timeout,
             )

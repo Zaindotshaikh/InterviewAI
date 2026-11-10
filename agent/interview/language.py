@@ -139,7 +139,10 @@ def native_script_reminder(language: str) -> str:
         )
     return (
         f"Respond in everyday spoken {profile.label}, not formal written {profile.label}. "
-        f"Write the whole reply in {profile.label} script, including English words such as diaper, comfortable, ICU and hospital. "
-        "Do not leave those words in Latin letters — that switches the voice. "
-        f"Stay on {profile.label} for the whole call."
+        f"Write ordinary words in {profile.label} script. "
+        "Keep clinical and drug names in English Latin letters, the way a nurse says them: "
+        "insulin, potassium chloride, high-alert medicine, ICU, ventilator, bed bath, bedpan, diaper, hygiene, hospital. "
+        "Do not translate those into pure or textbook words and do not rewrite them into the local script "
+        "(not उच्च-सतर्क, not इंसुलिन, not पोटैशियम क्लोराइड). "
+        f"Stay on {profile.label} for the rest of the sentence."
     )

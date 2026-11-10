@@ -18,6 +18,15 @@ import { COMPANY_NAME } from "../config/brand";
 import type { IntegrityReport } from "../lib/integrity";
 import { saveIntegrityReport } from "../lib/saveIntegrity";
 
+/** 10-digit Indian mobile, or "" when the field is blank or not a real number. */
+function mobileDigits(raw: string): string {
+  let digits = raw.replace(/\D/g, "");
+  if (digits.startsWith("0091") && digits.length >= 14) digits = digits.slice(4);
+  else if (digits.startsWith("91") && digits.length === 12) digits = digits.slice(2);
+  else if (digits.startsWith("0") && digits.length === 11) digits = digits.slice(1);
+  return /^[6-9]\d{9}$/.test(digits) ? digits : "";
+}
+
 function formatLeft(ms: number) {
   const total = Math.max(0, Math.ceil(ms / 1000));
   const m = Math.floor(total / 60);
@@ -120,6 +129,8 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   const [roleId, setRoleId] = useState("");
   const [language, setLanguage] = useState("hi-IN");
   const [name, setName] = useState(candidateJoin ? "" : "Test Candidate");
+  const [mobile, setMobile] = useState("");
+  const [gender, setGender] = useState("");
   const [resumeText, setResumeText] = useState(
     candidateJoin
       ? NURSE_RESUME_PREFILL
@@ -223,6 +234,8 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
             name,
             roleAppliedFor: role?.title || "Staff Nurse",
             resumeText,
+            ...(eleven && mobileDigits(mobile) ? { phone: mobileDigits(mobile) } : {}),
+            ...(eleven && gender ? { gender } : {}),
           },
         }),
       });
@@ -266,6 +279,8 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
     voiceProvider,
     candidateJoin,
     eleven,
+    mobile,
+    gender,
   ]);
 
   const endAndScore = useCallback(
@@ -276,12 +291,14 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         setRejoin(null);
       }
       setBusy(true);
+      setScorecard(null);
+      setPhase("scorecard");
       try {
         if (integrity) {
           await saveIntegrityReport(session.id, integrity).catch(() => undefined);
         }
-        // Wait a moment for agent transcript flush
-        await new Promise((r) => setTimeout(r, 1500));
+        // The score is already being drafted on the server. This only waits for the last save.
+        await new Promise((r) => setTimeout(r, 400));
         const [summaryRes, transcriptRes] = await Promise.all([
           fetch(`/api/v2/interview/${session.id}/summary`, { method: "POST" }),
           fetch(`/api/v2/interview/${session.id}/transcript`),
@@ -294,6 +311,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         }
         setPhase("scorecard");
       } catch {
+        setError("The scorecard could not be finished. You can still download the transcript.");
         setPhase("scorecard");
       } finally {
         setBusy(false);
@@ -439,9 +457,11 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   if (phase === "scorecard") {
     const turnCount = transcript?.turns?.length ?? 0;
     return (
-      <div className="mx-auto max-w-lg space-y-6 px-4 py-10">
+      <div className="mx-auto max-w-3xl space-y-6 px-4 py-10">
         <div>
-          <p className="text-xs uppercase tracking-wide text-stone-500">{COMPANY_NAME}</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
+            {COMPANY_NAME} · Hiring scorecard
+          </p>
           <h1 className="text-2xl font-semibold text-stone-900">Interview complete</h1>
           <p className="mt-1 text-sm text-stone-600">
             {session?.candidateName ? (
@@ -457,37 +477,15 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
 
         {error && <p className="text-sm text-red-600">{error}</p>}
 
-        {transcript?.turns.some((t) => t.role === "user" && t.move) && (
-          <section className="rounded-xl border border-stone-200 bg-white p-4">
-            <h2 className="text-sm font-semibold text-stone-900">What happened next</h2>
-            <p className="mt-1 text-xs text-stone-500">
-              Each candidate line is shown with the move that followed it.
-            </p>
-            <ul className="mt-3 space-y-3">
-              {transcript.turns
-                .filter((t) => t.role === "user" && t.move)
-                .map((t, i) => (
-                  <li key={`${t.timestamp}-${i}`} className="border-b border-stone-100 pb-3 last:border-0">
-                    <p className="text-sm text-stone-800">{t.text}</p>
-                    <p className="mt-1 font-mono text-xs text-stone-500">Move: {t.move}</p>
-                  </li>
-                ))}
-            </ul>
-          </section>
-        )}
-
         <div>
-          <h2 className="text-sm font-semibold text-stone-900">Results</h2>
-          <div className="mt-2">
-            {scorecard ? (
-              <ScorecardView scorecard={scorecard} />
-            ) : (
-              <p className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
-                Results are not ready yet. The session was saved
-                {turnCount > 0 ? ` (${turnCount} transcript turns)` : ""}.
-              </p>
-            )}
-          </div>
+          {scorecard ? (
+            <ScorecardView scorecard={scorecard} />
+          ) : (
+            <p className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
+              Preparing the scorecard from this interview
+              {turnCount > 0 ? ` (${turnCount} transcript turns saved)` : ""}…
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -587,8 +585,17 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
       );
     }
 
+    const mobileOk = !eleven || mobile.trim() === "" || Boolean(mobileDigits(mobile));
+    const genderOk = !eleven || gender === "male" || gender === "female" || gender === "unspecified";
     const canJoin =
-      Boolean(roleId) && name.trim().length > 0 && recordingConsent && micReady && !busy && !resumeBusy;
+      Boolean(roleId) &&
+      name.trim().length > 0 &&
+      recordingConsent &&
+      micReady &&
+      mobileOk &&
+      genderOk &&
+      !busy &&
+      !resumeBusy;
 
     return (
       <div className="mx-auto max-w-lg space-y-5 px-4 py-10">
@@ -611,6 +618,50 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
             autoComplete="name"
           />
         </label>
+
+        {eleven && (
+          <>
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">
+                Mobile number <span className="font-normal text-stone-500">(optional)</span>
+              </span>
+              <input
+                className="rounded-lg border border-stone-300 px-3 py-2"
+                value={mobile}
+                onChange={(e) => setMobile(e.target.value)}
+                placeholder="10-digit mobile number"
+                inputMode="numeric"
+                autoComplete="tel"
+              />
+              <span className="text-xs text-stone-500">
+                If you enter it, the interviewer will confirm this number. Leave it blank and they will ask
+                during the call.
+              </span>
+              {!mobileOk && (
+                <span className="text-xs text-red-600">
+                  Enter a 10-digit Indian mobile number, or leave this blank.
+                </span>
+              )}
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Gender</span>
+              <select
+                className="rounded-lg border border-stone-300 bg-white px-3 py-2"
+                value={gender}
+                onChange={(e) => setGender(e.target.value)}
+              >
+                <option value="">Select</option>
+                <option value="female">Female</option>
+                <option value="male">Male</option>
+                <option value="unspecified">Prefer not to say</option>
+              </select>
+              <span className="text-xs text-stone-500">
+                The interviewer will address you using this.
+              </span>
+            </label>
+          </>
+        )}
 
         <LanguagePicker value={language} onChange={setLanguage} />
 

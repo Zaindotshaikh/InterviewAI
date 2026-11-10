@@ -165,6 +165,23 @@ def phone_ask_line(language: str) -> str:
     }.get(_lang(language), "आपका मोबाइल नंबर क्या है?")
 
 
+def phone_form_confirm_line(language: str, shown: str) -> str:
+    """Confirm a number typed on the join form. Do not say it was just heard."""
+    return {
+        "en": "I have your mobile number as {d}. Is that correct?",
+        "hi": "फॉर्म में आपका मोबाइल नंबर {d} है. क्या यह सही है?",
+        "mr": "फॉर्मवर तुमचा मोबाइल नंबर {d} आहे. हे बरोबर आहे का?",
+        "gu": "ફોર્મમાં તમારો મોબાઇલ નંબર {d} છે. શું આ સાચો છે?",
+        "te": "ఫారంలో మీ మొబైల్ నంబర్ {d}. ఇది సరియైనదేనా?",
+        "ta": "ஃபார்மில் உங்க மொபைல் நம்பர் {d}. இது சரியா?",
+        "kn": "ಫಾರ್ಮ್‌ನಲ್ಲಿ ನಿಮ್ಮ ಮೊಬೈಲ್ ನಂಬರ್ {d}. ಇದು ಸರಿಯಾ?",
+        "ml": "ഫോമിൽ നിങ്ങളുടെ മൊബൈൽ നമ്പർ {d}. ഇത് ശരിയാണോ?",
+        "bn": "ফর্মে আপনার মোবাইল নম্বর {d}. এটা ঠিক আছে?",
+        "pa": "ਫਾਰਮ ਵਿੱਚ ਤੁਹਾਡਾ ਮੋਬਾਈਲ ਨੰਬਰ {d} ਹੈ. ਕੀ ਇਹ ਠੀਕ ਹੈ?",
+        "or": "ଫର୍ମରେ ଆପଣଙ୍କ ମୋବାଇଲ୍ ନମ୍ବର {d}. ଏହା ଠିକ୍ କି?",
+    }.get(_lang(language), "फॉर्म में आपका मोबाइल नंबर {d} है. क्या यह सही है?").format(d=shown)
+
+
 def phone_confirm_line(language: str, shown: str) -> str:
     """Read the digits back. Nothing else — no name, no next question."""
     return {

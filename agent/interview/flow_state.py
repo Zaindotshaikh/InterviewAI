@@ -81,6 +81,8 @@ class FlowState:
     silence_level: int = 0
     interruptions: int = 0
     outcome: str | None = None  # completed | screened_out | time | withdrew | incomplete_silence | ...
+    # Join-form mobile was already offered for confirmation. A "no" must ask, not re-read the form.
+    form_phone_offered: bool = False
 
     def slot(self, field_id: str) -> Slot:
         return self.slots.setdefault(field_id, Slot())

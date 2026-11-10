@@ -122,7 +122,8 @@ class Settings(BaseSettings):
     # Model used while grading clinical answers; same default.
     clinical_director_model: str = "gpt-4o"
     # Give up on the analyst after this long and use the rule-based fallback so the call never stalls.
-    director_timeout_seconds: float = 4.5
+    # 8s for the demo: slow screening calls were cancelled at 4.5s and then treated as not heard.
+    director_timeout_seconds: float = 8
     # Seconds of candidate silence before the first nudge; later levels follow at the same spacing.
     silence_nudge_seconds: int = 12
     # How long a dropped candidate has to rejoin before the interview is ended as incomplete.

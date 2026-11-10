@@ -7,6 +7,7 @@ import {
   getV2Interview,
   updateV2Controller,
 } from "../lib/v2Store.js";
+import { scheduleScorecardPrep } from "../lib/scorecardPrep.js";
 import type { V2ControllerState } from "../lib/types.js";
 
 const router = Router();
@@ -119,6 +120,7 @@ router.post("/interviews/:id/controller", async (req, res) => {
   try {
     const patch = req.body as Partial<V2ControllerState>;
     const controller = await updateV2Controller(req.params.id, patch);
+    scheduleScorecardPrep(req.params.id);
     res.json({ controller });
   } catch (err) {
     console.error("[v2/internal] controller error:", err);
@@ -129,6 +131,7 @@ router.post("/interviews/:id/controller", async (req, res) => {
 router.post("/interviews/:id/complete", async (req, res) => {
   try {
     await completeV2Interview(req.params.id);
+    scheduleScorecardPrep(req.params.id, 300);
     await appendV2Event(req.params.id, {
       ts: new Date().toISOString(),
       type: "interview.completed",

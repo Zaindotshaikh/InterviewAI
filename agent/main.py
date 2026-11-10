@@ -340,7 +340,8 @@ class InterviewAgent(Agent):
             else:
                 expressive = ""
             instructions = (
-                f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n{spoken_style(plan.language, voice)}\n\n"
+                f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n"
+                f"{spoken_style(plan.language, voice, plan.candidate_gender)}\n\n"
                 f"{native_script_reminder(plan.language)}{expressive}"
             )
         super().__init__(instructions=instructions)
@@ -662,7 +663,11 @@ class InterviewAgent(Agent):
         full_raw = "".join(raw_chunks)
 
         # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
-        captured = {k for k, v in self.flow.state.slots.items() if v.value is not None}
+        # Only a confirmed fact is "already asked". A value still waiting for a read-back
+        # (the join-form mobile) must be spoken, not replaced with "next question".
+        captured = {
+            k for k, v in self.flow.state.slots.items() if v.status == "confirmed" and v.value is not None
+        }
         height = self.flow.state.slot("height_cm")
         weight = self.flow.state.slot("weight_kg")
         from interview.normalize import height_said_in_cm, spoken_height_phrase

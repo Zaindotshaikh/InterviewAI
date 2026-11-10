@@ -42,6 +42,12 @@ def build(blueprint, client, state=None):  # noqa: F811
     return Director(flow, analyzer), flow
 
 
+def test_screening_call_does_not_ask_for_a_clinical_grade(blueprint):  # noqa: F811
+    analyzer = TurnAnalyzer(blueprint, api_key="x", model="m", client=FakeClient([CITY]))
+    assert "clinical" not in analyzer._screening_schema["properties"]
+    assert "clinical" in analyzer._schema["properties"]
+
+
 def test_decide_uses_analysis_and_records_slot(blueprint):  # noqa: F811
     director, flow = build(blueprint, FakeClient([CITY]))
     flow.opening()

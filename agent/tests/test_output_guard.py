@@ -105,6 +105,26 @@ def test_height_cm_allowed_when_they_said_cm(guard: OutputGuard) -> None:
     assert out == text
 
 
+def test_form_phone_readback_is_not_replaced_with_next_question(guard: OutputGuard) -> None:
+    text = "फॉर्म में आपका मोबाइल नंबर 9, 1, 1, 2, 3, 2, 3, 5, 4, 9 है. क्या यह सही है?"
+    blocked, out, reason = guard.inspect_text(
+        text,
+        language="hi-IN",
+        captured_slots={"phone"},
+    )
+    assert not blocked
+    assert reason == ""
+    assert out == text
+    english = "I have your mobile number as 9, 8, 7, 6, 5, 4, 3, 2, 1, 0. Is that correct?"
+    blocked_en, out_en, _reason = guard.inspect_text(
+        english,
+        language="en-IN",
+        captured_slots={"phone"},
+    )
+    assert not blocked_en
+    assert out_en == english
+
+
 def test_slot_allowed_when_not_captured(guard: OutputGuard) -> None:
     text = "Which city are you currently located in?"
     # When city is not yet captured, asking city is allowed

@@ -25,12 +25,14 @@ from interview.analysis import (
 from interview.blueprint import AreaSpec, Blueprint, FieldSpec
 from interview.experience_probes import build_probe_queue, is_fresher
 from interview.flow_state import AreaProgress, FlowState
+from interview.indic_phrases import CONFIRM_NO_RE
 from interview.language import get_profile
 from interview.phone_speech import (
     body_confirm_line,
     phone_again_line,
     phone_ask_line,
     phone_confirm_line,
+    phone_form_confirm_line,
     phone_invalid_line,
     store_phone,
     trunk_prefix,
@@ -40,6 +42,7 @@ from interview.normalize import (
     extract_qualification_and_year,
     normalize_field,
     normalize_qualification,
+    normalize_years_experience,
     parse_height_and_weight,
     plausible_city,
     spoken_groups,
@@ -49,6 +52,10 @@ from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
 
 NEGATIVE_STANCES = ("hesitant", "refuses")
+_WORKPLACE_RE = re.compile(
+    r"(hospital|ward|\bicu\b|clinic|अस्पताल|वार्ड|आईसीयू|nursing\s*home)",
+    re.IGNORECASE,
+)
 LOW_CONFIDENCE = 0.6
 MAX_CARE_ASKS = 2
 SAFETY_BASICS = ("medication_safety", "emergency_response", "infection_control")
@@ -60,6 +67,13 @@ _TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 PHONE_ASK = "Ask for their mobile number."
+# Slot evidence when the digits came from the join form, not from speech.
+FORM_PHONE_EVIDENCE = "provided on the join form"
+
+
+def _explicit_no(text: str) -> bool:
+    """True when they actually rejected the read-back, not when they asked what is next."""
+    return bool(CONFIRM_NO_RE.search(text or ""))
 
 STYLE_FOOTER = (
     "Reply in 1-2 short spoken sentences, like a recruiter on a phone. Ask only ONE question. "
@@ -684,6 +698,7 @@ class InterviewFlow:
         self._prepare_phone_turn(a)
         self._prepare_body_turn(a)
         self._prepare_education_turn(a)
+        self._prepare_experience_turn(a)
 
         if st.stage == "ended":
             return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
@@ -896,9 +911,20 @@ class InterviewFlow:
             slot = st.slots.get(field_id)
             if spec is not None and slot is not None and slot.value is not None:
                 shown = spoken_groups(str(slot.value)) if spec.kind == "phone" else str(slot.value)
-                move = self._move("confirm", f"Say exactly: I heard {shown}. Is that correct?")
+                form_phone = spec.kind == "phone" and slot.evidence == FORM_PHONE_EVIDENCE
+                heard = (
+                    "The number is already on the join form. Do not ask them to dictate it. "
+                    f"Say exactly: {phone_form_confirm_line(self.state.language, shown)}"
+                    if form_phone
+                    else f"Say exactly: I heard {shown}. Is that correct?"
+                )
+                move = self._move("confirm", heard)
                 if spec.kind == "phone":
-                    move.verbatim = phone_confirm_line(self.state.language, shown)
+                    move.verbatim = (
+                        phone_form_confirm_line(self.state.language, shown)
+                        if form_phone
+                        else phone_confirm_line(self.state.language, shown)
+                    )
                 return move
         if kind == "care":
             items = [str(i) for i in (focus.get("items") or [])]
@@ -1401,6 +1427,27 @@ class InterviewFlow:
         if yr is not None and not has_yr and "qualification_year" in ids:
             a.slot_updates.append(SlotUpdate("qualification_year", str(yr), 0.95, raw[:80]))
 
+    def _prepare_experience_turn(self, a: TurnAnalysis) -> None:
+        """Keep a clear years/workplace line when the analyst times out and returns no slots.
+
+        The transcript is already in hand. "तीन साल" and "ICU ward" must not be treated as unheard
+        just because the model was still writing when the cap cancelled it.
+        """
+        focus = self.state.focus or {}
+        if focus.get("type") != "slots":
+            return
+        ids = {str(i) for i in (focus.get("ids") or [])}
+        raw = (a.raw_utterance or "").strip()
+        if not raw or not ids & {"experience_years", "experience_settings"}:
+            return
+        if "experience_years" in ids and not any(u.field == "experience_years" for u in a.slot_updates):
+            years = normalize_years_experience(raw)
+            if years.ok:
+                a.slot_updates.append(SlotUpdate("experience_years", str(years.value), 0.9, raw[:80]))
+        if "experience_settings" in ids and not any(u.field == "experience_settings" for u in a.slot_updates):
+            if _WORKPLACE_RE.search(raw):
+                a.slot_updates.append(SlotUpdate("experience_settings", raw[:160], 0.85, raw[:80]))
+
     def _absorb_slot_updates(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
         st = self.state
         for u in a.slot_updates:
@@ -1468,6 +1515,16 @@ class InterviewFlow:
             slot.status = "confirmed"
         elif a.confirmation == "denied":
             fresh = any(u.field == field_id for u in a.slot_updates)
+            # The form number stays until they actually say it is wrong. "Yes, ask the
+            # question" is not a rejection — read the same number back.
+            if (
+                not fresh
+                and spec is not None
+                and spec.kind == "phone"
+                and slot.evidence == FORM_PHONE_EVIDENCE
+                and not _explicit_no(a.raw_utterance)
+            ):
+                return
             if not fresh:
                 slot.status, slot.value = "empty", None
 
@@ -1650,6 +1707,37 @@ class InterviewFlow:
         raw = height.evidence or st.slot("weight_kg").evidence or ""
         return spoken_height_phrase(raw, height.value)
 
+    def _form_phone_digits(self) -> str:
+        """Valid mobile typed on the join form, or empty."""
+        raw = str(getattr(self.plan, "candidate_phone", "") or "")
+        digits = trunk_prefix(raw)
+        return digits if valid_indian_mobile(digits) else ""
+
+    def _seed_form_phone_if_due(self) -> None:
+        """When the next screening ask would be the mobile, confirm the form number instead.
+
+        A later denial clears the slot. form_phone_offered stops the same digits being offered again,
+        so the spoken ask takes over.
+        """
+        st = self.state
+        if st.form_phone_offered:
+            return
+        digits = self._form_phone_digits()
+        if not digits:
+            return
+        slot = st.slot("phone")
+        if slot.status != "empty":
+            return
+        group = self._missing_group()
+        if not group or group[0].kind != "phone":
+            return
+        st.form_phone_offered = True
+        slot.value = digits
+        slot.status = "captured"
+        slot.confidence = 1.0
+        slot.evidence = FORM_PHONE_EVIDENCE
+        slot.attempts = 0
+
     def _needs_confirmation(self) -> FieldSpec | None:
         """Read-back for blueprint `confirm` fields (phone). Body pair is handled jointly."""
         st = self.state
@@ -1736,13 +1824,32 @@ class InterviewFlow:
             return move
 
         # 3. A captured value that needs reading back (phone numbers).
+        #    A join-form mobile is seeded here, once, so this read-back replaces the ask.
+        self._seed_form_phone_if_due()
         spec = self._needs_confirmation()
         if spec is not None:
             slot = st.slot(spec.id)
             slot.attempts += 1
             value = slot.value
             shown = spoken_groups(str(value)) if spec.kind == "phone" else str(value)
-            self._set_focus("confirm", field=spec.id, ids=[spec.id])
+            form_phone = spec.kind == "phone" and slot.evidence == FORM_PHONE_EVIDENCE
+            self._set_focus(
+                "confirm",
+                field=spec.id,
+                ids=[spec.id],
+                source="form" if form_phone else "heard",
+            )
+            if form_phone:
+                line = phone_form_confirm_line(st.language, shown)
+                move = self._move(
+                    "confirm",
+                    "The candidate already typed this mobile number on the join form. "
+                    "Do not ask them to say the number. Confirm it in one sentence. "
+                    f"Say exactly: {line}",
+                    events=events + [("slot.prefilled", {"field": "phone"})],
+                )
+                move.verbatim = line
+                return move
             move = self._move(
                 "confirm",
                 f"Say exactly: I heard {shown}. Is that correct?",
