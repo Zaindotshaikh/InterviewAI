@@ -125,3 +125,23 @@ def test_resume_from_persisted_state_does_not_regreet(blueprint):  # noqa: F811
     move = flow2.opening()
     assert move.kind == "resume"
     assert flow2.state.slots["city"].value == "Pune"
+
+
+def test_analyst_prompt_asks_for_short_strings():
+    from interview.analysis import SCREENING_SYSTEM_PROMPT, SYSTEM_PROMPT
+
+    assert "at most 12 words" in SCREENING_SYSTEM_PROMPT
+    assert "at most 12 words" in SYSTEM_PROMPT
+
+
+def test_every_screening_schema_field_is_read_by_the_flow(blueprint):  # noqa: F811
+    """Slimming the screening schema is only safe for fields nothing reads. Keep this list honest."""
+    analyzer = TurnAnalyzer(blueprint, api_key="x", model="m", client=FakeClient([CITY]))
+    props = set(analyzer._screening_schema["properties"])
+    assert analyzer._screening_schema["required"] == list(analyzer._screening_schema["properties"])
+    # Each of these is consumed in interview/flow.py during screening or closing.
+    assert props == {
+        "intelligibility", "intent", "nervous", "slot_updates", "confirmation", "care_updates",
+        "experience_level", "new_claims", "contradictions", "gist_en", "aside", "resume_mismatch",
+        "answer_depth",
+    }

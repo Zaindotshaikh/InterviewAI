@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 
 logger = logging.getLogger("interview-v2.output_guard")
+
+# Same sentence boundary the expressiveness engine and disfluency layer use.
+_SENTENCE_END = re.compile(r"(?<!\.)[.?!।॥](?!\.)[\"')\]]*\s+")
 
 # 1. Salary / compensation figures: currency symbol, lakh, CTC, salary words near numbers
 _SALARY_PATTERNS = [
@@ -181,3 +185,61 @@ class OutputGuard:
                 return True, truncated, "multiple_questions"
 
         return False, text, ""
+
+    async def stream(
+        self,
+        chunks: AsyncIterable[str],
+        *,
+        language: str = "hi-IN",
+        captured_slots: set[str] | None = None,
+        single_question: bool = True,
+        fallback_text: str = "",
+        forbid_centimetres: bool = False,
+    ) -> AsyncIterator[str]:
+        """Same checks as `inspect_text`, but sentence by sentence so TTS can start on the first sentence.
+
+        Each finished sentence is checked together with everything already released. A hit releases the
+        safe replacement once and ends the reply. With `single_question`, the reply ends after the first
+        sentence that asks a question. `inspect_text` is unchanged and still used for each check.
+        """
+        released: list[str] = []
+        buf = ""
+        stop = False
+
+        def _check(sentence: str) -> tuple[bool, str]:
+            candidate = "".join(released) + sentence
+            blocked, safe, reason = self.inspect_text(
+                candidate,
+                language=language,
+                captured_slots=captured_slots,
+                single_question=False,
+                fallback_text=fallback_text,
+                forbid_centimetres=forbid_centimetres,
+            )
+            if blocked:
+                logger.warning("guard.stream blocked reason=%s released=%d", reason, len(released))
+            return blocked, safe
+
+        async for chunk in chunks:
+            if stop:
+                continue  # drain the LLM stream so the turn closes cleanly
+            buf += chunk
+            while (m := _SENTENCE_END.search(buf)) is not None:
+                sentence, buf = buf[: m.end()], buf[m.end() :]
+                blocked, safe = _check(sentence)
+                if blocked:
+                    yield safe
+                    stop = True
+                    break
+                released.append(sentence)
+                yield sentence
+                if single_question and "?" in sentence:
+                    stop = True
+                    break
+        if stop or not buf.strip():
+            return
+        blocked, safe = _check(buf)
+        if blocked:
+            yield safe
+            return
+        yield buf

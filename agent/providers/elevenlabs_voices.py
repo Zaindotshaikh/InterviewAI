@@ -63,3 +63,15 @@ def pinned_elevenlabs_voice_id(current_voice_id: str | None, language: str, sett
     if current:
         return current
     return elevenlabs_voice_for(language, settings)
+
+
+# Voices whose library label is male. Every other id on this route is a woman,
+# including the per-language voices in ELEVENLABS_VOICE_BY_LANG.
+_MALE_ELEVENLABS_VOICES: set[str] = set()
+
+
+def elevenlabs_speaker_gender(voice_id: str | None) -> str:
+    """Gender of the ElevenLabs voice that will speak. Not the candidate's gender."""
+    if (voice_id or "").strip() in _MALE_ELEVENLABS_VOICES:
+        return "male"
+    return "female"

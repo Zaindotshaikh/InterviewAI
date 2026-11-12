@@ -1,4 +1,4 @@
-"""Speech arbiter: one in-flight agent utterance; fillers yield to Director."""
+"""Speech arbiter: one in-flight agent utterance; a reply follows a playing filler."""
 
 import asyncio
 import logging
@@ -87,7 +87,7 @@ def test_watchdog_rejected_while_director_plays():
     asyncio.run(run())
 
 
-def test_director_preempts_filler(caplog):
+def test_director_follows_filler_without_cutting_it(caplog):
     async def run():
         arb = SpeechArbiter()
         filler = FakeHandle()
@@ -95,13 +95,32 @@ def test_director_preempts_filler(caplog):
         caplog.set_level(logging.INFO, logger="interview-v2.speech")
         assert await arb.play("filler", lambda: filler, wait=False, detail="ack") is True
         assert await arb.play("director", lambda: director, wait=False, detail="ask") is True
-        assert filler.interrupted is True
+        assert filler.interrupted is False
         assert arb.current_source == "director"
         text = caplog.text
         assert "speech.start source=filler" in text
-        assert "speech.preempted current=filler by=director" in text
+        assert "speech.chained after=filler by=director" in text
         assert "speech.start source=director" in text
+        filler.finish()
+        await asyncio.sleep(0.02)
+        assert director.interrupted is False
         director.finish()
+        await asyncio.sleep(0.02)
+        assert arb.busy() is False
+
+    asyncio.run(run())
+
+
+def test_barge_in_on_filler_cancels_the_queued_reply():
+    async def run():
+        arb = SpeechArbiter()
+        filler = FakeHandle()
+        director = FakeHandle()
+        await arb.play("filler", lambda: filler, wait=False)
+        await arb.play("director", lambda: director, wait=False)
+        filler.interrupt()  # candidate kept talking over the reaction
+        await asyncio.sleep(0.02)
+        assert director.interrupted is True
         await asyncio.sleep(0.02)
         assert arb.busy() is False
 
@@ -150,15 +169,16 @@ def test_second_filler_does_not_overlap_first():
     asyncio.run(run())
 
 
-def test_verbatim_preempts_filler_like_director():
+def test_verbatim_follows_filler_like_director():
     async def run():
         arb = SpeechArbiter()
         filler = FakeHandle()
         verbatim = FakeHandle()
         await arb.play("filler", lambda: filler, wait=False)
         await arb.play("verbatim", lambda: verbatim, wait=False)
-        assert filler.interrupted is True
+        assert filler.interrupted is False
         assert arb.current_source == "verbatim"
+        filler.finish()
         verbatim.finish()
         await asyncio.sleep(0.02)
 

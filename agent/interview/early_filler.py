@@ -53,7 +53,7 @@ class EarlyFiller:
         old, new = getattr(ev, "old_state", None), getattr(ev, "new_state", None)
         # Candidate paused (speaking → listening) with some interim text → try early ack.
         if old == "speaking" and new == "listening" and self._interim and not self._started:
-            picked = self._fillers.pick(self._language, self._interim, bucket="neutral")
+            picked = self._fillers.pick(self._language, self._interim)
             if picked is None:
                 return
             text, frames = picked

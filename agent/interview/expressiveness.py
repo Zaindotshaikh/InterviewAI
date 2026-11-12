@@ -26,16 +26,6 @@ _SIGH: dict[str, str] = {
     "en-IN": "[sighs] ",
 }
 
-# P2-04: Genuine distress / anxiety only. Simple negations ("no", "don't", "नहीं") are neutral.
-_EMPATHY_WORDS = re.compile(
-    r"\b(uncomfortable|scared|afraid|nervous|anxious|"
-    r"not comfortable|डरा|डर|परेशान|घबराहट|मुश्किल|"
-    r"भीती|अवघड|घाबरलो|घाबरले|"
-    r"બીક|ડર|મુશ્કેલ|ગભરાયેલ|ચિંતા)\b",
-    re.I,
-)
-
-
 class ExpressivenessEngine:
     def __init__(
         self,
@@ -225,10 +215,3 @@ class ExpressivenessEngine:
         self._last_pause = used_any["pause"]
         self._last_umm = used_any["umm"]
         self._last_sigh = used_any["sigh"]
-
-
-def filler_bucket_from_text(text: str, *, previous_empathy: bool = False) -> str:
-    """Heuristic bucket for ack fillers — NOT Director (filler runs earlier)."""
-    if previous_empathy or _EMPATHY_WORDS.search(text or ""):
-        return "empathetic"
-    return "neutral"

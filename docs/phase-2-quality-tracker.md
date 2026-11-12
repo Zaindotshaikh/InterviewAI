@@ -416,3 +416,16 @@ Same worker as Phase 1. Names only. Never paste secret values.
 ## How to start implementation
 
 First chat: **P2-01** (arbiter). If the same engineer continues, **P2-04** next (fillers must use that arbiter) and **P2-02** (patience) as the following batch. A second engineer may take P2-04 in parallel only after P2-01 names the single speak function. Do not start P2-06 until C1–C5 are Pass or explicitly waived. Do not start P2-09 until P2-08 is Done.
+
+---
+
+## Turn latency test (/elevenlabs-interviewer only)
+
+Steps L0-L6 are in code/env. Needs live calls; not run yet.
+
+1. Restart the agent worker and backend (BACKEND_URL reachable). Startup log should show Scribe silence `0.6`.
+2. Two calls of ~8 turns each: one Hindi, one English. Optional Telugu spot-check. Mix short answers ("yes"), long answers, and a pause mid-sentence.
+3. `python agent/scripts/latency_report.py <interview id>` per call. Compare p50/p95 of `reply_from_vad_ms` and `director_ms` with the pre-change baseline (12:57 call: ttfa_confirm 3.4-6 s, director p50 1.8 s).
+4. Check: no clipped answers on phone numbers, heights, mid-sentence pauses (L2); no half-sentence or guard-blocked lines (L1); early-hit rate up (L3).
+5. Rollback per step: `VOICE_STREAM_TTS=false`, `SCRIBE_VAD_SILENCE_SECS=0.9`, `LLM_FALLBACK_MODEL=` , `THINKING_FILLER_PROBABILITY=0.6`.
+6. Only if voice-LLM TTFT still dominates: L7 (see `docs/future-scope.md`). Region move: `docs/production-ops.md`.

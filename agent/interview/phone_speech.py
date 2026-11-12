@@ -148,6 +148,29 @@ def _lang(language: str) -> str:
     return "or" if code == "od" else code
 
 
+# 0-9, one language each. Spelled out so the voice cannot mix Hindi and English digits.
+_DIGIT_WORDS: dict[str, tuple[str, ...]] = {
+    "en": ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"),
+    "hi": ("शून्य", "एक", "दो", "तीन", "चार", "पांच", "छह", "सात", "आठ", "नौ"),
+    "mr": ("शून्य", "एक", "दोन", "तीन", "चार", "पाच", "सहा", "सात", "आठ", "नऊ"),
+    "gu": ("શૂન્ય", "એક", "બે", "ત્રણ", "ચાર", "પાંચ", "છ", "સાત", "આઠ", "નવ"),
+    "te": ("సున్నా", "ఒకటి", "రెండు", "మూడు", "నాలుగు", "ఐదు", "ఆరు", "ఏడు", "ఎనిమిది", "తొమ్మిది"),
+    "ta": ("பூஜ்யம்", "ஒன்று", "இரண்டு", "மூன்று", "நான்கு", "ஐந்து", "ஆறு", "ஏழு", "எட்டு", "ஒன்பது"),
+    "kn": ("ಸೊನ್ನೆ", "ಒಂದು", "ಎರಡು", "ಮೂರು", "ನಾಲ್ಕು", "ಐದು", "ಆರು", "ಏಳು", "ಎಂಟು", "ಒಂಬತ್ತು"),
+    "ml": ("പൂജ്യം", "ഒന്ന്", "രണ്ട്", "മൂന്ന്", "നാല്", "അഞ്ച്", "ആറ്", "ഏഴ്", "എട്ട്", "ഒമ്പത്"),
+    "bn": ("শূন্য", "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত", "আট", "নয়"),
+    "pa": ("ਸਿਫਰ", "ਇੱਕ", "ਦੋ", "ਤਿੰਨ", "ਚਾਰ", "ਪੰਜ", "ਛੇ", "ਸੱਤ", "ਅੱਠ", "ਨੌਂ"),
+    "or": ("ଶୂନ", "ଏକ", "ଦୁଇ", "ତିନି", "ଚାରି", "ପାଞ୍ଚ", "ଛଅ", "ସାତ", "ଆଠ", "ନଅ"),
+}
+
+
+def spoken_phone(phone: str, language: str) -> str:
+    """One digit at a time, every digit in the interview language."""
+    digits = re.sub(r"\D", "", str(phone or ""))
+    words = _DIGIT_WORDS.get(_lang(language), _DIGIT_WORDS["hi"])
+    return ", ".join(words[int(d)] for d in digits)
+
+
 def phone_ask_line(language: str) -> str:
     """One sentence. The mobile ask never shares a turn with another question."""
     return {

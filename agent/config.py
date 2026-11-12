@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     # httpx read timeout for streaming voice LLM (plugin default 5s is too tight under load).
     llm_http_timeout_seconds: float = 25.0
+    # Cap on voice-LLM reply tokens (0 = no cap). Generous on purpose: Indic text needs many tokens per word.
+    llm_max_completion_tokens: int = 320
     # LiveKit LLM attempt retries after timeout (0 = single try; 1 = one retry).
     llm_max_retry: int = 1
     # Optional second OpenAI model if primary errors (empty = no fallback).
@@ -65,6 +67,11 @@ class Settings(BaseSettings):
     thinking_sound_enabled: bool = True
     # Mid-call TTS fallback when ElevenLabs fails (google = Chirp).
     tts_fallback_on_error: Literal["none", "google"] = "google"
+    # Scribe server-VAD silence before it commits a final transcript. Lower = faster replies;
+    # too low can cut a phone number or height/weight answer spoken with pauses (try 0.7, then 1.0).
+    scribe_vad_silence_secs: float = 0.6
+    # Send each checked sentence to TTS as the LLM writes it (false = wait for the whole reply).
+    voice_stream_tts: bool = True
     # Raise when STT has no word alignment so हाँ/जी don't barge in.
     interruption_min_words_no_align: int = 3
 
@@ -152,6 +159,11 @@ class Settings(BaseSettings):
     endpointing_min_delay_uncovered: float = 0.55
     # Longest silence (s) the agent will wait while the candidate still seems mid-thought.
     endpointing_max_delay: float = 2.3
+    # Max hold on one-fact questions (city, year, yes/no confirm); 0 keeps endpointing_max_delay.
+    endpointing_short_max_delay: float = 1.2
+    # Close the turn at the min hold once the final transcript is a complete one-fact answer
+    # (city, year, yes/no, full height+weight, full mobile).
+    voice_fast_commit_short: bool = True
     # Dynamic mode adaptation speed: lower learns the candidate's pauses faster (0 < alpha <= 1).
     endpointing_alpha: float = 0.7
     # "adaptive" tells "mm-hmm"/coughs from real interruptions; falls back to "vad" on its own if it errors.
@@ -170,6 +182,15 @@ class Settings(BaseSettings):
 
     # Chance of a short native reaction ("बरं.", "अच्छा.") in the interview voice after the candidate finishes, 0 disables
     thinking_filler_probability: float = 0.6
+    # No turn-start reaction when the early analysis is already done; the reply follows quickly anyway.
+    voice_ack_skip_when_ready: bool = True
+    # Start the analysis on the settled partial transcript when the candidate stops talking,
+    # instead of waiting for the final transcript; reused when the final matches.
+    voice_early_analysis_on_partial: bool = True
+    # Check provider keys at worker boot and before each cascade call; refuse the call on a rejected key.
+    voice_key_check: bool = True
+    # Where unsent backend writes are kept until the next job replays them (empty = agent/.spool).
+    backend_spool_dir: str = ""
     # Unused: the greeting never starts with a filler. Kept so existing .env files still load.
     opening_hesitation: bool = False
     # Chance a reply may keep the one "umm," the LLM placed (0 = never speak an um)
@@ -259,6 +280,8 @@ def get_settings() -> Settings:
         "VOICE_PAUSE_RATE": "voice_pause_rate",
         "VOICE_EXPRESS_COOLDOWN_TURNS": "voice_express_cooldown_turns",
         "VOICE_TRANSCRIPT_SPLIT": "voice_transcript_split",
+        "VOICE_STREAM_TTS": "voice_stream_tts",
+        "SCRIBE_VAD_SILENCE_SECS": "scribe_vad_silence_secs",
         "DIRECTOR_EMPATHY_TONE": "director_empathy_tone",
         "VOICE_EARLY_FILLER": "voice_early_filler",
         "THINKING_SOUND_ENABLED": "thinking_sound_enabled",
@@ -272,6 +295,7 @@ def get_settings() -> Settings:
         "LLM_MODEL": "llm_model",
         "LLM_HTTP_TIMEOUT_SECONDS": "llm_http_timeout_seconds",
         "LLM_MAX_RETRY": "llm_max_retry",
+        "LLM_MAX_COMPLETION_TOKENS": "llm_max_completion_tokens",
         "LLM_FALLBACK_MODEL": "llm_fallback_model",
         "NOISE_PROVIDER": "noise_provider",
         "GOOGLE_APPLICATION_CREDENTIALS": "google_application_credentials",
@@ -286,6 +310,10 @@ def get_settings() -> Settings:
         "GPT_LIVE_VOICE_BY_LANG": "gpt_live_voice_by_lang",
         "GPT_LIVE_CUSTOM_VOICE_ID": "gpt_live_custom_voice_id",
         "THINKING_FILLER_PROBABILITY": "thinking_filler_probability",
+        "VOICE_ACK_SKIP_WHEN_READY": "voice_ack_skip_when_ready",
+        "VOICE_EARLY_ANALYSIS_ON_PARTIAL": "voice_early_analysis_on_partial",
+        "VOICE_KEY_CHECK": "voice_key_check",
+        "BACKEND_SPOOL_DIR": "backend_spool_dir",
         "THINKING_SOUND_VOLUME": "thinking_sound_volume",
         "OPENING_HESITATION": "opening_hesitation",
         "TURN_DETECTOR_ENABLED": "turn_detector_enabled",
@@ -293,6 +321,8 @@ def get_settings() -> Settings:
         "ENDPOINTING_MIN_DELAY": "endpointing_min_delay",
         "ENDPOINTING_MIN_DELAY_UNCOVERED": "endpointing_min_delay_uncovered",
         "ENDPOINTING_MAX_DELAY": "endpointing_max_delay",
+        "ENDPOINTING_SHORT_MAX_DELAY": "endpointing_short_max_delay",
+        "VOICE_FAST_COMMIT_SHORT": "voice_fast_commit_short",
         "ENDPOINTING_ALPHA": "endpointing_alpha",
         "INTERRUPTION_MODE": "interruption_mode",
         "PREEMPTIVE_GENERATION": "preemptive_generation",

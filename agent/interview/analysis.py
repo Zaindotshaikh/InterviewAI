@@ -305,6 +305,10 @@ nervousness.
   Do not leave care_updates empty on a clear yes; the interview will wrongly end the gate if you miss it.
 - experience_level (only when stated): fresher = no paid nursing experience, junior = under 3 years, experienced = 3+.
 
+## Output size (the interviewer waits for this JSON)
+Every free-text string is at most 12 words: reason, note, gist_en, aside, resume_mismatch, new_claims entries.
+Use an empty string or an empty list when nothing applies. Do not repeat the candidate's words back; no explanations.
+
 """
 
 _CLINICAL_RULES = """## Clinical grading (only when clinical_context is present and they attempted an answer)
@@ -336,8 +340,10 @@ _CONSISTENCY_RULES = """## Consistency
   off_topic, leave aside empty and use gist_en.
 - resume_mismatch: empty, unless resume_summary is present and they just stated their own work history and one
   concrete fact (years, hospital, ward, or role) clearly conflicts with that resume. Then one line:
-  "resume says …; they said …". The same place in different words is not a conflict. A detail the resume does
-  not mention is not a conflict. Never copy the resume into slot_updates.
+  "resume says …; they said …". The same place in different words is not a conflict: singular or plural,
+  spelling or transliteration, with or without "Hospital" or the city ("Apollo Hospital" = "Apollo Hospitals,
+  Pune"). Years rounded to a whole number are not a conflict ("3 years" = "3 years 8 months"). A detail the resume
+  does not mention is not a conflict. Never copy the resume into slot_updates.
 - answer_depth: when the interviewer asked an experience or nursing-practice probe (not a one-word screening
   slot), set sufficient if they gave concrete steps, checks, or duties; thin if only a vague yes / one short
   phrase with no detail; none when the question was not that kind of probe.
@@ -560,6 +566,26 @@ def heuristic_analysis(text: str, *, pending_field: str = "", pending_value: str
 # --------------------------------------------------------------------------------------------------------------
 
 
+def is_reasoning_model(model: str) -> bool:
+    """GPT-5 family: no temperature, max_completion_tokens, and a reasoning effort to turn down."""
+    return (model or "").startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def reasoning_off(model: str) -> str:
+    """Lowest effort the model accepts. gpt-5.1 and later take "none"; gpt-5 and the o-series stop at "minimal"."""
+    m = (model or "").lower()
+    if m.startswith("gpt-5."):
+        return "none"
+    return "minimal" if m.startswith("gpt-5") else "low"
+
+
+def completion_options(model: str, *, max_tokens: int) -> dict[str, Any]:
+    """Per-family request options for the analyst. Reasoning is off: this is extraction, and the interviewer waits."""
+    if is_reasoning_model(model):
+        return {"reasoning_effort": reasoning_off(model), "max_completion_tokens": max_tokens}
+    return {"temperature": 0, "max_tokens": max_tokens}
+
+
 class TurnAnalyzer:
     """Calls a small structured-output model once per candidate turn."""
 
@@ -582,6 +608,7 @@ class TurnAnalyzer:
         self._api_key = api_key
         self.failures = 0
         self.last_latency_ms = 0.0
+        self.last_completion_tokens = 0
 
     @property
     def available(self) -> bool:
@@ -631,13 +658,14 @@ class TurnAnalyzer:
                             "schema": self._schema if clinical else self._screening_schema,
                         },
                     },
-                    temperature=0,
-                    max_tokens=900 if clinical else 450,
+                    **completion_options(model, max_tokens=900 if clinical else 450),
                 ),
                 timeout=self._timeout,
             )
             data = json.loads(resp.choices[0].message.content or "{}")
             self.last_latency_ms = (loop.time() - started) * 1000
+            usage = getattr(resp, "usage", None)
+            self.last_completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
             return TurnAnalysis.from_dict(data)
         except Exception as err:  # noqa: BLE001
             self.failures += 1

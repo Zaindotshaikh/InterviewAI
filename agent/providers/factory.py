@@ -104,11 +104,22 @@ def _openai_llm(model: str, settings: Settings):
     import httpx
 
     read_s = max(5.0, float(settings.llm_http_timeout_seconds))
+    from interview.analysis import is_reasoning_model, reasoning_off
+
+    kwargs: dict[str, Any] = {}
+    cap = int(getattr(settings, "llm_max_completion_tokens", 0) or 0)
+    if cap > 0:
+        # Safety cap against a runaway reply, not a length rule (Indic scripts use many tokens per word).
+        kwargs["max_completion_tokens"] = cap
+    if is_reasoning_model(model):
+        # A spoken reply is wording, not reasoning; thinking tokens would only delay the first word.
+        kwargs["reasoning_effort"] = reasoning_off(model)
     return openai_plugin.LLM(
         model=model,
         api_key=settings.openai_api_key,
         max_retries=0,
         timeout=httpx.Timeout(connect=10.0, read=read_s, write=10.0, pool=5.0),
+        **kwargs,
     )
 
 
@@ -180,7 +191,7 @@ def build_elevenlabs_scribe_stt(language: str, settings: Settings, keyterms: lis
     # and LiveKit fires transcription_timeout. Server VAD commits on silence so Flow
     # sees FINAL transcripts (digits, city, yes/no) on each pause.
     server_vad = {
-        "vad_silence_threshold_secs": 1.0,
+        "vad_silence_threshold_secs": float(settings.scribe_vad_silence_secs),
         "vad_threshold": 0.4,
         "min_speech_duration_ms": 100,
         "min_silence_duration_ms": 100,

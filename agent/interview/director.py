@@ -21,6 +21,14 @@ logger = logging.getLogger("interview-v2.director")
 
 RECENT_TURNS = 8
 
+_KEY_STRIP = str.maketrans("", "", ".,!?;:\"'…।॥-()[]")
+
+
+def _text_key(text: str) -> str:
+    """Spacing, case and punctuation-insensitive form of an utterance."""
+    cleaned = sanitize_candidate_text(text or "").translate(_KEY_STRIP)
+    return " ".join(cleaned.casefold().split())
+
 
 class Director:
     def __init__(
@@ -37,6 +45,8 @@ class Director:
         self.last_agent_text = ""
         self._finals: list[str] = []
         self._early: tuple[str, str, asyncio.Task[Any]] | None = None  # (text, payload, task)
+        # Latency metric: did the last decide() reuse the analysis started on the final transcript?
+        self.last_early_hit = False
         self._is_listening_armed = is_listening_armed
 
     def _armed(self) -> bool:
@@ -86,15 +96,68 @@ class Director:
         if not self._armed():
             return
         self._finals.append(sanitize_candidate_text(text))
-        joined = " ".join(t for t in self._finals if t).strip()
+        self._start_early(" ".join(t for t in self._finals if t).strip())
+
+    def pending_text(self) -> str:
+        """Final transcripts of the turn still being spoken, joined."""
+        return " ".join(t for t in self._finals if t).strip()
+
+    def on_partial_settled(self, text: str) -> None:
+        """Candidate stopped talking before the final transcript landed: start on the partial (~0.4s sooner)."""
+        if self.flow.done or not self.analyzer.available or not self._armed():
+            return
+        partial = sanitize_candidate_text(text)
+        if not partial.strip():
+            return
+        self._start_early(" ".join(t for t in [*self._finals, partial] if t).strip())
+
+    def _start_early(self, joined: str) -> None:
         if classify_answer(joined) == "noise":
             return
-        self._cancel_early()
         payload, fallback = self._prepare(joined)
+        early = self._early
+        failed = early is not None and early[2].done() and (early[2].cancelled() or early[2].exception() is not None)
+        if early is not None and not failed and self._early_usable(early, joined, payload):
+            return
+        self._cancel_early()
         task = asyncio.get_running_loop().create_task(
             self.analyzer.analyze(payload, clinical=self.flow.wants_clinical_model, fallback=fallback)
         )
         self._early = (joined, payload, task)
+
+    def _early_usable(self, early: tuple[str, str, asyncio.Task[Any]], text: str, payload: str) -> bool:
+        """True when the analysis started on the final transcript still answers this confirmed turn.
+
+        The confirmed text can differ from the joined finals in spacing or punctuation, or carry a short
+        filler tail. That must not throw away the early result. A new substantive sentence must.
+        """
+        early_text, early_payload, _task = early
+        if early_payload == payload:
+            return True
+        want, got = _text_key(text), _text_key(early_text)
+        if not want or not got:
+            return False
+        if want == got:
+            same_text = True
+        elif want.startswith(got):
+            same_text = classify_answer(want[len(got) :].strip()) != "substantive"
+        else:
+            same_text = False
+        if not same_text:
+            return False
+        # The rest of the payload (stage, focus, last question, known facts) must be unchanged.
+        context_now, _fallback = self._prepare(early_text)
+        return context_now == early_payload
+
+    def early_ready(self, text: str) -> bool:
+        """True when the early analysis already finished and still answers this turn (decide() will be fast)."""
+        early = self._early
+        if early is None or not early[2].done() or early[2].cancelled() or early[2].exception() is not None:
+            return False
+        if not self._armed() or classify_answer(text) == "noise":
+            return False
+        payload, _fallback = self._prepare(text)
+        return self._early_usable(early, text, payload)
 
     def _cancel_early(self) -> None:
         if self._early is not None:
@@ -105,6 +168,7 @@ class Director:
         """Turn the confirmed utterance into the next move."""
         early, self._early = self._early, None
         self._finals = []
+        self.last_early_hit = False
         if not self._armed():
             if early:
                 early[2].cancel()
@@ -115,7 +179,8 @@ class Director:
             return self.flow.noise_move()
 
         payload, fallback = self._prepare(text)
-        if early and early[1] == payload:
+        if early and self._early_usable(early, text, payload):
+            self.last_early_hit = True
             try:
                 analysis = await early[2]
             except Exception:  # noqa: BLE001

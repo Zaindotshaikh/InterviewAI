@@ -1,6 +1,6 @@
 """Spoken mobiles: digits are copied, words are stored from the hearing."""
 
-from interview.phone_speech import parse_spoken_phone, store_phone, trunk_prefix
+from interview.phone_speech import _DIGIT_WORDS, parse_spoken_phone, phone_confirm_line, spoken_phone, store_phone, trunk_prefix
 
 
 def test_digits_are_copied_in_order():
@@ -43,6 +43,17 @@ def test_a_hearing_cannot_replace_plain_digits_or_invent_a_mobile():
     assert store_phone("yes", "9876543210") == ""
     assert store_phone("haan", "9876543210") == ""
     assert store_phone("my number is 9876543210", "1111111111") == "9876543210"
+
+
+def test_readback_spells_every_digit_in_one_language():
+    number = "9081726354"
+    for code, words in _DIGIT_WORDS.items():
+        assert len(words) == 10
+        spoken = spoken_phone(number, f"{code}-IN")
+        assert spoken.split(", ") == [words[int(d)] for d in number]
+        assert not any(ch.isdigit() for ch in spoken)
+    line = phone_confirm_line("hi-IN", spoken_phone(number, "hi-IN"))
+    assert not any(ch.isdigit() for ch in line)
 
 
 def test_wordy_sentences_do_not_keep_scrap_digits_without_a_hearing():

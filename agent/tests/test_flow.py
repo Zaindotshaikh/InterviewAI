@@ -15,6 +15,7 @@ from interview.analysis import (
 from interview.blueprint import Blueprint
 from interview.flow import CROWD_HELP_LINES, InterviewFlow
 from interview.flow_state import FlowState
+from interview.phone_speech import phone_confirm_line, spoken_phone
 from interview.plan import InterviewPlan, classify_answer
 
 BLUEPRINT_PATH = Path(__file__).resolve().parents[2] / "server" / "v2" / "lib" / "blueprints" / "nursing.json"
@@ -138,7 +139,7 @@ def test_form_phone_is_confirmed_after_city_not_asked(blueprint):
     move = flow.apply(say(("city", "Pune")))
     assert move.kind == "confirm"
     assert move.verbatim
-    assert "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.verbatim
+    assert spoken_phone("9876543210", "hi-IN") in move.verbatim
     assert "सुना" not in move.verbatim
     assert flow.state.slot("phone").value == "9876543210"
 
@@ -178,7 +179,7 @@ def test_form_phone_stays_when_they_do_not_reject_it(blueprint):
     )
     assert move.kind == "confirm"
     assert flow.state.slot("phone").value == "9876543210"
-    assert move.verbatim and "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.verbatim
+    assert move.verbatim and spoken_phone("9876543210", "hi-IN") in move.verbatim
 
 
 def test_denied_form_phone_falls_back_to_asking(blueprint):
@@ -253,7 +254,7 @@ def test_two_digit_phone_groups_are_read_back(blueprint):
     move = flow.apply(TurnAnalysis(intent="answer", raw_utterance="89, 75, 34, 67, 90"))
     assert flow.state.slots["phone"].value == "8975346790"
     assert move.kind == "confirm"
-    assert "8, 9, 7, 5, 3, 4, 6, 7, 9, 0" in move.directive
+    assert spoken_phone("8975346790", "hi-IN") in move.directive
 
 
 def test_a_wording_is_stored_from_the_analyst_digits(blueprint):
@@ -269,7 +270,7 @@ def test_a_wording_is_stored_from_the_analyst_digits(blueprint):
     )
     assert flow.state.slots["phone"].value == "550"
     assert move.kind == "confirm"
-    assert "5, 5, 0" in move.directive
+    assert spoken_phone("550", "hi-IN") in move.directive
     flow2, _ = make_flow(blueprint)
     flow2.opening()
     flow2.state.focus = {"type": "slots", "ids": ["phone"]}
@@ -319,7 +320,7 @@ def test_ten_digit_mobile_starting_with_91_is_kept(blueprint):
     move = flow.apply(say(("phone", "9123456789")))
     assert flow.state.slots["phone"].value == "9123456789"
     assert move.kind == "confirm"
-    assert "9, 1, 2, 3, 4, 5, 6, 7, 8, 9" in move.directive
+    assert spoken_phone("9123456789", "hi-IN") in move.directive
 
 
 def test_country_code_91_is_stripped_to_national_mobile(blueprint):
@@ -424,7 +425,7 @@ def test_one_utterance_can_fill_several_fields_and_phone_is_read_back(blueprint)
     move = flow.apply(say(("city", "Pune"), ("phone", "+91 98765 43210")))
     assert flow.state.slots["city"].value == "Pune"
     assert flow.state.slots["phone"].value == "9876543210"
-    assert move.kind == "confirm" and "9, 8, 7, 6, 5, 4, 3, 2, 1, 0" in move.directive
+    assert move.kind == "confirm" and spoken_phone("9876543210", "hi-IN") in move.directive
 
 
 def test_short_phone_is_read_back_then_rejected_after_they_agree(blueprint):
@@ -436,7 +437,7 @@ def test_short_phone_is_read_back_then_rejected_after_they_agree(blueprint):
     assert flow.state.slots["phone"].value == "98765432"
     move = flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed", raw_utterance="yes"))
     assert move.kind == "reask_invalid"
-    assert "9, 8, 7, 6, 5, 4, 3, 2" in move.directive
+    assert spoken_phone("98765432", "hi-IN") in move.directive
     assert "not a complete mobile" in move.directive
     assert flow.state.slots["phone"].status == "empty"
     assert "only for the recruitment" not in move.directive.lower()
@@ -455,7 +456,7 @@ def test_mixed_language_phone_groups_are_caught(blueprint):
     )
     assert flow.state.slots["phone"].value == "9112325652"
     assert move.kind == "confirm"
-    assert "9, 1, 1, 2, 3, 2, 5, 6, 5, 2" in move.directive
+    assert spoken_phone("9112325652", "hi-IN") in move.directive
 
 
 def test_a_fragment_on_readback_asks_for_the_full_number(blueprint):
@@ -487,7 +488,7 @@ def test_a_full_restatement_replaces_the_number(blueprint):
     )
     assert flow.state.slots["phone"].value == "9112323550"
     assert move.kind == "confirm"
-    assert "9, 1, 1, 2, 3, 2, 3, 5, 5, 0" in move.directive
+    assert spoken_phone("9112323550", "hi-IN") in move.directive
 
 
 def test_repeating_the_same_grouped_number_confirms_once_then_moves_on(blueprint):
@@ -498,7 +499,7 @@ def test_repeating_the_same_grouped_number_confirms_once_then_moves_on(blueprint
     first = flow.apply(TurnAnalysis(intent="answer", raw_utterance=said, slot_updates=[]))
     assert first.kind == "confirm"
     assert flow.state.slots["phone"].value == "9112323549"
-    assert "9, 1, 1, 2, 3, 2, 3, 5, 4, 9" in first.directive
+    assert spoken_phone("9112323549", "hi-IN") in first.directive
     second = flow.apply(TurnAnalysis(intent="answer", raw_utterance=said, slot_updates=[]))
     assert flow.state.slots["phone"].status == "confirmed"
     assert second.kind == "ask_field"
@@ -597,7 +598,7 @@ def test_repeated_phone_phrase_is_read_back_and_not_skipped(blueprint):
     assert flow.state.slots["phone"].value == "9112323"
     assert move.kind == "confirm"
     assert "qualification" not in move.directive.lower()
-    assert "9, 1, 1, 2, 3, 2, 3" in move.directive
+    assert spoken_phone("9112323", "hi-IN") in move.directive
 
 
 def test_the_rest_of_a_short_number_is_read_back(blueprint):
@@ -631,12 +632,12 @@ def test_a_scrap_does_not_rewrite_the_readback(blueprint):
     flow.apply(say(("city", "Pune")))
     first = flow.apply(TurnAnalysis(intent="answer", raw_utterance="111-2323-549.", slot_updates=[]))
     assert flow.state.slots["phone"].value == "1112323549"
-    assert first.verbatim == "मैंने सुना 1, 1, 1, 2, 3, 2, 3, 5, 4, 9. क्या यह सही है?"
+    assert first.verbatim == phone_confirm_line("hi-IN", spoken_phone("1112323549", "hi-IN"))
     age = flow.apply(TurnAnalysis(intent="answer", raw_utterance="28", slot_updates=[]))
     assert flow.state.slots["phone"].value == "1112323549"
     assert flow.state.slots["phone"].status == "captured"
     assert age.kind == "confirm"
-    assert "2, 8" not in (age.verbatim or "")
+    assert spoken_phone("28", "hi-IN") not in (age.verbatim or "")
     flow2, _ = make_flow(blueprint)
     flow2.opening()
     flow2.apply(say(("city", "Pune"), ("phone", "1112323549")))
@@ -1309,7 +1310,7 @@ def test_partial_intelligibility_forces_phone_confirm(blueprint):
     assert flow.state.slots["city"].confidence >= 0.6  # partial must not clamp non-confirm fields
     assert flow.state.slots["phone"].status == "captured"
     assert flow.state.slots["phone"].confidence < 0.6
-    assert move.kind == "confirm" and "9, 8, 7, 6" in move.directive
+    assert move.kind == "confirm" and spoken_phone("9876", "hi-IN") in move.directive
 
 
 def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):
@@ -1483,6 +1484,123 @@ def test_body_and_experience_wait_for_full_answer(blueprint):
     assert unclear.kind == "ask_repeat"
     assert "forbidden" in unclear.directive.lower()
     assert "audio was unclear" in unclear.directive.lower()
+
+
+def test_body_readback_stops_after_two_tries(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    for fid, val in (("height_cm", 180), ("weight_kg", 90)):
+        slot = flow.state.slot(fid)
+        slot.value, slot.status, slot.attempts = val, "captured", 1
+    first = flow._screening_next([])
+    second = flow._screening_next([])
+    assert first.kind == second.kind == "confirm"
+    third = flow._screening_next([])
+    assert third.kind != "confirm"
+    assert flow.state.slot("height_cm").status == "confirmed"
+
+
+def test_fast_commit_only_for_complete_short_answers(blueprint):
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.focus = {"type": "slots", "ids": ["city"]}
+    assert flow.fast_commit_ready("Pune")
+    assert not flow.fast_commit_ready("umm")
+    assert not flow.fast_commit_ready("हम्म")
+    assert not flow.fast_commit_ready("पुणे और")
+    assert flow.fast_commit_ready("पुणे और मुंबई।")
+
+    flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    assert flow.fast_commit_ready("5 foot 4 and 55 kg")
+    assert not flow.fast_commit_ready("5 foot 4")
+
+    flow.state.focus = {"type": "confirm", "body": True}
+    assert not flow.fast_commit_ready("haan")
+
+    flow.state.focus = {"type": "slots", "ids": ["experience_years", "experience_settings"]}
+    assert not flow.fast_commit_ready("I worked three years in ICU monitoring patients")
+
+
+def test_first_screening_ask_uses_a_fixed_line(blueprint):
+    from interview.screening_lines import screening_ask_line
+
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+    flow.state.slot("city").value = "Pune"
+    flow.state.slot("city").status = "confirmed"
+    flow.state.slot("phone").status = "unknown"
+    move = flow._screening_next([])
+    assert move.kind == "ask_field"
+    assert move.scripted is True
+    assert move.verbatim == screening_ask_line(["qualification", "qualification_year"], "hi-IN", "t1")
+
+    # Asked before: the voice model words the re-ask.
+    again = flow._screening_next([])
+    assert again.kind == "ask_field"
+    assert again.verbatim is None
+
+
+def test_every_supported_language_has_every_fixed_line():
+    from interview.fillers import strip_lead_ack
+    from interview.language import PROFILES
+    from interview.screening_lines import BODY, EDU, EXP, LINES, YEAR
+
+    for lang in PROFILES:
+        assert lang in LINES, f"no screening lines for {lang}"
+        for key in (EDU, YEAR, BODY, EXP):
+            options = LINES[lang].get(key)
+            assert options, f"{lang} missing {key}"
+            for line in options:
+                assert line.strip().endswith(("?", "।", ".")) or "?" in line, (lang, line)
+                assert line.count("?") <= 1, f"{lang}: one question mark only: {line}"
+    # The opener is an ack the filter can drop after a played reaction (year-only lines have none).
+    for lang in PROFILES:
+        for key in (EDU, BODY, EXP):
+            for line in LINES[lang][key]:
+                rest = strip_lead_ack(line, lang)
+                assert rest and rest != line, f"{lang}: opener not stripped: {line}"
+
+
+def test_fixed_line_falls_back_for_unknown_ask_or_language():
+    from interview.screening_lines import screening_ask_line
+
+    assert screening_ask_line(["height_cm", "weight_kg"], "xx-IN", "x") is None
+    assert screening_ask_line(["city"], "hi-IN", "x") is None
+    a = screening_ask_line(["height_cm", "weight_kg"], "hi-IN", "abc")
+    assert a == screening_ask_line(["weight_kg", "height_cm"], "hi-IN", "abc")
+
+
+def test_endpointing_hold_short_answer_cap(blueprint):
+    from types import SimpleNamespace
+
+    s = SimpleNamespace(
+        endpointing_min_delay=0.25,
+        endpointing_min_delay_uncovered=0.55,
+        endpointing_max_delay=2.3,
+        endpointing_short_max_delay=1.2,
+    )
+    flow, _ = make_flow(blueprint)
+    flow.opening()
+
+    flow.state.focus = {"type": "slots", "ids": ["city"]}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (0.25, 1.2)
+    assert flow.endpointing_hold_s(covered=False, settings=s) == (0.55, 1.2)
+
+    flow.state.focus = {"type": "confirm", "field": "city"}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (0.25, 1.2)
+
+    # A denied read-back is often followed by the corrected value.
+    flow.state.focus = {"type": "confirm", "field": "phone"}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (0.25, 2.3)
+    flow.state.focus = {"type": "confirm", "body": True}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (0.25, 2.3)
+
+    flow.state.focus = {"type": "slots", "ids": ["height_cm", "weight_kg"]}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (1.1, 3.5)
+
+    s.endpointing_short_max_delay = 0
+    flow.state.focus = {"type": "slots", "ids": ["city"]}
+    assert flow.endpointing_hold_s(covered=True, settings=s) == (0.25, 2.3)
 
 
 # ------------------------------------------------------------------------------------ closing and limits

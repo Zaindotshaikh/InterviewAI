@@ -16,6 +16,8 @@ logger = logging.getLogger("interview-v2.latency")
 
 # Allow LLM/TTS metric events to land after first audio before flushing the turn.
 _FLUSH_DELAY_S = 1.5
+# Marks older than this before the hook starts belong to an earlier, dropped utterance.
+_CARRY_MAX_AGE_S = 30.0
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -49,6 +51,11 @@ def summarize_turns(turns: list[dict[str, Any]]) -> dict[str, Any]:
         "eou_delay_ms",
         "transcription_delay_ms",
         "hook_ms",
+        "reply_from_vad_ms",
+        "reply_from_confirm_ms",
+        "stt_final_from_vad_ms",
+        "tts_text_after_director_ms",
+        "analyst_tokens",
     ):
         vals = col(key)
         if not vals:
@@ -103,16 +110,24 @@ class LatencyTracker:
         if name not in marks:
             marks[name] = when if when is not None else time.monotonic()
 
+    def _mark_latest(self, name: str) -> None:
+        """Before the turn hook starts, the newest event wins (earlier ones were noise or a partial answer)."""
+        cur = self._ensure_turn()
+        if cur.get("hook_started"):
+            self._mark(name)
+            return
+        cur.setdefault("mono_marks", {})[name] = time.monotonic()
+
     def _on_user_state(self, ev: Any) -> None:
         # VAD end of speech: user leaves "speaking".
         old = getattr(ev, "old_state", None)
         new = getattr(ev, "new_state", None)
         if old == "speaking" and new != "speaking":
-            self._mark("vad_speech_end")
+            self._mark_latest("vad_speech_end")
 
     def _on_transcribed(self, ev: Any) -> None:
         if getattr(ev, "is_final", False) and getattr(ev, "transcript", None):
-            self._mark("stt_final")
+            self._mark_latest("stt_final")
 
     def _on_agent_state(self, ev: Any) -> None:
         new = getattr(ev, "new_state", None)
@@ -154,9 +169,18 @@ class LatencyTracker:
         if self._cur is not None and self._cur.get("hook_started"):
             self._finalize(force=True)
         self._turn_index = turn_index
+        # Marks taken while the candidate was still speaking (VAD end, STT final) belong to this turn.
+        carried: dict[str, float] = {}
+        if self._cur is not None and not self._cur.get("hook_started"):
+            now = time.monotonic()
+            carried = {
+                k: v
+                for k, v in (self._cur.get("mono_marks") or {}).items()
+                if now - v <= _CARRY_MAX_AGE_S
+            }
         self._cur = {
             "turn_index": turn_index,
-            "mono_marks": {},
+            "mono_marks": carried,
             "hook_started": True,
         }
         self._mark("turn_confirm")
@@ -168,11 +192,41 @@ class LatencyTracker:
             return
         self._mark("filler_start")
 
-    def on_director_done(self, duration_s: float) -> None:
+    def on_director_done(
+        self,
+        duration_s: float,
+        *,
+        early_hit: bool | None = None,
+        analyst_tokens: int | None = None,
+    ) -> None:
         if not self._enabled:
             return
         cur = self._ensure_turn()
         cur["director_ms"] = round(max(0.0, duration_s) * 1000, 1)
+        if early_hit is not None:
+            cur["early_analysis"] = "hit" if early_hit else "miss"
+        if analyst_tokens is not None:
+            cur["analyst_tokens"] = int(analyst_tokens)
+        self._mark("director_done")
+
+    def _in_hooked_turn(self) -> dict[str, Any] | None:
+        cur = self._cur
+        if cur is None or not cur.get("hook_started") or cur.get("_flushed"):
+            return None
+        return cur
+
+    def on_tts_text(self) -> None:
+        """First text of the real reply reached the TTS (fillers never go through tts_node)."""
+        if not self._enabled or self._in_hooked_turn() is None:
+            return
+        self._mark("tts_text_in")
+
+    def on_reply_audio(self) -> None:
+        """First audio frame of the real reply left the TTS."""
+        if not self._enabled or self._in_hooked_turn() is None:
+            return
+        self._mark("reply_audio")
+        self._maybe_finalize()
 
     def on_hook_end(self) -> None:
         if not self._enabled:
@@ -189,6 +243,9 @@ class LatencyTracker:
             return
         marks = cur.get("mono_marks") or {}
         if "first_audio" not in marks:
+            return
+        # A filler makes first_audio early; wait for the real reply so it lands inside the flush window.
+        if "filler_start" in marks and "reply_audio" not in marks:
             return
         if self._flush_task and not self._flush_task.done():
             return
@@ -226,6 +283,12 @@ class LatencyTracker:
             "eou_delay_ms": cur.get("eou_delay_ms"),
             "transcription_delay_ms": cur.get("transcription_delay_ms"),
             "hook_ms": cur.get("hook_ms") or cur.get("hook_ms_sdk"),
+            "reply_from_vad_ms": delta_ms("vad_speech_end", "reply_audio"),
+            "reply_from_confirm_ms": delta_ms("turn_confirm", "reply_audio"),
+            "stt_final_from_vad_ms": delta_ms("vad_speech_end", "stt_final"),
+            "tts_text_after_director_ms": delta_ms("director_done", "tts_text_in"),
+            "early_analysis": cur.get("early_analysis"),
+            "analyst_tokens": cur.get("analyst_tokens"),
             "marks_present": sorted(marks.keys()),
         }
         cur["_flushed"] = True
@@ -233,8 +296,12 @@ class LatencyTracker:
         self._cur = None
         self._awaiting_first_audio = False
         logger.info(
-            "turn.latency turn=%s ttfa_vad=%s ttfa_confirm=%s filler=%s director=%s llm_ttft=%s tts_ttfb=%s",
+            "turn.latency turn=%s reply_vad=%s reply_confirm=%s early=%s ttfa_vad=%s ttfa_confirm=%s "
+            "filler=%s director=%s llm_ttft=%s tts_ttfb=%s",
             payload["turn_index"],
+            payload["reply_from_vad_ms"],
+            payload["reply_from_confirm_ms"],
+            payload["early_analysis"],
             payload["ttfa_vad_ms"],
             payload["ttfa_confirm_ms"],
             payload["filler_from_vad_ms"],

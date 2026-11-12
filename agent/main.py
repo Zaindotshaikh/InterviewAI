@@ -64,7 +64,8 @@ from interview import (
 from interview.director import Director
 from interview.listen import ListenFloor, is_candidate_speech
 from interview.early_filler import EarlyFiller
-from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_text
+from interview.expressiveness import ExpressivenessEngine
+from interview.fillers import drop_lead_ack
 from interview.latency import LatencyTracker
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
@@ -82,6 +83,7 @@ from providers import (
     google_voice_for,
     openai_stt_languages,
 )
+from providers.health import blocking_problems, check_keys
 
 logger = logging.getLogger("interview-v2")
 
@@ -96,6 +98,19 @@ async def _abort_refused_session(ctx: JobContext, backend: BackendClient) -> Non
         await backend.aclose()
     except Exception:  # noqa: BLE001
         logger.exception("backend close after refused session failed")
+
+
+def _elevenlabs_key(settings: Any) -> str | None:
+    return settings.elevenlabs_api_key or os.environ.get("ELEVEN_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
+
+
+def _cascade_keys(settings: Any, tts_override: str | None) -> dict[str, str | None]:
+    """Keys a cascade call cannot run without: OpenAI (analyst + voice LLM), ElevenLabs when it is the voice or ears."""
+    keys: dict[str, str | None] = {"openai": settings.openai_api_key}
+    mouth = tts_override or settings.resolved_tts()
+    if mouth == "elevenlabs" or settings.resolved_stt() == "elevenlabs_scribe":
+        keys["elevenlabs"] = _elevenlabs_key(settings)
+    return keys
 
 
 async def _iter_joined(chunks: list[str]):
@@ -332,7 +347,13 @@ class InterviewAgent(Agent):
                 live_voice = "marin" if rest.startswith("custom:") else (rest or "marin")
             instructions = gpt_live_voice_instructions(plan, voice=live_voice)
         else:
+            speaker_gender = None
             if self._tts_provider == "elevenlabs":
+                from providers.elevenlabs_voices import elevenlabs_speaker_gender, elevenlabs_voice_for
+
+                speaker_gender = elevenlabs_speaker_gender(
+                    elevenlabs_voice_for(plan.language, settings)
+                )
                 if self._expressiveness_mode == "engine":
                     expressive = f"\n\n{ELEVENLABS_PLAIN_SPEECH_RULES}"
                 else:
@@ -341,7 +362,7 @@ class InterviewAgent(Agent):
                 expressive = ""
             instructions = (
                 f"{plan.system_prompt}\n\n{BASE_VOICE_RULES}\n\n"
-                f"{spoken_style(plan.language, voice, plan.candidate_gender)}\n\n"
+                f"{spoken_style(plan.language, voice, plan.candidate_gender, speaker_gender=speaker_gender)}\n\n"
                 f"{native_script_reminder(plan.language)}{expressive}"
             )
         super().__init__(instructions=instructions)
@@ -369,6 +390,8 @@ class InterviewAgent(Agent):
         )
         # Set when a pre-rendered reaction was just played, so the reply's first sentence gets no um.
         self._suppress_lead = False
+        # True while this turn's hold is shortened by fast_commit_if_complete; undone by _retune_endpointing.
+        self._fast_commit = False
         self._greeting_pending = True
         # False until the opening greeting finishes — candidate audio is kept, but not acted on.
         self._listening_armed = False
@@ -379,7 +402,6 @@ class InterviewAgent(Agent):
         self._last_spoken = ""
         self._last_llm_text = ""
         self._interrupted = False
-        self._previous_empathy = False
         # After LiveKit resumes a false barge-in, briefly discard ambient STT fragments.
         self._discard_user_until: float = 0.0
         self._last_move_kind = ""
@@ -656,11 +678,13 @@ class InterviewAgent(Agent):
         skip_first, self._suppress_lead = self._suppress_lead, False
         opening, self._greeting_pending = self._greeting_pending, False
 
-        # Collect LLM raw + spoken for transcript split.
+        # Keep the LLM raw text and the spoken text apart for the transcript split.
         raw_chunks: list[str] = []
-        async for chunk in text:
-            raw_chunks.append(chunk)
-        full_raw = "".join(raw_chunks)
+
+        async def _tee_raw() -> Any:
+            async for chunk in text:
+                raw_chunks.append(chunk)
+                yield chunk
 
         # P2-08: Pre-TTS output guard against salary leaks, false offers, and redundant questions
         # Only a confirmed fact is "already asked". A value still waiting for a read-back
@@ -681,23 +705,37 @@ class InterviewAgent(Agent):
                 spoken_height_phrase(height.evidence, height.value),
                 weight.value,
             )
-        is_blocked, guarded_text, reason = self._guard.inspect_text(
-            full_raw,
-            language=self.flow.state.language,
-            captured_slots=captured,
-            single_question=not opening,
-            forbid_centimetres=forbid_cm,
-            fallback_text=cm_fallback,
-        )
+        guard_kwargs: dict[str, Any] = {
+            "language": self.flow.state.language,
+            "captured_slots": captured,
+            "single_question": not opening,
+            "forbid_centimetres": forbid_cm,
+            "fallback_text": cm_fallback,
+        }
 
-        async def _iter_guarded() -> Any:
-            yield guarded_text
+        def _iter_guarded() -> Any:
+            if get_settings().voice_stream_tts:
+                # Sentence by sentence: TTS starts on the first checked sentence, not the whole reply.
+                return self._guard.stream(_tee_raw(), **guard_kwargs)
+
+            async def _buffered() -> Any:
+                async for _chunk in _tee_raw():
+                    pass
+                _blocked, guarded_text, _reason = self._guard.inspect_text("".join(raw_chunks), **guard_kwargs)
+                yield guarded_text
+
+            return _buffered()
+
+        guarded = _iter_guarded()
+        if skip_first:
+            # A reaction already played; the reply must not open with a second "okay".
+            guarded = drop_lead_ack(guarded, self.flow.state.language)
 
         spoken_chunks: list[str] = []
         use_engine = is_el and self._expressiveness_mode == "engine"
         if use_engine:
             shaped = self._engine.apply(
-                _iter_guarded(),
+                guarded,
                 language=self.flow.state.language,
                 tone=self._current_tone,
                 opening=opening,
@@ -706,7 +744,7 @@ class InterviewAgent(Agent):
             )
         else:
             shaped = self._disfluency.apply(
-                _iter_guarded(),
+                guarded,
                 self.flow.state.language,
                 skip_first=skip_first,
                 opening=opening,
@@ -714,11 +752,18 @@ class InterviewAgent(Agent):
 
         async def _collect_spoken() -> Any:
             async for chunk in shaped:
+                if not spoken_chunks and self.latency is not None:
+                    self.latency.on_tts_text()
                 spoken_chunks.append(chunk)
                 yield chunk
 
+        reply_audio_marked = False
         try:
             async for frame in Agent.default.tts_node(self, _collect_spoken(), model_settings):
+                if not reply_audio_marked:
+                    reply_audio_marked = True
+                    if self.latency is not None:
+                        self.latency.on_reply_audio()
                 yield frame
         except Exception:
             # Phase 7: optional Chirp fallback — never on /elevenlabs-interviewer (locked EL).
@@ -1080,6 +1125,34 @@ class InterviewAgent(Agent):
             session.update_options(endpointing_opts={"min_delay": min_delay, "max_delay": max_delay})
         except Exception:  # noqa: BLE001
             logger.debug("endpointing retune failed", exc_info=True)
+        self._fast_commit = False
+
+    def fast_commit_if_complete(self, text: str) -> None:
+        """Close the turn at the short hold when the final transcript is already a complete short answer.
+
+        Must run before LiveKit's end-of-turn check for this final, which reads max_delay after the
+        turn-detector inference.
+        """
+        if self._gpt_live or self._fast_commit or not text.strip():
+            return
+        settings = get_settings()
+        if not settings.voice_fast_commit_short or not self.flow.fast_commit_ready(text):
+            return
+        session: AgentSession | None = self.session_ref.get("session")
+        if session is None:
+            return
+        from interview.turns import detector_covers
+
+        lang = self.flow.state.language or ""
+        covered = bool(settings.turn_detector_enabled) and detector_covers(lang)
+        min_delay, _max = self.flow.endpointing_hold_s(covered=covered, settings=settings)
+        try:
+            session.update_options(endpointing_opts={"min_delay": min_delay, "max_delay": min_delay})
+        except Exception:  # noqa: BLE001
+            logger.debug("fast commit failed", exc_info=True)
+            return
+        self._fast_commit = True
+        logger.info("turn fast-commit: complete short answer (hold %.2fs)", min_delay)
 
     def _gpt_live_user_from_chat(self) -> str:
         """Latest user turn already in chat_ctx."""
@@ -1302,7 +1375,6 @@ class InterviewAgent(Agent):
 
         self._current_tone = move.tone or tone_for_kind(move.kind)
         self._empathy_hint = self._current_tone in ("gentle", "reassuring")
-        self._previous_empathy = self._empathy_hint
         self._interrupted = False
         self.director.note_user(joined)
 
@@ -1562,8 +1634,13 @@ class InterviewAgent(Agent):
                 )
                 self.director._cancel_early()
                 self.director._finals = []
+                # A discarded turn must not leave the shortened fast-commit hold in place.
+                if self._fast_commit:
+                    self._retune_endpointing()
                 raise StopResponse()
 
+        if self._fast_commit:
+            self._retune_endpointing()
         self._turn_index += 1
         if self.latency is not None:
             self.latency.on_hook_start(self._turn_index)
@@ -1573,17 +1650,23 @@ class InterviewAgent(Agent):
         if detected and detected != self.flow.state.language:
             events.append(("language.detected", {"from": self.flow.state.language, "to": detected}))
 
-        # P2-04: Ack filler BEFORE Director is strictly neutral (latency ack, not emotional coaching).
+        # The reaction plays before the Director decides, so it is a neutral listening token that fits
+        # any move. Not after a barge-in: they cut us off, the reply should answer them directly.
+        # Not when the analysis is already done: the reply is near, and a reaction would only delay it.
         filler_note = ""
         fillers: FillerPlayer | None = self.session_ref.get("fillers")
-        bucket = "neutral"
+        reply_ready = bool(settings.voice_ack_skip_when_ready) and self.director.early_ready(text)
+        if reply_ready:
+            logger.info("ack skipped: early analysis ready")
         if (
             fillers is not None
+            and not reply_ready
             and not self.flow.done
+            and not self._interrupted
             and classify_answer(text) == "substantive"
             and not self.recovery_speech_blocked()
         ):
-            picked = fillers.pick(self.flow.state.language, text, bucket=bucket)
+            picked = fillers.pick(self.flow.state.language, text)
             if picked is not None:
                 filler_text, frames = picked
                 played = await self.speak(
@@ -1611,11 +1694,14 @@ class InterviewAgent(Agent):
             move = await self.director.decide(text)
         self._retune_endpointing()
         if self.latency is not None:
-            self.latency.on_director_done((datetime.now(timezone.utc) - t0).total_seconds())
+            self.latency.on_director_done(
+                (datetime.now(timezone.utc) - t0).total_seconds(),
+                early_hit=self.director.last_early_hit,
+                analyst_tokens=getattr(self.director.analyzer, "last_completion_tokens", None),
+            )
         self._current_tone = move.tone or tone_for_kind(move.kind)
         # P2-04: Empathy allowed only when Move.tone dictates gentle/reassuring, never sticky across turns.
         self._empathy_hint = self._current_tone in ("gentle", "reassuring")
-        self._previous_empathy = False
         self._interrupted = False
         self.director.note_user(text)
 
@@ -1635,6 +1721,8 @@ class InterviewAgent(Agent):
                 " They answered while you were still speaking. Acknowledge what they just said and ask only "
                 "what this directive says."
             )
+            if move.scripted:
+                move.verbatim = None
         if move.verbatim:
             # The mobile step is one fixed sentence. The dialogue model was adding the next
             # question ("what is your age?") in the same breath as the number read-back.
@@ -1917,6 +2005,8 @@ async def entrypoint(ctx: JobContext) -> None:
         await backend.aclose()
         return
 
+    # The backend is reachable: deliver what earlier jobs could not, off the greeting path.
+    _replay_task = asyncio.create_task(backend.replay_spool())  # noqa: RUF006
     plan = InterviewPlan.from_api(payload)
     state = ControllerState.from_api(payload)
     blueprint = Blueprint.from_api(plan.blueprint)
@@ -1962,6 +2052,19 @@ async def entrypoint(ctx: JobContext) -> None:
             wants_avatar=wants_avatar,
         )
         return
+
+    if settings.voice_key_check:
+        problems = blocking_problems(await check_keys(_cascade_keys(settings, tts_override)))
+        if problems:
+            logger.error("provider key rejected or missing for %s; refusing session", ",".join(problems))
+            try:
+                await backend.post_event(
+                    interview_id, "voice.refused", {"reason": "provider_key", "providers": problems}
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not report refused session")
+            await _abort_refused_session(ctx, backend)
+            return
 
     llm = build_llm(settings)
     try:
@@ -2211,9 +2314,29 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     # Approximate barge-in: user starts speaking while agent speaks.
+    # Uncommitted speech-to-text since the last final; analysed early when the candidate stops talking.
+    pending_partial = {"text": ""}
+
+    def _start_partial_analysis() -> None:
+        text, pending_partial["text"] = pending_partial["text"], ""
+        if not settings.voice_early_analysis_on_partial or not is_candidate_speech(text):
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            return
+        if now < agent._discard_user_until:
+            return
+        director.on_partial_settled(text)
+
     @session.on("user_state_changed")
     def _on_user_barge(ev):  # noqa: ANN001
-        if getattr(ev, "new_state", None) != "speaking":
+        new_state = getattr(ev, "new_state", None)
+        if new_state == "listening" and getattr(ev, "old_state", None) == "speaking":
+            if agent.is_listening_armed():
+                _start_partial_analysis()
+            return
+        if new_state != "speaking":
             return
         # Opening: the mic is recorded, but noise must not count as a barge-in.
         if not agent.is_listening_armed():
@@ -2223,6 +2346,9 @@ async def entrypoint(ctx: JobContext) -> None:
         except RuntimeError:
             now = 0.0
         agent._floor.note_speech_start(now)
+        # They kept talking after a fast-commit candidate: restore the normal hold for the rest of the turn.
+        if agent._fast_commit:
+            agent._retune_endpointing()
         if getattr(session, "agent_state", None) == "speaking":
             agent._interrupted = True
 
@@ -2241,13 +2367,16 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         agent._floor.note_transcript(text, now)
         if not getattr(ev, "is_final", False):
+            pending_partial["text"] = text
             return
+        pending_partial["text"] = ""
         if not is_candidate_speech(text):
             return
         # Ambient barge-in while interviewer was talking — don't start Director on junk.
         if now < agent._discard_user_until:
             return
         director.on_final_transcript(ev.transcript)
+        agent.fast_commit_if_complete(director.pending_text())
 
     from livekit.agents.voice import room_io
 
@@ -2368,6 +2497,20 @@ def cli_main() -> None:
             "GOOGLE_APPLICATION_CREDENTIALS",
             settings.google_application_credentials,
         )
+
+    if settings.voice_key_check:
+        boot_keys = {"openai": settings.openai_api_key}
+        if _elevenlabs_key(settings):
+            boot_keys["elevenlabs"] = _elevenlabs_key(settings)
+        try:
+            statuses = asyncio.run(check_keys(boot_keys))
+            for provider, status in statuses.items():
+                if status == "ok":
+                    logger.info("provider key %s ok", provider)
+                else:
+                    logger.error("provider key %s %s; calls that need it will be refused", provider, status)
+        except Exception:  # noqa: BLE001
+            logger.exception("startup key check failed")
 
     logger.warning(
         "worker starting agent_name=%s tavus_key=%s (python main.py dev does not hot-reload; restart after code changes)",

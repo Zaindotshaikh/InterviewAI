@@ -3,7 +3,7 @@
 import asyncio
 import random
 
-from interview.expressiveness import ExpressivenessEngine, filler_bucket_from_text
+from interview.expressiveness import ExpressivenessEngine
 from interview.voice_tone import resolve_tone, tag_for_tone, tone_for_kind
 
 
@@ -58,14 +58,6 @@ def test_no_consecutive_same_tag():
     # Second turn should not repeat the same tag consecutively
     if tag_for_tone("warm") and tag_for_tone("warm") in a:
         assert tag_for_tone("warm") not in b or a.count("[warmly]") <= 1
-
-
-def test_filler_bucket_heuristic():
-    assert filler_bucket_from_text("I am not comfortable with that") == "empathetic"
-    assert filler_bucket_from_text("I worked in ICU for three years") == "neutral"
-    assert filler_bucket_from_text("नहीं, मुझे नहीं पता") == "neutral"
-    assert filler_bucket_from_text("I don't know") == "neutral"
-    assert filler_bucket_from_text("मुझे बहुत डर लग रहा है") == "empathetic"
 
 
 def test_a_played_reaction_does_not_get_another_hesitation():

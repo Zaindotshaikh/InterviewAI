@@ -1,4 +1,4 @@
-"""Single floor for agent TTS. One utterance at a time; fillers yield to Director.
+"""Single floor for agent TTS. One utterance at a time; a reply follows a playing filler.
 
 Call sites start audio only through ``SpeechArbiter.play`` (``InterviewAgent.speak``).
 Sources: director, filler, silence, verbatim, watchdog.
@@ -18,8 +18,11 @@ SpeechSource = Literal["director", "filler", "silence", "verbatim", "watchdog"]
 VALID_SOURCES = frozenset({"director", "filler", "silence", "verbatim", "watchdog"})
 # Do not queue behind an in-flight utterance — skip instead.
 LOW_PRIORITY = frozenset({"filler", "watchdog"})
-# Cancel these when Director / silence / verbatim / watchdog claims the floor.
-PREEMPTABLE = frozenset({"filler"})
+# A real utterance takes the floor from these at once, but is not allowed to cut them off: LiveKit's
+# speech queue plays it right after them (its LLM already runs). A person finishes "अच्छा, अच्छा."
+# before asking the next question. If the candidate barges into the filler, the queued reply is
+# cancelled too, because it answers a turn they had not finished.
+CHAIN_AFTER = frozenset({"filler"})
 
 
 def source_for_move(kind: str) -> SpeechSource:
@@ -70,6 +73,8 @@ class SpeechArbiter:
         self._current: str | None = None
         self._handles: list[Any] = []
         self._seq = 0
+        # Filler handles the current utterance is queued behind (set by _chain, read once by play).
+        self._ahead: list[Any] = []
 
     @property
     def current_source(self) -> str | None:
@@ -93,8 +98,8 @@ class SpeechArbiter:
                 if source in LOW_PRIORITY:
                     logger.info("speech.rejected source=%s current=%s", source, self._current)
                     return False
-                if self._current in PREEMPTABLE:
-                    self._preempt(source, detail=detail)
+                if self._current in CHAIN_AFTER:
+                    self._chain(source, detail=detail)
                     return True
                 logger.info("speech.queued source=%s current=%s", source, self._current)
             await self._idle.wait()
@@ -133,6 +138,7 @@ class SpeechArbiter:
         if not ok:
             return False
         seq = self._seq
+        ahead, self._ahead = self._ahead, []
         handles: list[Any] = []
         try:
             for start in starts:
@@ -142,6 +148,8 @@ class SpeechArbiter:
         except Exception:
             self.release_if(source, seq)
             raise
+        if ahead:
+            asyncio.get_running_loop().create_task(self._cancel_if_cut(ahead, handles, source))
         if wait:
             try:
                 for handle in handles:
@@ -167,10 +175,17 @@ class SpeechArbiter:
         extra = f" detail={detail}" if detail else ""
         logger.info("speech.start source=%s seq=%s%s", source, self._seq, extra)
 
-    def _preempt(self, source: str, *, detail: str = "") -> None:
+    def _chain(self, source: str, *, detail: str = "") -> None:
         prev = self._current
-        for handle in self._handles:
-            interrupt_handle(handle)
-        self._handles = []
-        logger.info("speech.preempted current=%s by=%s", prev, source)
+        ahead = list(self._handles)
+        logger.info("speech.chained after=%s by=%s", prev, source)
         self._claim(source, detail=detail)
+        self._ahead = ahead
+
+    async def _cancel_if_cut(self, ahead: list[Any], handles: list[Any], source: str) -> None:
+        for handle in ahead:
+            await await_playout(handle)
+        if any(getattr(h, "interrupted", False) for h in ahead):
+            logger.info("speech.cancelled source=%s reason=filler_interrupted", source)
+            for handle in handles:
+                interrupt_handle(handle)

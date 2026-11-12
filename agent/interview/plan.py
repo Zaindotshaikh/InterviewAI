@@ -71,7 +71,7 @@ class InterviewPlan:
     resume_text: str = ""
     # Join-form mobile (digits). Empty when they left it blank — the call then asks.
     candidate_phone: str = ""
-    # male | female | unspecified | "" (older sessions: treat as male address).
+    # male | female | unspecified. Empty means the form did not send a gender.
     candidate_gender: str = ""
     # Interview blueprint (screening fields, clinical rubric, tiers); parsed by interview.blueprint.Blueprint.
     blueprint: dict[str, Any] = field(default_factory=dict)

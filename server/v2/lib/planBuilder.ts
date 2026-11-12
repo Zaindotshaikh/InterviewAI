@@ -132,10 +132,10 @@ function candidateGenderLine(gender: CandidateContext["gender"]): string {
   if (gender === "female") {
     return "- The candidate is a woman. Always use feminine forms when addressing her (Hindi: कर रही हैं / कर सकती हैं / बताइए — never करता / सकता / रहे हैं when the verb marks her). Do not assume a nurse is a man.";
   }
-  if (gender === "unspecified") {
-    return "- Gender was not given. Use respectful you-address. Do not assume the candidate is a man or a woman because the role is nurse.";
+  if (gender === "male") {
+    return "- The candidate is a man. Always use masculine forms when addressing him (Hindi: कर रहे हैं / कर सकते हैं — never करती / सकती / रहीं). Do not treat nurse as female by default.";
   }
-  return "- The candidate is a man. Always use masculine forms when addressing him (Hindi: कर रहे हैं / कर सकते हैं — never करती / सकती / रहीं). Do not treat nurse as female by default.";
+  return "- Gender was not given. Use respectful you-address. Do not assume the candidate is a man or a woman because the role is nurse.";
 }
 
 function buildSystemPrompt(params: {

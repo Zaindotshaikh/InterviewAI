@@ -76,3 +76,9 @@ Agree **who pays API overage** and set a hard monthly ceiling before HR starts.
 - Pitch language stays “first-round screen.”
 - MSA: confidentiality, IP (their rubric vs your engine), recording licence, subprocessors, liability cap.
 - A non-voice path for a candidate who cannot use the mic.
+
+## Region and latency
+
+- Run the agent worker in a US region (near OpenAI and ElevenLabs) with LiveKit Cloud routing the candidate to it; India-to-US adds ~200 ms per hop to the candidate, but the three provider calls per turn are cheaper close to the providers.
+- Do not move before the local latency test (`agent/scripts/latency_report.py`) shows provider round-trips dominate. Compare `director_ms` and `reply_from_vad_ms` between regions on the same call script.
+- Render free/starter tiers sleep or share CPU; use an always-on instance for the worker.

@@ -34,6 +34,7 @@ from interview.phone_speech import (
     phone_confirm_line,
     phone_form_confirm_line,
     phone_invalid_line,
+    spoken_phone,
     store_phone,
     trunk_prefix,
     valid_indian_mobile,
@@ -45,11 +46,12 @@ from interview.normalize import (
     normalize_years_experience,
     parse_height_and_weight,
     plausible_city,
-    spoken_groups,
     spoken_height_phrase,
 )
 from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
+from interview.resume_match import is_false_mismatch
+from interview.screening_lines import screening_ask_line
 
 NEGATIVE_STANCES = ("hesitant", "refuses")
 _WORKPLACE_RE = re.compile(
@@ -82,6 +84,29 @@ STYLE_FOOTER = (
 )
 
 MAX_FOCUS_RETRIES = 3  # repeat / rephrase / unclear on the same focus before soft-skip
+# A turn that is only hesitation, or ends on a connector, is not closed early.
+_HESITATION_RE = re.compile(r"(u+h*m+|h+m+|u+h+|a+h+|e+r+m*|अ+ं*|[अउह]+(?:म्?)+)")
+_HESITATION_WORDS = frozenset(
+    {
+        "well", "so", "like", "matlab", "मतलब", "वो", "woh", "toh", "तो",
+        "ம்ம்", "ம்", "ஆ", "అ", "ఆ", "హ్మ్", "అమ్మ్", "ಅ", "ಆ", "ಹ್ಮ್", "ಉಂ", "അ", "ആ", "ഉം", "ഹ്മ്",
+        "আ", "অ", "উম", "হুম", "ਅ", "ਹਮ", "ਉਮ", "ਹਮਮ", "ଅ", "ହମ୍", "ଉମ୍", "આ", "અ", "હમ", "હમ્મ", "अं",
+    }
+)
+_TRAILING_CONNECTORS = frozenset(
+    {
+        "और", "aur", "and", "or", "या", "ya", "but", "लेकिन", "ki", "कि", "matlab", "मतलब", "toh", "तो", "so",
+        "आणि", "किंवा", "पण", "म्हणजे",
+        "અને", "કે", "પણ", "એટલે",
+        "மற்றும்", "அப்புறம்", "ஆனா", "அதாவது",
+        "మరియు", "కానీ", "అంటే", "ఇంకా",
+        "ಮತ್ತು", "ಆದರೆ", "ಅಂದರೆ", "ಮತ್ತೆ",
+        "ഒപ്പം", "പിന്നെ", "പക്ഷേ", "അതായത്",
+        "আর", "এবং", "কিন্তু", "মানে",
+        "ਤੇ", "ਅਤੇ", "ਪਰ", "ਮਤਲਬ",
+        "ଏବଂ", "କିନ୍ତୁ", "ମାନେ", "ଆଉ",
+    }
+)
 # After this many unusable turns, say the crowd line once instead of replaying the question.
 CROWD_COOLDOWN_S = 10.0
 RECOVERY_SPEECH_KINDS = frozenset({"ask_repeat", "crowd_help", "noise_help", "crowd_hold"})
@@ -133,6 +158,8 @@ class Move:
     tone: str | None = None
     # Spoken as-is. One sentence, so the voice model cannot add a second question.
     verbatim: str | None = None
+    # verbatim is a fixed wording of an ordinary ask (not a must-say line); the voice model may word it instead.
+    scripted: bool = False
 
 
 class InterviewFlow:
@@ -206,6 +233,9 @@ class InterviewFlow:
         if nervous:
             # One reassurance per call. Repeating "no hurry / dheere se" every turn sounds scripted.
             if self.state.nervous_events == 0:
+                if move.scripted:
+                    move.verbatim = None
+                    move.scripted = False
                 move.directive = (
                     "The candidate sounds nervous. First give one short, warm reassurance (no rush, no trick "
                     "questions, any answer is okay), then: " + move.directive
@@ -269,6 +299,33 @@ class InterviewFlow:
             return bool(ids & {"city", "qualification_year"})
         return False
 
+    def fast_commit_ready(self, text: str) -> bool:
+        """The final transcript already holds a complete one-fact answer, so the turn can close now."""
+        tokens = [t.strip(".,!?;:\"'…।").casefold() for t in (text or "").split()]
+        tokens = [t for t in tokens if t]
+        if not tokens or tokens[-1] in _TRAILING_CONNECTORS or (text or "").rstrip().endswith((",", "…", "...")):
+            return False
+        if all(_HESITATION_RE.fullmatch(t) or t in _HESITATION_WORDS for t in tokens):
+            return False
+        if not self.utterance_ready_for_focus(text):
+            return False
+        if self.expects_short_answer() and not self._confirm_may_carry_correction():
+            return True
+        # Height+weight both parsed, or a full mobile number: utterance_ready_for_focus checked completeness.
+        kinds = set(self.short_answer_kinds())
+        return bool(kinds) and (kinds <= {"height", "weight"} or kinds == {"phone"})
+
+    def _confirm_may_carry_correction(self) -> bool:
+        """A denied phone or body read-back is often followed by the corrected value after a pause."""
+        f = self.state.focus or {}
+        if f.get("type") != "confirm":
+            return False
+        ids = {str(i) for i in (f.get("ids") or [])}
+        field = str(f.get("field") or "")
+        return bool(f.get("body")) or field in {"phone", "body", "height_cm", "weight_kg"} or bool(
+            ids & {"phone", "height_cm", "weight_kg"}
+        )
+
     def short_answer_kinds(self) -> tuple[str, ...]:
         """Field kinds currently in focus (empty when focus is not slots)."""
         f = self.state.focus or {}
@@ -286,6 +343,9 @@ class InterviewFlow:
         min_delay = settings.endpointing_min_delay if covered else settings.endpointing_min_delay_uncovered
         max_delay = max(float(settings.endpointing_max_delay), float(min_delay))
         if not self.patient_answer_focus():
+            short_cap = float(getattr(settings, "endpointing_short_max_delay", 0.0) or 0.0)
+            if short_cap > 0 and self.expects_short_answer() and not self._confirm_may_carry_correction():
+                max_delay = max(float(min_delay), min(max_delay, short_cap))
             return float(min_delay), float(max_delay)
         # Height/weight and work-history answers have natural mid-sentence pauses.
         return max(float(min_delay), 1.1), max(float(max_delay), 3.5)
@@ -910,7 +970,7 @@ class InterviewFlow:
             spec = self.bp.field_spec(field_id)
             slot = st.slots.get(field_id)
             if spec is not None and slot is not None and slot.value is not None:
-                shown = spoken_groups(str(slot.value)) if spec.kind == "phone" else str(slot.value)
+                shown = spoken_phone(str(slot.value), self.state.language) if spec.kind == "phone" else str(slot.value)
                 form_phone = spec.kind == "phone" and slot.evidence == FORM_PHONE_EVIDENCE
                 heard = (
                     "The number is already on the join form. Do not ask them to dictate it. "
@@ -1173,6 +1233,10 @@ class InterviewFlow:
         if not (getattr(self.plan, "resume_text", "") or "").strip():
             return None
         if not self._about_experience(a):
+            return None
+        resume_text = getattr(self.plan, "resume_text", "") or ""
+        if is_false_mismatch(note, resume_text, a.raw_utterance):
+            # Same place in other words ("Apollo Hospital" vs "Apollo Hospitals, Pune"): not worth stopping for.
             return None
         self.state.resume_crosscheck_done = True
         self._set_focus("resume_check")
@@ -1803,6 +1867,13 @@ class InterviewFlow:
         if self._body_pair_ready():
             height = st.slot("height_cm")
             weight = st.slot("weight_kg")
+            if max(height.attempts, weight.attempts) >= lim.max_field_attempts:
+                # Read back twice without a clear yes/no: keep what was heard (captured at high
+                # confidence) instead of looping the same sentence.
+                height.status = "confirmed"
+                weight.status = "confirmed"
+                events.append(("body.confirm_limit", {"attempts": max(height.attempts, weight.attempts)}))
+                return self._screening_next(events)
             height.attempts += 1
             weight.attempts += 1
             height_phrase = self._body_height_phrase()
@@ -1831,7 +1902,7 @@ class InterviewFlow:
             slot = st.slot(spec.id)
             slot.attempts += 1
             value = slot.value
-            shown = spoken_groups(str(value)) if spec.kind == "phone" else str(value)
+            shown = spoken_phone(str(value), st.language) if spec.kind == "phone" else str(value)
             form_phone = spec.kind == "phone" and slot.evidence == FORM_PHONE_EVIDENCE
             self._set_focus(
                 "confirm",
@@ -1866,7 +1937,7 @@ class InterviewFlow:
             if spec2 is not None:
                 heard = self._invalid_heard.get(fid, "")
                 if spec2.kind == "phone" and heard:
-                    shown = spoken_groups(heard)
+                    shown = spoken_phone(heard, st.language)
                     self._set_focus("slots", ids=[fid])
                     move = self._move(
                         "reask_invalid",
@@ -1911,6 +1982,13 @@ class InterviewFlow:
             move = self._move("ask_field", f"{prefix}{ask}", events=events)
             if group[0].kind == "phone":
                 move.verbatim = phone_ask_line(st.language)
+            elif not asked_before and not (
+                "experience_years" in ids and self._is_fresher_candidate()
+            ):
+                line = screening_ask_line(ids, st.language, self.plan.interview_id)
+                if line:
+                    move.verbatim = line
+                    move.scripted = True
             return move
 
         # 5. Comfort with hands-on care (diaper gate). Experience probes wait until this clears.
