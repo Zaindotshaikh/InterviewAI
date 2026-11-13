@@ -77,6 +77,8 @@ export default function LiveInterview({
   const [windowClosed, setWindowClosed] = useState(false);
   const droppedNotified = useRef(false);
   const endingRef = useRef(false);
+  const endInterviewRef = useRef<() => Promise<void>>(async () => {});
+  const [resolvingEnd, setResolvingEnd] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
 
@@ -152,15 +154,45 @@ export default function LiveInterview({
   }, [lk.phase]);
 
   useEffect(() => {
+    if (!lk.interviewComplete || endingRef.current) return;
+    void endInterviewRef.current();
+  }, [lk.interviewComplete]);
+
+  useEffect(() => {
     if (!allowRejoin || ending || endingRef.current) return;
     if (lk.phase !== "ended") {
       droppedNotified.current = false;
+      setResolvingEnd(false);
       return;
     }
     if (droppedNotified.current) return;
-    droppedNotified.current = true;
-    onDropped?.();
-  }, [allowRejoin, ending, lk.phase, onDropped]);
+    let cancelled = false;
+    setResolvingEnd(true);
+    void (async () => {
+      let completed = false;
+      try {
+        const res = await fetch(`/api/v2/interview/${session.id}`);
+        if (res.ok) {
+          const body = (await res.json()) as { completed?: boolean };
+          completed = Boolean(body.completed);
+        }
+      } catch {
+        completed = false;
+      }
+      if (cancelled || endingRef.current) return;
+      if (completed) {
+        droppedNotified.current = true;
+        void endInterviewRef.current();
+        return;
+      }
+      droppedNotified.current = true;
+      setResolvingEnd(false);
+      onDropped?.();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [allowRejoin, ending, lk.phase, onDropped, session.id]);
 
   async function rejoinInterview() {
     if (rejoining || ending) return;
@@ -199,7 +231,7 @@ export default function LiveInterview({
   }, [lk.phase, agentSpeaking]);
 
   const live = lk.phase === "live";
-  const dropped = allowRejoin && lk.phase === "ended" && !ending;
+  const dropped = allowRejoin && lk.phase === "ended" && !ending && !resolvingEnd;
   const rejoinOpen = dropped && !windowClosed && (rejoinLeftMs == null || rejoinLeftMs > 0);
   const interviewer = session.interviewerName ?? "Interviewer";
   const phaseLabel = live
@@ -222,6 +254,7 @@ export default function LiveInterview({
     await lk.disconnect();
     onEnded(integrity);
   }
+  endInterviewRef.current = endInterview;
 
   return (
     <div className="relative flex h-dvh max-h-dvh flex-col overflow-hidden bg-[var(--color-panel)] text-[var(--color-fg)]">

@@ -990,12 +990,30 @@ class InterviewAgent(Agent):
             elif spoke and state in ("listening", "idle"):
                 break
         await asyncio.sleep(0.8)
+        await self._signal_interview_ended()
         try:
             session.shutdown(drain=True)
         except Exception:  # noqa: BLE001
             logger.exception("session shutdown failed")
         if (job_ctx := self.session_ref.get("job_ctx")) is not None:
             job_ctx.shutdown(reason="interview_complete")
+
+    async def _signal_interview_ended(self) -> None:
+        """Tell the browser this shutdown is a clean end, so it opens the scorecard instead of Rejoin."""
+        job_ctx = self.session_ref.get("job_ctx")
+        room = getattr(job_ctx, "room", None)
+        participant = getattr(room, "local_participant", None) if room is not None else None
+        if participant is None:
+            return
+        payload = json.dumps(
+            {"type": "interview_ended", "outcome": self.flow.state.outcome or ""}
+        ).encode()
+        try:
+            published = participant.publish_data(payload, reliable=True, topic="interview")
+            if asyncio.iscoroutine(published):
+                await published
+        except Exception:  # noqa: BLE001
+            logger.exception("interview ended signal failed")
 
     async def speak_move(self, move: Move) -> None:
         """Say something unprompted (resume, silence nudges, goodbyes)."""

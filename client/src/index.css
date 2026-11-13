@@ -173,6 +173,19 @@ button {
   animation: hud-rec 1.6s ease-in-out infinite;
 }
 
+@keyframes scorecard-sheen {
+  0% {
+    transform: translateX(-130%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+.scorecard-sheen {
+  animation: scorecard-sheen 1.35s ease-in-out infinite;
+}
+
 .hud-grid {
   background-image:
     linear-gradient(rgba(107, 184, 47, 0.06) 1px, transparent 1px),

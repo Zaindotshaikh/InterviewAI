@@ -1628,15 +1628,43 @@ def test_endpointing_hold_short_answer_cap(blueprint):
 def test_closing_offers_questions_then_says_goodbye(blueprint):
     flow, _ = make_flow(blueprint)
     reach_clinical(flow, experience=("1", "ward"))
+    entered = None
     for _ in range(40):
         if flow.stage != "clinical":
             break
-        flow.apply(grade("partial", missing=["y"]))
+        entered = flow.apply(grade("partial", missing=["y"]))
     assert flow.stage == "closing"
+    assert entered is not None and entered.kind == "wrap_up" and entered.verbatim
+    assert "सवाल" in entered.verbatim
     answer = flow.apply(TurnAnalysis(intent="candidate_question"))
     assert answer.kind == "closing_answer" and not answer.completed
+    assert "next question" not in answer.directive.lower()
     bye = flow.apply(TurnAnalysis())
-    assert bye.completed and bye.end_session and flow.state.outcome == "completed"
+    assert bye.completed and bye.end_session and bye.verbatim and flow.state.outcome == "completed"
+    again = flow.apply(TurnAnalysis(intent="answer", raw_utterance="Okay, thank you"))
+    assert again.kind == "hold" and not again.verbatim
+
+
+def test_thanks_after_a_closing_answer_ends_once(blueprint):
+    flow, _ = make_flow(blueprint, language="en-IN")
+    flow._begin_closing([])
+    answer = flow.apply(
+        TurnAnalysis(
+            intent="candidate_question",
+            gist_en="when is joining and what is the location",
+            raw_utterance="when is joining and what is the location",
+        )
+    )
+    assert answer.kind == "closing_answer" and not answer.completed
+    assert "location" in answer.directive.lower()
+    assert "any other questions" in answer.directive.lower()
+    assert "next question" not in answer.directive.lower()
+    bye = flow.apply(TurnAnalysis(intent="answer", raw_utterance="Okay, thank you"))
+    assert bye.kind == "goodbye" and bye.end_session and bye.verbatim
+    assert "location" not in bye.verbatim.lower()
+    assert "next question" not in bye.verbatim.lower()
+    again = flow.apply(TurnAnalysis(intent="answer", raw_utterance="Okay, thank you"))
+    assert again.kind == "hold"
 
 
 def test_clinical_round_stops_after_the_target_number_of_areas(blueprint):

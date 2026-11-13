@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import LanguagePicker from "./components/LanguagePicker";
 import PreflightCheck from "./components/PreflightCheck";
 import LiveInterview from "./components/LiveInterview";
+import ScorecardProgress from "./components/ScorecardProgress";
 import ScorecardView from "./components/ScorecardView";
 import { useLiveKitInterview } from "./hooks/useLiveKitInterview";
 import {
@@ -149,6 +150,8 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<V2StartResponse | null>(null);
   const [scorecard, setScorecard] = useState<V2Scorecard | null>(null);
+  const [scoreReveal, setScoreReveal] = useState(false);
+  const revealScore = useCallback(() => setScoreReveal(true), []);
   const [transcript, setTranscript] = useState<V2TranscriptResponse | null>(null);
   const [transcriptBusy, setTranscriptBusy] = useState(false);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
@@ -292,6 +295,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
       }
       setBusy(true);
       setScorecard(null);
+      setScoreReveal(false);
       setPhase("scorecard");
       try {
         if (integrity) {
@@ -455,7 +459,6 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
   }
 
   if (phase === "scorecard") {
-    const turnCount = transcript?.turns?.length ?? 0;
     return (
       <div className="mx-auto max-w-3xl space-y-6 px-4 py-10">
         <div>
@@ -478,13 +481,16 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
         {error && <p className="text-sm text-red-600">{error}</p>}
 
         <div>
-          {scorecard ? (
-            <ScorecardView scorecard={scorecard} />
+          {scoreReveal ? (
+            scorecard ? (
+              <ScorecardView scorecard={scorecard} />
+            ) : (
+              <p className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
+                The scorecard is not ready yet. Run the interview again if this stays empty.
+              </p>
+            )
           ) : (
-            <p className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
-              Preparing the scorecard from this interview
-              {turnCount > 0 ? ` (${turnCount} transcript turns saved)` : ""}…
-            </p>
+            <ScorecardProgress ready={Boolean(scorecard) || Boolean(error)} onDone={revealScore} />
           )}
         </div>
 
@@ -504,6 +510,7 @@ export default function V2TestPage({ avatar = false, ttsProvider, voiceProvider 
               setPhase("setup");
               setSession(null);
               setScorecard(null);
+              setScoreReveal(false);
               setTranscript(null);
               setError(null);
               if (candidateJoin) {

@@ -39,6 +39,7 @@ export function useLiveKitInterview() {
   const [connectionQuality, setConnectionQuality] = useState<"excellent" | "good" | "poor" | "unknown">(
     "unknown",
   );
+  const [interviewComplete, setInterviewComplete] = useState(false);
 
   const disconnect = useCallback(async () => {
     const room = roomRef.current;
@@ -54,6 +55,7 @@ export function useLiveKitInterview() {
 
   const connect = useCallback(async (opts: Options) => {
     setError(null);
+    setInterviewComplete(false);
     setPhase("connecting");
     if (!opts.keepCaptions) setCaptions([]);
 
@@ -72,6 +74,15 @@ export function useLiveKitInterview() {
       expWebAudioMix: true,
     });
     roomRef.current = room;
+
+    room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
+      try {
+        const msg = JSON.parse(new TextDecoder().decode(payload)) as { type?: string };
+        if (msg.type === "interview_ended") setInterviewComplete(true);
+      } catch {
+        /* not our packet */
+      }
+    });
 
     room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
       if (state === ConnectionState.Connected) setPhase("live");
@@ -200,6 +211,7 @@ export function useLiveKitInterview() {
     remoteVideoStream,
     captions,
     connectionQuality,
+    interviewComplete,
     connect,
     disconnect,
     unlockAudio,

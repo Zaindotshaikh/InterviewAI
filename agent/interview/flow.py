@@ -89,6 +89,109 @@ REASON_CLAUSES = {
     ),
 }
 ASK_KINDS = frozenset({"ask_field", "ask_care", "ask_care_item", "experience_probe", "clinical_question"})
+# Closing is spoken as-is so the voice model cannot skip the question or repeat the joining line.
+_CLOSING_INVITE = {
+    "hi-IN": "मेरी तरफ से सवाल पूरे हो गए। क्या इस प्रोसेस के बारे में आपका कोई सवाल है?",
+    "en-IN": "That's everything from my side. Do you have any questions about the process?",
+    "mr-IN": "माझ्या बाजूने प्रश्न संपले. या प्रक्रियेबद्दल तुमचा काही प्रश्न आहे का?",
+    "gu-IN": "મારી તરફથી પ્રશ્નો પૂરા થયા. આ પ્રક્રિયા વિશે તમારો કોઈ પ્રશ્ન છે?",
+    "te-IN": "నా వైపు నుంచి ప్రశ్నలు అయిపోయాయి. ఈ ప్రాసెస్ గురించి మీకు ఏమైనా ప్రశ్న ఉందా?",
+    "ta-IN": "என் பக்கம் கேள்விகள் முடிந்தது. இந்த செயல்முறை பற்றி உங்களுக்கு ஏதேனும் கேள்வி உண்டா?",
+    "kn-IN": "ನನ್ನ ಕಡೆಯ ಪ್ರಶ್ನೆಗಳು ಮುಗಿದವು. ಈ ಪ್ರಕ್ರಿಯೆಯ ಬಗ್ಗೆ ನಿಮಗೆ ಯಾವುದಾದರೂ ಪ್ರಶ್ನೆ ಇದೆಯೇ?",
+    "ml-IN": "എന്റെ ഭാഗത്തുനിന്നുള്ള ചോദ്യങ്ങൾ കഴിഞ്ഞു. ഈ പ്രക്രിയയെക്കുറിച്ച് നിങ്ങൾക്ക് എന്തെങ്കിലും ചോദ്യമുണ്ടോ?",
+    "bn-IN": "আমার দিকের প্রশ্ন শেষ। এই প্রক্রিয়া নিয়ে আপনার কোনো প্রশ্ন আছে?",
+    "pa-IN": "ਮੇਰੇ ਪਾਸੇ ਦੇ ਸਵਾਲ ਖਤਮ ਹੋ ਗਏ। ਇਸ ਪ੍ਰਕਿਰਿਆ ਬਾਰੇ ਤੁਹਾਡਾ ਕੋਈ ਸਵਾਲ ਹੈ?",
+    "od-IN": "ମୋ ପାଖର ପ୍ରଶ୍ନ ସରିଗଲା। ଏହି ପ୍ରକ୍ରିୟା ବିଷୟରେ ଆପଣଙ୍କର କିଛି ପ୍ରଶ୍ନ ଅଛି କି?",
+}
+_CLOSING_MORE = {
+    "hi-IN": "और कोई सवाल है?",
+    "en-IN": "Do you have any other questions?",
+    "mr-IN": "आणखी काही प्रश्न आहे का?",
+    "gu-IN": "બીજો કોઈ પ્રશ્ન છે?",
+    "te-IN": "ఇంకేమైనా ప్రశ్న ఉందా?",
+    "ta-IN": "வேறு ஏதேனும் கேள்வி உண்டா?",
+    "kn-IN": "ಇನ್ನೇನಾದರೂ ಪ್ರಶ್ನೆ ಇದೆಯೇ?",
+    "ml-IN": "വേറെ എന്തെങ്കിലും ചോദ്യമുണ്ടോ?",
+    "bn-IN": "আর কোনো প্রশ্ন আছে?",
+    "pa-IN": "ਹੋਰ ਕੋਈ ਸਵਾਲ ਹੈ?",
+    "od-IN": "ଆଉ କିଛି ପ୍ରଶ୍ନ ଅଛି କି?",
+}
+_CLOSING_GOODBYE = {
+    "hi-IN": "आपका समय देने के लिए धन्यवाद। रिक्रूटमेंट टीम आपसे संपर्क करेगी। अच्छा दिन रहे।",
+    "en-IN": "Thank you for your time. The recruitment team will be in touch. Have a good day.",
+    "mr-IN": "वेळ दिल्याबद्दल धन्यवाद. रिक्रूटमेंट टीम तुमच्याशी संपर्क करेल. शुभ दिवस.",
+    "gu-IN": "સમય આપવા બદલ આભાર. રિક્રૂટમેન્ટ ટીમ તમારો સંપર્ક કરશે. શુભ દિવસ.",
+    "te-IN": "మీ సమయానికి ధన్యవాదాలు. రిక్రూట్‌మెంట్ బృందం మిమ్మల్ని సంప్రదిస్తుంది. శుభదినం.",
+    "ta-IN": "நேரம் ஒதுக்கியதற்கு நன்றி. ஆட்சேர்ப்பு குழு உங்களைத் தொடர்பு கொள்ளும். நல்ல நாள்.",
+    "kn-IN": "ನಿಮ್ಮ ಸಮಯಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನೇಮಕಾತಿ ತಂಡವು ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತದೆ. ಶುಭ ದಿನ.",
+    "ml-IN": "സമയം നൽകിയതിന് നന്ദി. റിക്രൂട്ട്‌മെന്റ് ടീം നിങ്ങളെ ബന്ധപ്പെടും. നല്ല ദിവസം.",
+    "bn-IN": "সময় দেওয়ার জন্য ধন্যবাদ। রিক্রুটমেন্ট টিম আপনার সঙ্গে যোগাযোগ করবে। শুভ দিন।",
+    "pa-IN": "ਸਮਾਂ ਦੇਣ ਲਈ ਧੰਨਵਾਦ। ਭਰਤੀ ਟੀਮ ਤੁਹਾਡੇ ਨਾਲ ਸੰਪਰਕ ਕਰੇਗੀ। ਚੰਗਾ ਦਿਨ ਰਹੇ।",
+    "od-IN": "ସମୟ ଦେଇଥିବାରୁ ଧନ୍ୟବାଦ। ନିଯୁକ୍ତି ଦଳ ଆପଣଙ୍କୁ ଯୋଗାଯୋଗ କରିବ। ଶୁଭ ଦିନ।",
+}
+_CLOSING_DONE = re.compile(
+    r"(?:\b(?:no|nope|nothing|nah|okay|ok|thanks|thank you|thankyou|that's all|thats all|all good)\b"
+    r"|नहीं|नही|नाही|धन्यवाद|थैंक|शुक्रिया|बस|ठीक है|ठीक आहे|काही नाही|कुछ नहीं|और नहीं)",
+    re.IGNORECASE,
+)
+_CLOSING_ASK = re.compile(
+    r"(?:\?|\bsalary\b|\bpay\b|\bctc\b|\bpackage\b|\blocation\b|\bshift\b|\bjoining\b|\bresult\b"
+    r"|\bselection\b|\bwhen\b|\bwhere\b|क्या|कधी|कुठे|पगार|वेतन|सैलरी|लोकेशन|जॉइनिंग)",
+    re.IGNORECASE,
+)
+_FAQ_PAY = {
+    "hi-IN": "सैलरी और बेनिफिट्स रिक्रूटमेंट टीम बताएगी। मेरे पास ये डिटेल नहीं है।",
+    "en-IN": "The recruitment team will share the pay and benefits. I do not have those details.",
+    "mr-IN": "पगार आणि बेनिफिट्स रिक्रूटमेंट टीम सांगेल. माझ्याकडे ही माहिती नाही.",
+    "gu-IN": "પગાર અને બેનિફિટ્સ રિક્રૂટમેન્ટ ટીમ જણાવશે. મારી પાસે આ વિગત નથી.",
+    "te-IN": "జీతం మరియు బెనిఫిట్స్ రిక్రూట్‌మెంట్ బృందం చెబుతుంది. నా దగ్గర ఆ వివరాలు లేవు.",
+    "ta-IN": "சம்பளமும் சலுகைகளும் ஆட்சேர்ப்பு குழு சொல்லும். என்னிடம் அந்த விவரம் இல்லை.",
+    "kn-IN": "ಸಂಬಳ ಮತ್ತು ಸೌಲಭ್ಯಗಳನ್ನು ನೇಮಕಾತಿ ತಂಡ ಹೇಳುತ್ತದೆ. ನನ್ನ ಬಳಿ ಆ ವಿವರ ಇಲ್ಲ.",
+    "ml-IN": "ശമ്പളവും ആനുകൂല്യങ്ങളും റിക്രൂട്ട്‌മെന്റ് ടീം പറയും. എന്റെ കയ്യിൽ ആ വിവരം ഇല്ല.",
+    "bn-IN": "বেতন ও সুবিধা রিক্রুটমেন্ট টিম জানাবে। আমার কাছে সেই তথ্য নেই।",
+    "pa-IN": "ਤਨਖਾਹ ਅਤੇ ਫਾਇਦੇ ਭਰਤੀ ਟੀਮ ਦੱਸੇਗੀ। ਮੇਰੇ ਕੋਲ ਇਹ ਵੇਰਵਾ ਨਹੀਂ।",
+    "od-IN": "ଦରମା ଓ ସୁବିଧା ନିଯୁକ୍ତି ଦଳ କହିବ। ମୋ ପାଖରେ ଏହି ତଥ୍ୟ ନାହିଁ।",
+}
+_FAQ_RESULT = {
+    "hi-IN": "टीम इस बातचीत को देखेगी और आपके फोन नंबर पर संपर्क करेगी।",
+    "en-IN": "The team will review this conversation and contact you on your phone number.",
+    "mr-IN": "टीम ही मुलाखत पाहेल आणि तुमच्या फोन नंबरवर संपर्क करेल.",
+    "gu-IN": "ટીમ આ વાતચીત જોશે અને તમારા ફોન નંબર પર સંપર્ક કરશે.",
+    "te-IN": "బృందం ఈ సంభాషణను చూసి మీ ఫోన్ నంబర్‌కు సంప్రదిస్తుంది.",
+    "ta-IN": "குழு இந்த உரையாடலைப் பார்த்து உங்கள் தொலைபேசி எண்ணில் தொடர்பு கொள்ளும்.",
+    "kn-IN": "ತಂಡವು ಈ ಮಾತುಕತೆಯನ್ನು ನೋಡಿ ನಿಮ್ಮ ಫೋನ್ ಸಂಖ್ಯೆಗೆ ಸಂಪರ್ಕಿಸುತ್ತದೆ.",
+    "ml-IN": "ടീം ഈ സംഭാഷണം നോക്കി നിങ്ങളുടെ ഫോൺ നമ്പറിൽ ബന്ധപ്പെടും.",
+    "bn-IN": "টিম এই কথাবার্তা দেখে আপনার ফোন নম্বরে যোগাযোগ করবে।",
+    "pa-IN": "ਟੀਮ ਇਹ ਗੱਲਬਾਤ ਦੇਖੇਗੀ ਅਤੇ ਤੁਹਾਡੇ ਫ਼ੋਨ ਨੰਬਰ ਤੇ ਸੰਪਰਕ ਕਰੇਗੀ।",
+    "od-IN": "ଦଳ ଏହି କଥାବାର୍ତ୍ତା ଦେଖି ଆପଣଙ୍କ ଫୋନ ନମ୍ବରରେ ଯୋଗାଯୋଗ କରିବ।",
+}
+_FAQ_PLACE = {
+    "hi-IN": "लोकेशन, शिफ्ट और जॉइनिंग की डिटेल रिक्रूटमेंट टीम बताएगी।",
+    "en-IN": "The recruitment team will share the location, shifts, and joining details.",
+    "mr-IN": "लोकेशन, शिफ्ट आणि जॉइनिंगची माहिती रिक्रूटमेंट टीम सांगेल.",
+    "gu-IN": "લોકેશન, શિફ્ટ અને જોઇનિંગની વિગત રિક્રૂટમેન્ટ ટીમ જણાવશે.",
+    "te-IN": "లొకేషన్, షిఫ్ట్ మరియు జాయినింగ్ వివరాలు రిక్రూట్‌మెంట్ బృందం చెబుతుంది.",
+    "ta-IN": "இடம், ஷிப்ட், சேரும் தேதி ஆகியவற்றை ஆட்சேர்ப்பு குழு சொல்லும்.",
+    "kn-IN": "ಸ್ಥಳ, ಶಿಫ್ಟ್ ಮತ್ತು ಸೇರುವ ವಿವರವನ್ನು ನೇಮಕಾತಿ ತಂಡ ಹೇಳುತ್ತದೆ.",
+    "ml-IN": "സ്ഥലം, ഷിഫ്റ്റ്, ജോയിനിംഗ് വിവരം റിക്രൂട്ട്‌മെന്റ് ടീം പറയും.",
+    "bn-IN": "লোকেশন, শিফট আর জয়েনিংয়ের তথ্য রিক্রুটমেন্ট টিম জানাবে।",
+    "pa-IN": "ਲੋਕੇਸ਼ਨ, ਸ਼ਿਫਟ ਅਤੇ ਜੁਆਇਨਿੰਗ ਦੀ ਜਾਣਕਾਰੀ ਭਰਤੀ ਟੀਮ ਦੱਸੇਗੀ।",
+    "od-IN": "ସ୍ଥାନ, ସିଫ୍ଟ ଓ ଯୋଗଦାନ ତଥ୍ୟ ନିଯୁକ୍ତି ଦଳ କହିବ।",
+}
+_FAQ_OTHER = {
+    "hi-IN": "ये डिटेल मेरे पास नहीं है। रिक्रूटमेंट टीम आपको बताएगी।",
+    "en-IN": "I do not have that detail. The recruitment team will follow up with you.",
+    "mr-IN": "ही माहिती माझ्याकडे नाही. रिक्रूटमेंट टीम तुम्हाला सांगेल.",
+    "gu-IN": "આ વિગત મારી પાસે નથી. રિક્રૂટમેન્ટ ટીમ તમને જણાવશે.",
+    "te-IN": "ఆ వివరం నా దగ్గర లేదు. రిక్రూట్‌మెంట్ బృందం మీకు చెబుతుంది.",
+    "ta-IN": "அந்த விவரம் என்னிடம் இல்லை. ஆட்சேர்ப்பு குழு உங்களிடம் சொல்லும்.",
+    "kn-IN": "ಆ ವಿವರ ನನ್ನ ಬಳಿ ಇಲ್ಲ. ನೇಮಕಾತಿ ತಂಡ ನಿಮಗೆ ಹೇಳುತ್ತದೆ.",
+    "ml-IN": "ആ വിവരം എന്റെ കയ്യിൽ ഇല്ല. റിക്രൂട്ട്‌മെന്റ് ടീം നിങ്ങളോട് പറയും.",
+    "bn-IN": "সেই তথ্য আমার কাছে নেই। রিক্রুটমেন্ট টিম আপনাকে জানাবে।",
+    "pa-IN": "ਇਹ ਵੇਰਵਾ ਮੇਰੇ ਕੋਲ ਨਹੀਂ। ਭਰਤੀ ਟੀਮ ਤੁਹਾਨੂੰ ਦੱਸੇਗੀ।",
+    "od-IN": "ଏହି ତଥ୍ୟ ମୋ ପାଖରେ ନାହିଁ। ନିଯୁକ୍ତି ଦଳ ଆପଣଙ୍କୁ କହିବ।",
+}
+_CLOSING_ANSWER_CAP = 3
 VERIFY_FIELDS = ("qualification", "experience_years")
 # Moves that do not mean "the answer was taken and we moved on".
 NON_PROGRESS_KINDS = frozenset(
@@ -810,8 +913,10 @@ class InterviewFlow:
     def silence(self, level: int) -> Move:
         st = self.state
         st.silence_level = level
-        if st.stage in ("closing", "ended"):
-            return self._move("goodbye", "Say a short goodbye.", completed=True, end_session=True)
+        if st.stage == "ended":
+            return Move(kind="hold", directive="")
+        if st.stage == "closing":
+            return self._close_goodbye()
         # First quiet stretch: stay silent. Speaking "no hurry / would you like me to repeat"
         # mid-answer is what QA flagged as unnatural interruption.
         if level <= 1:
@@ -882,9 +987,11 @@ class InterviewFlow:
         self._prepare_experience_turn(a)
 
         if st.stage == "ended":
-            return self._move("ended", "The interview is over. Reply with one short, warm goodbye.", completed=True, end_session=True)
+            return Move(kind="hold", directive="")
         if st.elapsed_s >= self.bp.limits.hard_cap_minutes * 60:
             return self.force_complete("time")
+        if st.stage == "closing":
+            return self._wrap(self._closing(a), a.nervous)
 
         # Partial hearing → only force a read-back on fields marked confirm (phone).
         # Body height/weight get one joint confirm after a clean capture, not on muddy STT.
@@ -2654,42 +2761,96 @@ class InterviewFlow:
 
     # ------------------------------------------------------------------------------------------------ closing
 
+    def _closing_line(self, which: str) -> str:
+        table = {"invite": _CLOSING_INVITE, "more": _CLOSING_MORE, "bye": _CLOSING_GOODBYE}[which]
+        lang = (self.state.language or "en-IN").strip()
+        return table.get(lang) or table["en-IN"]
+
+    def _say_closing(self, which: str, events: list[tuple[str, dict[str, Any]]] | None = None) -> Move:
+        line = self._closing_line(which)
+        extra: dict[str, Any] = {}
+        if events is not None:
+            extra["events"] = events
+        move = self._move("wrap_up", "Say exactly this and nothing else. " + line, **extra)
+        move.verbatim = line
+        return move
+
+    def _closing_is_question(self, a: TurnAnalysis) -> bool:
+        raw = a.raw_utterance or ""
+        blob = f"{raw} {a.gist_en or ''}"
+        if _CLOSING_DONE.search(raw) and not _CLOSING_ASK.search(blob):
+            return False
+        if _CLOSING_ASK.search(blob):
+            return True
+        return a.intent == "candidate_question" and not _CLOSING_DONE.search(raw)
+
+    def _closing_is_done(self, a: TurnAnalysis) -> bool:
+        if self._closing_is_question(a):
+            return False
+        raw = (a.raw_utterance or "").strip()
+        if a.intent in ("refusal", "dont_know", "wants_to_stop"):
+            return True
+        if not raw:
+            return a.intent in ("answer", "filler_only", "off_topic")
+        if _CLOSING_DONE.search(raw):
+            return True
+        return a.intent in ("answer", "off_topic")
+
+    def _faq_spoken(self, a: TurnAnalysis) -> str:
+        blob = f"{a.gist_en or ''} {a.raw_utterance or ''}".lower()
+        key = "other"
+        best_hits = 0
+        for topic_key, words in (
+            ("pay", ("salary", "pay", "benefit", "ctc", "package", "सैलरी", "पगार", "वेतन")),
+            ("result", ("result", "selection", "next step", "selected")),
+            ("place", ("location", "shift", "joining", "लोकेशन", "जॉइनिंग")),
+        ):
+            hits = sum(1 for w in words if w in blob)
+            if hits > best_hits:
+                key, best_hits = topic_key, hits
+        table = {"pay": _FAQ_PAY, "result": _FAQ_RESULT, "place": _FAQ_PLACE, "other": _FAQ_OTHER}[key]
+        lang = (self.state.language or "en-IN").strip()
+        return table.get(lang) or table["en-IN"]
+
+    def _closing_answer(self, a: TurnAnalysis) -> Move:
+        line = f"{self._faq_spoken(a)} {self._closing_line('more')}"
+        move = self._move("closing_answer", "Say exactly this and nothing else. " + line)
+        move.verbatim = line
+        return move
+
+    def _close_goodbye(self) -> Move:
+        line = self._closing_line("bye")
+        move = self._close(
+            "completed",
+            "Say exactly this and nothing more. Do not ask a question and do not repeat earlier details. " + line,
+            "goodbye",
+        )
+        move.verbatim = line
+        return move
+
     def _begin_closing(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
         st = self.state
         st.stage = "closing"
         st.current_area = None
-        self._set_focus("closing_qa", asks=0)
-        return self._move(
-            "wrap_up",
-            "That was the last question. Thank the candidate warmly by name for their time and honest answers, and "
-            "ask if they have any questions about the process before you finish. Do not mention scores or results.",
-            events=events + [("stage.closing", {})],
-        )
+        self._set_focus("closing_qa", asks=0, step="invite", repeats=0)
+        return self._say_closing("invite", events + [("stage.closing", {})])
 
     def _closing(self, a: TurnAnalysis) -> Move:
         st = self.state
-        if a.intent == "candidate_question" and st.focus.get("asks", 0) < 2:
-            self._set_focus("closing_qa", asks=st.focus.get("asks", 0) + 1)
-            faq = "; ".join(f"{t}: {ans}" for t, ans in self.bp.faq) or "none"
-            asked = (a.gist_en or "their question").strip()
-            if self._mentions_comp(a):
-                line = (
-                    "They asked about pay or benefits. Say the recruitment team will share that, without a figure. "
-                    "Then ask if there is anything else."
-                )
-            else:
-                line = (
-                    f"They asked: \"{asked}\". Answer that, in one sentence, from this list only: {faq}. "
-                    "If it is not on the list, say the team will follow up on what they asked. "
-                    "Then ask if there is anything else."
-                )
-            return self._move("closing_answer", line)
-        return self._close(
-            "completed",
-            "Wish them well, tell them the team will review the conversation and contact them on the phone number "
-            "they shared, and say goodbye. Do not mention scores or results and do not ask anything.",
-            "goodbye",
-        )
+        step = str(st.focus.get("step") or "invite")
+        asks = int(st.focus.get("asks") or 0)
+        if self._closing_is_question(a):
+            if asks >= _CLOSING_ANSWER_CAP:
+                return self._close_goodbye()
+            self._set_focus("closing_qa", asks=asks + 1, step="more", repeats=0)
+            return self._closing_answer(a)
+        if self._closing_is_done(a):
+            return self._close_goodbye()
+        repeats = int(st.focus.get("repeats") or 0)
+        if repeats >= 1:
+            return self._close_goodbye()
+        self._set_focus("closing_qa", asks=asks, step=step, repeats=repeats + 1)
+        return self._say_closing("more" if step == "more" else "invite")
 
     def _close(self, outcome: str, directive: str, kind: str) -> Move:
         st = self.state
