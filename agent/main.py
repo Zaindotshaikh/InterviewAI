@@ -67,6 +67,7 @@ from interview.early_filler import EarlyFiller
 from interview.expressiveness import ExpressivenessEngine
 from interview.fillers import drop_lead_ack
 from interview.latency import LatencyTracker
+from interview.trace import open_body, slot_rows, turn_body
 from interview.liveness import ConnectionGuard, SilenceMonitor
 from interview.prompts import ELEVENLABS_PLAIN_SPEECH_RULES
 from interview.speech import SpeechArbiter, await_playout, source_for_move
@@ -397,6 +398,11 @@ class InterviewAgent(Agent):
         self._listening_armed = False
         self._floor = ListenFloor()
         self.latency: LatencyTracker | None = None
+        # Private case file. On only for the ElevenLabs cascade route.
+        self._trace_on = False
+        self._trace_closed = False
+        self._trace_commit = "normal"
+        self._trace_reply_index = 0
         self._current_tone = "neutral"
         self._empathy_hint = False
         self._last_spoken = ""
@@ -462,6 +468,8 @@ class InterviewAgent(Agent):
             self._crowd_quiet_until = 0.0
 
     def _drop_recovery_during_cooldown(self, move: Move) -> bool:
+        if move.kind == "hold":
+            return True  # a late piece of an answer already taken: say nothing, never repeat the question
         if move.kind == "crowd_help" and not self._in_crowd_cooldown():
             return False
         return self._in_crowd_cooldown() and move.kind in RECOVERY_SPEECH_KINDS
@@ -886,6 +894,54 @@ class InterviewAgent(Agent):
                     *move.events,
                 ]
             )
+        )
+        self._post_trace_turn(move, utterance)
+
+    def _post_trace_turn(self, move: Move, utterance: str) -> None:
+        if not self._trace_on:
+            return
+        analysis = getattr(self.director, "last_analysis", None)
+        model = ""
+        if getattr(analysis, "source", "") == "llm":
+            model = str(getattr(self.director.analyzer, "last_model", "") or "")
+        if self.latency is not None:
+            self.latency.note_turn(self._turn_index)
+        self._trace_reply_index = self._turn_index
+        self.spawn(
+            self.backend.post_trace(
+                self.plan.interview_id,
+                turn_body(
+                    index=self._turn_index,
+                    move=move,
+                    state=self.flow.state,
+                    analysis=analysis,
+                    commit=self._trace_commit,
+                    heard=utterance,
+                    analyst_model=model,
+                ),
+            )
+        )
+
+    async def finish_trace(self, summary: dict[str, Any] | None) -> None:
+        if not self._trace_on or self._trace_closed:
+            return
+        self._trace_closed = True
+        if self.latency is not None:
+            await self.latency.drain()
+        state = self.flow.state
+        duration_ms = int((datetime.now(timezone.utc) - self._started_at).total_seconds() * 1000)
+        await self.backend.post_trace(
+            self.plan.interview_id,
+            {
+                "op": "close",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "reason": state.outcome or "dropped",
+                "outcome": state.outcome,
+                "stage": state.stage,
+                "durationMs": max(0, duration_ms),
+                "slots": slot_rows(state),
+                "summary": summary or {},
+            },
         )
 
     async def _persist(self, events: list[tuple[str, dict[str, Any]]] | None = None) -> None:
@@ -1639,6 +1695,7 @@ class InterviewAgent(Agent):
                     self._retune_endpointing()
                 raise StopResponse()
 
+        self._trace_commit = "short_answer" if self._fast_commit else "normal"
         if self._fast_commit:
             self._retune_endpointing()
         self._turn_index += 1
@@ -2233,6 +2290,14 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     agent.latency = latency
     latency.attach(session)
+    if (tts_override or settings.resolved_tts()) == "elevenlabs":
+        agent._trace_on = True
+        agent.spawn(
+            backend.post_trace(
+                interview_id,
+                open_body(language=language, started_at=agent._started_at, settings=settings),
+            )
+        )
     logger.info(
         "voice latency log=%s headline=ttfa_vad_ms also=ttfa_confirm_ms stt_aligned=%s",
         settings.voice_latency_log,
@@ -2299,6 +2364,15 @@ async def entrypoint(ctx: JobContext) -> None:
                     interrupted=bool(agent._interrupted) if settings.voice_transcript_split else None,
                 )
             )
+            reply_index = agent._trace_reply_index
+            if agent._trace_on and reply_index > 0 and display.strip():
+                agent._trace_reply_index = 0
+                agent.spawn(
+                    backend.post_trace(
+                        interview_id,
+                        {"op": "spoken", "index": reply_index, "spoken": display.strip()},
+                    )
+                )
             agent._interrupted = False
 
     @session.on("agent_false_interruption")
@@ -2428,6 +2502,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _shutdown() -> None:
         await watchdog.post_summary()
+        summary = None
         try:
             summary = latency.summary()
             if settings.voice_latency_log and summary.get("turns"):
@@ -2435,6 +2510,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.info("turn.latency_summary %s", summary)
         except Exception:  # noqa: BLE001
             logger.exception("latency summary failed")
+        try:
+            await agent.finish_trace(summary)
+        except Exception:  # noqa: BLE001
+            logger.exception("trace close failed")
         await backend.flush()
         await backend.aclose()
 

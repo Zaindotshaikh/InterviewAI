@@ -12,6 +12,8 @@ import statistics
 import time
 from typing import Any
 
+from interview.trace import timing_body
+
 logger = logging.getLogger("interview-v2.latency")
 
 # Allow LLM/TTS metric events to land after first audio before flushing the turn.
@@ -88,7 +90,9 @@ class LatencyTracker:
         self._turn_index = 0
         self._cur: dict[str, Any] | None = None
         self._turns: list[dict[str, Any]] = []
+        self._session_mono = time.monotonic()
         self._awaiting_first_audio = False
+        self._trace_tasks: set[asyncio.Task[Any]] = set()
         self._flush_task: asyncio.Task[Any] | None = None
 
     def attach(self, session: Any) -> None:
@@ -161,6 +165,25 @@ class LatencyTracker:
             if isinstance(ttfb, (int, float)) and ttfb >= 0:
                 # Keep the first TTFB of the reply (ignore later segments if any).
                 cur.setdefault("tts_ttfb_ms", round(float(ttfb) * 1000, 1))
+
+    def _track_trace(self, coro: Any) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            return
+        self._trace_tasks.add(task)
+        task.add_done_callback(self._trace_tasks.discard)
+
+    async def drain(self) -> None:
+        pending = [task for task in list(self._trace_tasks) if not task.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def note_turn(self, index: int) -> None:
+        """Remember which candidate turn the next latency flush belongs to."""
+        if not self._enabled:
+            return
+        self._ensure_turn()["trace_index"] = index
 
     def on_hook_start(self, turn_index: int) -> None:
         if not self._enabled:
@@ -310,6 +333,17 @@ class LatencyTracker:
             payload["tts_ttfb_ms"],
         )
         self._spawn(self._backend.post_event(self._interview_id, "turn.latency", payload))
+        trace_index = cur.get("trace_index")
+        post_trace = getattr(self._backend, "post_trace", None)
+        if isinstance(trace_index, int) and post_trace is not None:
+            body = timing_body(
+                index=trace_index,
+                session_mono=self._session_mono,
+                marks=marks,
+                latency=payload,
+            )
+            if body is not None:
+                self._track_trace(post_trace(self._interview_id, body))
 
     def summary(self) -> dict[str, Any]:
         if self._flush_task and not self._flush_task.done():

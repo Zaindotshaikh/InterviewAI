@@ -609,6 +609,7 @@ class TurnAnalyzer:
         self.failures = 0
         self.last_latency_ms = 0.0
         self.last_completion_tokens = 0
+        self.last_model = ""
 
     @property
     def available(self) -> bool:
@@ -638,8 +639,10 @@ class TurnAnalyzer:
         fallback: TurnAnalysis,
     ) -> TurnAnalysis:
         if not self.available:
+            self.last_model = ""
             return fallback
         model = self._clinical_model if clinical else self._model
+        self.last_model = model
         loop = asyncio.get_running_loop()
         started = loop.time()
         try:
@@ -669,5 +672,6 @@ class TurnAnalyzer:
             return TurnAnalysis.from_dict(data)
         except Exception as err:  # noqa: BLE001
             self.failures += 1
+            self.last_model = ""
             logger.warning("turn analysis failed (%s): %s", type(err).__name__, err)
             return fallback

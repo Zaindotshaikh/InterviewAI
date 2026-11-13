@@ -47,6 +47,7 @@ class Director:
         self._early: tuple[str, str, asyncio.Task[Any]] | None = None  # (text, payload, task)
         # Latency metric: did the last decide() reuse the analysis started on the final transcript?
         self.last_early_hit = False
+        self.last_analysis: Any = None
         self._is_listening_armed = is_listening_armed
 
     def _armed(self) -> bool:
@@ -166,6 +167,7 @@ class Director:
 
     async def decide(self, text: str) -> Move:
         """Turn the confirmed utterance into the next move."""
+        self.last_analysis = None
         early, self._early = self._early, None
         self._finals = []
         self.last_early_hit = False
@@ -231,4 +233,5 @@ class Director:
             )
         except Exception:  # noqa: BLE001
             logger.debug("tone resolve skipped", exc_info=True)
+        self.last_analysis = analysis
         return move

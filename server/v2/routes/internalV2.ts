@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { verifyV2Signature } from "../lib/hmac.js";
+import { applyTrace } from "../lib/traceStore.js";
 import {
   appendV2Event,
   appendV2Transcript,
@@ -125,6 +126,21 @@ router.post("/interviews/:id/controller", async (req, res) => {
   } catch (err) {
     console.error("[v2/internal] controller error:", err);
     res.status(500).json({ error: "Failed to update controller" });
+  }
+});
+
+router.post("/interviews/:id/trace", async (req, res) => {
+  const id = req.params.id;
+  if (!/^[A-Za-z0-9-]{8,80}$/.test(id)) {
+    res.status(400).json({ error: "Invalid interview id" });
+    return;
+  }
+  try {
+    const result = await applyTrace(id, req.body);
+    res.json(result);
+  } catch (err) {
+    console.error("[v2/internal] trace error:", err instanceof Error ? err.name : "error");
+    res.status(500).json({ error: "Failed to store trace" });
   }
 });
 

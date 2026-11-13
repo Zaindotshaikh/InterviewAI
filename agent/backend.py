@@ -168,6 +168,14 @@ class BackendClient:
             body["move"] = move
         await self._send("POST", f"/api/v2/internal/interviews/{interview_id}/transcript", body)
 
+    async def post_trace(self, interview_id: str, body: dict[str, Any]) -> None:
+        """Best-effort private case file. A failure here must not block the transcript queue."""
+        path = f"/api/v2/internal/interviews/{interview_id}/trace"
+        try:
+            await self._request("POST", path, body, retries=2)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("trace write skipped (%s)", type(err).__name__)
+
     async def post_event(self, interview_id: str, event_type: str, data: dict[str, Any] | None = None) -> None:
         body = {"type": event_type, "data": data or {}}
         await self._send("POST", f"/api/v2/internal/interviews/{interview_id}/event", body)

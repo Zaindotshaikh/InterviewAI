@@ -37,6 +37,10 @@ services:
         value: openai
       - key: ELEVENLABS_API_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TRACE_ACCESS_SECRET
+        sync: false
       - key: SARVAM_API_KEY
         sync: false
       - key: TAVUS_API_KEY

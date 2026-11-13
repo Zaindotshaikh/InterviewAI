@@ -14,6 +14,7 @@ import candidatesRouter from "./routes/candidates.js";
 import demoRouter from "./routes/demo.js";
 import interviewV2Router from "./v2/routes/interviewV2.js";
 import internalV2Router from "./v2/routes/internalV2.js";
+import opsTraceRouter from "./v2/routes/opsTrace.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -47,6 +48,7 @@ app.use("/api/interview", summaryRouter);
 // Parallel Indic voice pipeline (does not replace existing /api/interview routes)
 app.use("/api/v2/interview", interviewV2Router);
 app.use("/api/v2/internal", internalV2Router);
+app.use("/api/v2/ops/trace", opsTraceRouter);
 
 app.get("/api/roles", async (_req, res) => {
   try {
