@@ -6,6 +6,7 @@ import pytest
 
 from interview.blueprint import Blueprint
 from interview.normalize import (
+    labels_were_swapped,
     normalize_height_cm,
     spoken_height_phrase,
     normalize_phone,
@@ -113,6 +114,10 @@ def test_height_and_weight_stay_on_their_own_units():
     assert parse_height_and_weight("5 11 70") == (180, 70)
     assert parse_height_and_weight("5.11 and 65 kg") == (180, 65)
     assert parse_height_and_weight("पाँच फीट ग्यारह और 70 किलो") == (180, 70)
+    # "511" is 5'11 said on the weight, and 80 kg was said on the height.
+    assert parse_height_and_weight("height है 80 kg और वज़न है 511") == (180, 80)
+    assert labels_were_swapped("height है 80 kg और वज़न है 511")
+    assert not labels_were_swapped("Height है 5'11, वज़न है 80 kg")
 
 
 def test_confirm_phrase_keeps_spoken_height_unit():

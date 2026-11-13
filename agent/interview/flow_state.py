@@ -83,6 +83,9 @@ class FlowState:
     outcome: str | None = None  # completed | screened_out | time | withdrew | incomplete_silence | ...
     # Join-form mobile was already offered for confirmation. A "no" must ask, not re-read the form.
     form_phone_offered: bool = False
+    # One verification question per fact (qualification, experience_years, body). 1 = asked, 2 = settled.
+    verifications: dict[str, int] = field(default_factory=dict)
+    verify_prev: dict[str, Any] = field(default_factory=dict)  # value held before the verification question
 
     def slot(self, field_id: str) -> Slot:
         return self.slots.setdefault(field_id, Slot())

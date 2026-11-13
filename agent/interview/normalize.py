@@ -322,13 +322,29 @@ def _assign_bare_body_numbers(
     return height, weight
 
 
+def _fold_body_text(text: str) -> str:
+    """Drop Hindi nukta so वजन matches वज़न, and straighten quotes."""
+    return str(text or "").replace("\u093c", "").replace("’", "'").replace("”", '"')
+
+
+def _glued_feet_cm(number: int) -> int | None:
+    """511 spoken for 5 feet 11. A real centimetre value (120-210) is left alone."""
+    if 120 <= number <= 210:
+        return None
+    feet, inches = divmod(number, 100)
+    if not (4 <= feet <= 7 and 0 <= inches <= 11):
+        return None
+    got = _feet_inches_to_cm(feet, inches)
+    return int(got.value) if got.ok else None
+
+
 def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
     """Pull height in cm and weight in kg out of one answer.
 
     Handles cm/kg in either order, and feet-inches as '5 feet 11', '5\'11',
     bare '5 11', or '5.11'. Bare '70 165' still maps by size when no feet pattern.
     """
-    raw = str(text or "")
+    raw = _fold_body_text(text)
     height: int | None = None
     weight: int | None = None
     bare: list[int] = []
@@ -347,6 +363,11 @@ def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
     for match in re.finditer(r"\d{2,3}", raw):
         number = int(match.group(0))
         kind = _near_kind(raw, match.start(), match.end())
+        glued = _glued_feet_cm(number)
+        if height is None and glued is not None:
+            # "weight is 511" is 5'11 said against the wrong label.
+            height = glued
+            continue
         if kind == "height" and height is None and 120 <= number <= 210:
             height = number
         elif kind == "weight" and weight is None and 30 <= number <= 200:
@@ -370,6 +391,27 @@ def parse_height_and_weight(text: str) -> tuple[int | None, int | None]:
         elif kind == "" and number not in bare and number >= 30:
             bare.append(number)
     return _assign_bare_body_numbers(bare, height=height, weight=weight)
+
+
+def labels_were_swapped(text: str) -> bool:
+    """True when a height label carried a weight, or a weight label carried a feet-inches height.
+
+    "height is 80 kg and weight is 511" is one swapped pair, not a missing height.
+    """
+    raw = _fold_body_text(text)
+    height, weight = parse_height_and_weight(raw)
+    if height is None or weight is None:
+        return False
+    parts = [p for p in _BODY_SPLIT.split(raw) if p.strip()] or [raw]
+    for part in parts:
+        nums = [int(n) for n in re.findall(r"\d{2,3}", part)]
+        has_kg = bool(re.search(r"\b(?:kg|kgs|kilo|kilos)\b|किलो", part, re.I))
+        has_glued = any(_glued_feet_cm(n) is not None for n in nums)
+        if _HEIGHT_UNIT.search(part) and has_kg and not has_glued:
+            return True
+        if _WEIGHT_UNIT.search(part) and has_glued and not has_kg:
+            return True
+    return False
 
 
 def normalize_weight_kg(raw: Any) -> Normalized:

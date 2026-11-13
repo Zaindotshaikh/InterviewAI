@@ -12,3 +12,5 @@ How to update this file: append short pointers only. Do not paste architecture.
 - Architecture-note one diaper re-ask: keep code/POC two persuasions then `gate_failed`. One re-ask is an HR/compliance choice for later, not the quality round.
 - Sarvam as default ears/mouth: still fallback-only after Scribe then OpenAI STT fail a language station. Do not flip the demo worker.
 - Fixed spoken screening lines (L7): done for all 11 join-screen languages in `agent/interview/screening_lines.py`. Only hi-IN and en-IN have two wordings; the other nine have one each and need a native-speaker review before a pilot.
+
+- Verify workplace/setting against the resume (only qualification, total experience and height/weight are cross-checked today; see agent/interview/verify.py).

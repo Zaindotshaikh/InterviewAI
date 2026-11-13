@@ -784,11 +784,30 @@ def test_persuasion_that_works_lets_the_candidate_continue_to_clinical(blueprint
     flow.apply(care("diaper_care", "hesitant", "never done it"))
     move = flow.apply(care("diaper_care", "willing_with_training"))
     assert flow.stage == "clinical" or move.kind in (
+        "ask_care",
         "ask_care_item",
         "experience_probe",
         "clinical_question",
     )
     assert flow.state.gate_failed is None
+
+
+def test_bathing_bedpan_and_lifting_are_one_question(blueprint):
+    flow, _ = make_flow(blueprint)
+    reach_care(flow)
+    move = flow.apply(care("diaper_care", "comfortable"))
+    assert move.kind == "ask_care"
+    assert flow.state.focus.get("items") == [
+        "hygiene_bathing",
+        "toileting_bedpan",
+        "lifting_repositioning",
+    ]
+    assert "bed bath" in move.directive and "bedpan" in move.directive and "lifting" in move.directive
+    assert "separate questions" in move.directive
+    nxt = flow.apply(TurnAnalysis(intent="refusal", raw_utterance="नाही, नाही."))
+    assert nxt.kind == "experience_probe"
+    for item_id in ("hygiene_bathing", "toileting_bedpan", "lifting_repositioning"):
+        assert flow.state.care[item_id].stance == "refuses"
 
 
 def test_comfortable_with_everything_goes_straight_to_clinical(blueprint):

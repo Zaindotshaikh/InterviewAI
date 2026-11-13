@@ -240,6 +240,24 @@ def body_confirm_line(language: str, height_phrase: str, weight_kg: int | str) -
     }.get(_lang(language), f"मैंने सुना कद {h} और वजन {w} किलो. क्या यह सही है?")
 
 
+def body_swap_confirm_line(language: str, height_phrase: str, weight_kg: int | str) -> str:
+    """They put the weight on height and the height on weight. Read back the corrected pair."""
+    h, w = str(height_phrase), str(weight_kg)
+    return {
+        "en": f"Those two sound swapped. I'll take height {h} and weight {w} kilograms. Is that correct?",
+        "hi": f"लगता है height और weight आपस में बदल गए. मैंने कद {h} और वजन {w} किलो लिया. क्या यह सही है?",
+        "mr": f"वाटतंय height आणि weight उलटी झाली. मी उंची {h} आणि वजन {w} किलो घेतलं. हे बरोबर आहे का?",
+        "gu": f"લાગે છે height અને weight અદલાબદલી થઈ ગયા. મેં ઊંચાઈ {h} અને વજન {w} કિલો લીધા. શું આ સાચું છે?",
+        "te": f"ఈ రెండూ తారుమారు అయినట్టు ఉన్నాయి. నేను ఎత్తు {h} మరియు బరువు {w} కిలోలు తీసుకున్నాను. ఇది సరియైనదేనా?",
+        "ta": f"இந்த இரண்டும் மாறிச் சொன்னது போல் உள்ளது. நான் உயரம் {h} மற்றும் எடை {w} கிலோ என்று எடுத்துக்கொண்டேன். இது சரியா?",
+        "kn": f"ಈ ಎರಡು ಬದಲಾಗಿ ಹೇಳಿದಂತೆ ಇದೆ. ನಾನು ಎತ್ತರ {h} ಮತ್ತು ತೂಕ {w} ಕೆಜಿ ಎಂದು ತೆಗೆದುಕೊಂಡೆ. ಇದು ಸರಿಯಾ?",
+        "ml": f"ഈ രണ്ടും തിരിഞ്ഞു പറഞ്ഞതായി തോന്നുന്നു. ഞാൻ ഉയരം {h} കൂടാതെ ഭാരം {w} കിലോ എടുത്തു. ഇത് ശരിയാണോ?",
+        "bn": f"মনে হচ্ছে height আর weight উল্টে গেছে. আমি উচ্চতা {h} এবং ওজন {w} কেজি নিয়েছি. এটা ঠিক আছে?",
+        "pa": f"ਲੱਗਦਾ ਹੈ height ਅਤੇ weight ਉਲਟ ਹੋ ਗਏ. ਮੈਂ ਕੱਦ {h} ਅਤੇ ਭਾਰ {w} ਕਿਲੋ ਲਿਆ. ਕੀ ਇਹ ਠੀਕ ਹੈ?",
+        "or": f"ଲାଗୁଛି height ଏବଂ weight ଓଲଟି ଯାଇଛି. ମୁଁ ଉଚ୍ଚତା {h} ଏବଂ ଓଜନ {w} କିଲୋ ନେଲି. ଏହା ଠିକ୍ କି?",
+    }.get(_lang(language), f"लगता है height और weight आपस में बदल गए. मैंने कद {h} और वजन {w} किलो लिया. क्या यह सही है?")
+
+
 def phone_invalid_line(language: str, shown: str) -> str:
     return {
         "en": "{d} is not a complete mobile number. Please say the number again.",

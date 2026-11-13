@@ -9,6 +9,7 @@ Stages: opening -> screening -> clinical -> closing -> ended.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -29,6 +30,7 @@ from interview.indic_phrases import CONFIRM_NO_RE
 from interview.language import get_profile
 from interview.phone_speech import (
     body_confirm_line,
+    body_swap_confirm_line,
     phone_again_line,
     phone_ask_line,
     phone_confirm_line,
@@ -41,6 +43,7 @@ from interview.phone_speech import (
 )
 from interview.normalize import (
     extract_qualification_and_year,
+    labels_were_swapped,
     normalize_field,
     normalize_qualification,
     normalize_years_experience,
@@ -52,6 +55,46 @@ from interview.plan import InterviewPlan
 from interview.prompts import opening_seed
 from interview.resume_match import is_false_mismatch
 from interview.screening_lines import screening_ask_line
+from interview.verify import (
+    Issue,
+    ResumeFacts,
+    body_issue,
+    check_experience,
+    check_qualification,
+    resume_facts,
+    workplace_conflict,
+)
+
+# Why a question is asked again. The first spoken sentence of every re-ask carries one of these,
+# so the candidate always knows whether it was the audio, the answer, or a conflict.
+REASON_CLAUSES = {
+    "audio": (
+        "Your FIRST sentence must say, in their language, that you could not hear that properly because "
+        "the voice was not clear. No blame, no apology speech."
+    ),
+    "choppy": (
+        "Your FIRST sentence must say, in their language, that the line was choppy and only part of the "
+        "answer came through. No blame."
+    ),
+    "incomplete": (
+        "Your FIRST sentence must say, in their language, that you only got part of the answer and need the rest."
+    ),
+    "invalid": (
+        "Your FIRST sentence must say, in their language, that what you heard does not look right, "
+        "so you want to check it. Do not say you could not hear them."
+    ),
+    "not_given": (
+        "Your FIRST sentence must say, in their language, that you still need this detail, because it was "
+        "not in what they just said. Do not say you could not hear them."
+    ),
+}
+ASK_KINDS = frozenset({"ask_field", "ask_care", "ask_care_item", "experience_probe", "clinical_question"})
+VERIFY_FIELDS = ("qualification", "experience_years")
+# Moves that do not mean "the answer was taken and we moved on".
+NON_PROGRESS_KINDS = frozenset(
+    {"ask_repeat", "reask_invalid", "repeat", "rephrase", "hold", "verify", "aside", "redirect", "crowd_help", "crowd_hold"}
+)
+TAIL_WINDOW_S = 10.0
 
 NEGATIVE_STANCES = ("hesitant", "refuses")
 _WORKPLACE_RE = re.compile(
@@ -160,6 +203,8 @@ class Move:
     verbatim: str | None = None
     # verbatim is a fixed wording of an ordinary ask (not a must-say line); the voice model may word it instead.
     scripted: bool = False
+    # Set when this move asks something again: audio | choppy | incomplete | invalid | not_given.
+    reason: str = ""
 
 
 class InterviewFlow:
@@ -182,6 +227,11 @@ class InterviewFlow:
         self._phone_agree_rejects = 0
         self._last_user = ""
         self._pending_aside = ""
+        self._last_ask_sig: str | None = None
+        self._progress_turn = -1  # last turn whose answer was taken and moved the interview on
+        self._progress_t = -1e9
+        self._resume_facts: ResumeFacts | None = None
+        self._body_swapped = False
 
     # ------------------------------------------------------------------------------------------------ helpers
 
@@ -241,6 +291,24 @@ class InterviewFlow:
                     "questions, any answer is okay), then: " + move.directive
                 )
             self.state.nervous_events += 1
+        return self._guard_repeat(move)
+
+    def _guard_repeat(self, move: Move) -> Move:
+        """The same question twice in a row always says why. Heard-and-answered questions never come back."""
+        sig: str | None = None
+        if move.kind in ASK_KINDS:
+            sig = f"{move.kind}|{json.dumps(self.state.focus, sort_keys=True, default=str)[:300]}"
+        if sig and sig == self._last_ask_sig and not move.reason and not move.verbatim:
+            move.reason = "not_given"
+            move.directive = f"{REASON_CLAUSES['not_given']} Then ask it once. {move.directive}"
+        self._last_ask_sig = sig
+        if move.kind not in NON_PROGRESS_KINDS and not move.reason:
+            self._progress_turn = self.state.turns
+            self._progress_t = self.elapsed_s()
+        return move
+
+    def _reasoned(self, move: Move, reason: str) -> Move:
+        move.reason = reason
         return move
 
     def _move(self, kind: str, directive: str, **kw: Any) -> Move:
@@ -584,7 +652,7 @@ class InterviewFlow:
         move.verbatim = line
         return move
 
-    def _unclear(self) -> Move:
+    def _unclear(self, reason: str = "audio") -> Move:
         """Unrecognised speech: clarify, then a crowd/noise line, then soft-skip (never loop forever).
 
         Overlapping voices and garbled STT look the same here — we do not count speakers.
@@ -614,26 +682,79 @@ class InterviewFlow:
         if st.unclear_streak >= self.bp.limits.max_unclear_streak:
             st.unclear_streak = 0
             return self._crowd_help()
-        last = f" Then ask this once: {st.last_question}" if st.last_question else " Then ask your last question once."
+        ask = self._current_ask_text()
+        last = f" Then ask this once, clearly and only this: {ask}" if ask else " Then ask your last question once."
         # Mid-answer pauses on height/weight or work history often look like "unclear" to STT.
         # Do not claim you missed them on the first miss — that interrupts them.
         if self.patient_answer_focus() and st.unclear_streak <= 1:
-            return self._move(
-                "ask_repeat",
-                "They may still be answering. Forbidden: saying the audio was unclear, apologising, pace "
-                "reassurances, or a different question. Wait a beat, then invite them once to continue with "
-                "the same question."
-                + last,
-                events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak, "patient": True})],
+            return self._reasoned(
+                self._move(
+                    "ask_repeat",
+                    "They may still be answering. Forbidden: saying the audio was unclear, apologising, pace "
+                    "reassurances, or a different question. Wait a beat, then invite them once to continue with "
+                    "the same question."
+                    + last,
+                    events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak, "patient": True})],
+                ),
+                "incomplete",
             )
-        return self._move(
-            "ask_repeat",
-            "You could not hear that properly. Your FIRST sentence must say, in their language, that you could not "
-            "hear it properly. Do not guess what they said, do not reassure about pace, and do not ask it "
-            "as if it were a new question."
-            + last,
-            events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
+        return self._reasoned(
+            self._move(
+                "ask_repeat",
+                f"{REASON_CLAUSES[reason]} Do not guess what they said, do not reassure about pace, and do "
+                "not ask it as if it were a new question."
+                + last,
+                events=[("audio.unclear", {"stage": st.stage, "streak": st.unclear_streak})],
+            ),
+            reason,
         )
+
+    def _current_ask_text(self) -> str:
+        """What the open question is, in plain words, so a re-ask names the thing still needed.
+
+        The last spoken line can be a read-back or an aside. The focus is what we are really waiting for.
+        """
+        st = self.state
+        focus = st.focus or {}
+        kind = focus.get("type")
+        if kind == "slots":
+            ids = [str(i) for i in (focus.get("ids") or [])]
+            specs = [s for s in (self.bp.field_spec(i) for i in ids) if s is not None]
+            empty = [s for s in specs if st.slot(s.id).status == "empty"]
+            pick = (empty or specs or [None])[0]
+            if pick is not None:
+                return self._field_ask(pick)
+        elif kind == "confirm":
+            if focus.get("body") or focus.get("field") == "body":
+                height, weight = st.slot("height_cm").value, st.slot("weight_kg").value
+                if height is not None and weight is not None:
+                    return (
+                        "Read back their height and weight and ask only whether that is correct: "
+                        f"{self._body_height_phrase()}, {weight} kg."
+                    )
+        elif kind == "care":
+            items = [str(i) for i in (focus.get("items") or [])]
+            specs = [s for s in (self.bp.care_item(i) for i in items) if s is not None]
+            if len(specs) > 1 and len(specs) == len(self.bp.care_items) and self.bp.care_intro:
+                return self.bp.care_intro
+            if len(specs) > 1:
+                labels = ", ".join(s.label for s in specs)
+                return (
+                    "Ask once, in one question, whether they are comfortable with all of these: "
+                    f"{labels}. Do not split them into separate questions."
+                )
+            if specs:
+                return specs[0].ask
+        elif kind == "clinical":
+            question = str(focus.get("question") or "")
+            if question:
+                return question
+        elif kind == "experience_probe":
+            item = self._current_experience_probe()
+            ask = (item or {}).get("ask")
+            if ask:
+                return str(ask)
+        return st.last_question or ""
 
     def _preabsorb_screening_facts(self, a: TurnAnalysis) -> list[tuple[str, dict[str, Any]]]:
         """Pull slot/care/confirm facts out of a compound turn before handling a meta-intent.
@@ -849,6 +970,13 @@ class InterviewFlow:
             if st.stage in ("screening", "clinical") and self._revises_previous(previous, raw_now):
                 if not self._turn_answers_focus(a):
                     self._keep_fuller_known_text(a)
+                    just_moved_on = (
+                        self._progress_turn == st.turns - 1 and self.elapsed_s() - self._progress_t <= TAIL_WINDOW_S
+                    )
+                    if just_moved_on and self._is_tail_of(previous, raw_now):
+                        # Same speech arriving in a second piece. The next question is already on the table:
+                        # asking it again would be a repeat of something they already heard.
+                        return Move(kind="hold", directive="", events=[("turn.tail_ignored", {"stage": st.stage})])
                     return self._wrap(self._restate_current_question(), a.nervous)
         elif raw_now:
             self._last_user = raw_now
@@ -881,6 +1009,13 @@ class InterviewFlow:
                 break
             shared += 1
         return shared >= 8
+
+    @staticmethod
+    def _is_tail_of(previous: str, current: str) -> bool:
+        """The new transcript is the previous one again, or the previous one with more words on the end."""
+        a = re.sub(r"[\s.,।!?॥？]+", " ", previous or "").strip().casefold()
+        b = re.sub(r"[\s.,।!?॥？]+", " ", current or "").strip().casefold()
+        return len(a) >= 4 and len(b) >= 4 and (a == b or b.startswith(a) or a.startswith(b))
 
     def _turn_answers_focus(self, a: TurnAnalysis) -> bool:
         """The current question actually got an answer in this utterance."""
@@ -1464,9 +1599,11 @@ class InterviewFlow:
         if not ids:
             return
         raw = (a.raw_utterance or "").strip()
+        self._body_swapped = False
         if not raw:
             return
         height, weight = parse_height_and_weight(raw)
+        self._body_swapped = height is not None and weight is not None and labels_were_swapped(raw)
         if height is not None and "height_cm" in ids:
             a.slot_updates = [u for u in a.slot_updates if u.field != "height_cm"]
             a.slot_updates.append(SlotUpdate("height_cm", str(height), 0.9, raw[:80]))
@@ -1494,9 +1631,18 @@ class InterviewFlow:
     def _prepare_experience_turn(self, a: TurnAnalysis) -> None:
         """Keep a clear years/workplace line when the analyst times out and returns no slots.
 
-        The transcript is already in hand. "तीन साल" and "ICU ward" must not be treated as unheard
-        just because the model was still writing when the cap cancelled it.
+        A workplace said while the years check is still open is not an answer to that check.
+        The analyst often repeats the earlier year onto that sentence; drop it.
         """
+        raw = (a.raw_utterance or "").strip()
+        if (
+            raw
+            and self.state.verifications.get("experience_years") == 1
+            and not normalize_years_experience(raw).ok
+        ):
+            a.slot_updates = [u for u in a.slot_updates if u.field != "experience_years"]
+            if raw and not any(u.field == "experience_settings" for u in a.slot_updates) and _WORKPLACE_RE.search(raw):
+                a.slot_updates.append(SlotUpdate("experience_settings", raw[:160], 0.85, raw[:80]))
         focus = self.state.focus or {}
         if focus.get("type") != "slots":
             return
@@ -1663,6 +1809,10 @@ class InterviewFlow:
             if not (focus_type == "confirm" and a.confirmation == "denied"):
                 self._give_up_focus_slots(hard_kinds=(), refusal=True, force=True)
 
+        verify = self._verification_move(events)
+        if verify is not None:
+            return verify
+
         if focus_type != "contradiction":
             check = self._resume_crosscheck(a)
             if check is not None:
@@ -1676,11 +1826,168 @@ class InterviewFlow:
             return self._handle_experience_probe_answer(a, events)
 
         missed = self._unheard_slot(a)
+        if missed is not None and missed.id in self._invalid:
+            missed = None  # heard but not believable: reask_invalid says so, it is not a hearing problem
         if missed is not None:
-            heard = self._could_not_hear(missed, events)
+            reason = "choppy" if a.intelligibility == "partial" else "not_given"
+            heard = self._could_not_hear(missed, events, reason)
             if heard is not None:
                 return heard
         return self._screening_next(events)
+
+    def _facts_from_resume(self) -> ResumeFacts:
+        if self._resume_facts is None:
+            self._resume_facts = resume_facts(getattr(self.plan, "resume_text", "") or "")
+        return self._resume_facts
+
+    def _verification_move(self, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
+        """One question when a fact just captured conflicts with the resume or with common sense.
+
+        Asked once per fact. A second answer is taken as given (and flagged), so this can never loop.
+        """
+        st = self.state
+        facts = self._facts_from_resume()
+        pending = self._experience_verify_still_open(events, facts)
+        if pending is not None:
+            return pending
+        for fid in list(st.verify_prev):
+            if st.slot(fid).status in ("captured", "confirmed"):
+                st.verify_prev.pop(fid, None)
+
+        height, weight = st.slot("height_cm"), st.slot("weight_kg")
+        if self._body_pair_ready() and st.turns in (height.turn, weight.turn):
+            issue = body_issue(height.value, weight.value)
+            if issue is not None:
+                if st.verifications.get("body", 0) >= 1:
+                    st.verifications["body"] = 2
+                    events.append(("verify.accepted", {"field": "body", "note": issue.note}))
+                else:
+                    st.verifications["body"] = 1
+                    st.verify_prev["height_cm"], st.verify_prev["weight_kg"] = height.value, weight.value
+                    for slot in (height, weight):
+                        slot.value, slot.status = None, "empty"
+                    self._set_focus("slots", ids=["height_cm", "weight_kg"], verify=True)
+                    return self._reasoned(
+                        self._move(
+                            "verify",
+                            f"{REASON_CLAUSES['invalid']} They said {issue.spoken}, and that height and weight do not "
+                            "fit together. Ask them once to tell you both again: height in feet and inches or "
+                            "centimetres, and weight in kilograms. Do not accept the numbers yet.",
+                            events=events + [("verify.asked", {"field": "body", "note": issue.note})],
+                        ),
+                        "verify",
+                    )
+
+        for fid in VERIFY_FIELDS:
+            slot = st.slot(fid)
+            if slot.status != "captured" or slot.turn != st.turns or slot.value is None:
+                continue
+            issue = (
+                check_qualification(slot.value, facts)
+                if fid == "qualification"
+                else check_experience(slot.value, facts)
+            )
+            if issue is None:
+                continue
+            if st.verifications.get(fid, 0) >= 1:
+                st.verifications[fid] = 2
+                slot.evidence = f"{slot.evidence} | unverified: resume shows {issue.expected}"[:200]
+                events.append(("verify.accepted", {"field": fid, "kind": issue.kind}))
+                continue
+            st.verifications[fid] = 1
+            st.verify_prev[fid] = slot.value
+            slot.value, slot.status = None, "empty"
+            if fid == "experience_years":
+                st.experience_level = "unknown"
+                st.resume_crosscheck_done = True  # this is that check; do not ask the same conflict twice
+            self._set_focus("slots", ids=[fid], verify=True)
+            return self._reasoned(
+                self._move(
+                    "verify",
+                    self._verify_directive(issue),
+                    events=events + [("verify.asked", {"field": fid, "kind": issue.kind})],
+                ),
+                "verify",
+            )
+        return None
+
+    def _verify_directive(self, issue: Issue) -> str:
+        resume = f" Their resume shows {issue.expected}." if issue.expected else ""
+        if issue.field == "qualification" and issue.kind == "not_nursing":
+            return (
+                f"They said their qualification is \"{issue.spoken}\", which is not a nursing qualification.{resume} "
+                "In one friendly sentence say that, then ask once which nursing qualification they hold: GNM, ANM, "
+                "B.Sc Nursing, Post Basic or Diploma in Nursing. Do not accept it yet. Do not say you could not "
+                "hear them."
+            )
+        if issue.field == "qualification":
+            return (
+                f"They said {issue.spoken}, but their resume shows {issue.expected}. In one friendly sentence "
+                "mention both and ask once which one is correct. Do not accept it yet. Do not say you could not "
+                "hear them."
+            )
+        return self._experience_directive(issue)
+
+    def _experience_directive(self, issue: Issue) -> str:
+        spoken_place = str(self.state.slot("experience_settings").value or "").strip()
+        places = workplace_conflict(spoken_place, getattr(self.plan, "resume_text", "") or "")
+        if spoken_place and places:
+            extra = f" They said they worked at {spoken_place}, while the resume shows {places}."
+            ask = " and which workplace to note."
+        elif spoken_place:
+            extra = f" They also said they worked at {spoken_place}."
+            ask = " and where they worked."
+        else:
+            extra, ask = "", "."
+        return (
+            f"They said they have {issue.spoken} of experience, but their resume shows about {issue.expected}.{extra} "
+            "In one friendly sentence mention the difference and ask once what their total nursing experience is"
+            f"{ask} Do not accept it yet. Do not say you could not hear them. Do not move on."
+        )
+
+    def _experience_verify_still_open(
+        self, events: list[tuple[str, dict[str, Any]]], facts: ResumeFacts
+    ) -> Move | None:
+        """The years check is still waiting. A hospital name is not the answer to it.
+
+        The check is spoken again once. A second turn with no years keeps the first figure, flagged.
+        """
+        st = self.state
+        if st.verifications.get("experience_years") != 1:
+            return None
+        slot = st.slot("experience_years")
+        if slot.status != "empty":
+            return None
+        prev = st.verify_prev.get("experience_years")
+        if prev is None:
+            return None
+        issue = check_experience(prev, facts)
+        if issue is None or st.verifications.get("experience_years_hold", 0) >= 1:
+            slot.value, slot.status = prev, "captured"
+            if issue is not None:
+                slot.evidence = f"{slot.evidence} | unverified: resume shows {issue.expected}"[:200]
+                events.append(("verify.accepted", {"field": "experience_years", "kind": "resume_mismatch"}))
+            else:
+                events.append(("verify.cleared", {"field": "experience_years"}))
+            try:
+                n = float(prev)
+            except (TypeError, ValueError):
+                n = -1
+            if n >= 0:
+                st.experience_level = "fresher" if n < 0.5 else "junior" if n < 3 else "experienced"
+            st.verifications["experience_years"] = 2
+            st.verify_prev.pop("experience_years", None)
+            return None
+        st.verifications["experience_years_hold"] = 1
+        self._set_focus("slots", ids=["experience_years"], verify=True)
+        return self._reasoned(
+            self._move(
+                "verify",
+                self._experience_directive(issue),
+                events=events + [("verify.asked", {"field": "experience_years", "kind": "resume_mismatch"})],
+            ),
+            "verify",
+        )
 
     def _unheard_slot(self, a: TurnAnalysis) -> FieldSpec | None:
         """The focused fact is still empty after an answer that was not a real value."""
@@ -1701,21 +2008,30 @@ class InterviewFlow:
                 return None
         return spec
 
-    def _could_not_hear(self, spec: FieldSpec, events: list[tuple[str, dict[str, Any]]]) -> Move | None:
-        slot = self.state.slot(spec.id)
+    def _could_not_hear(
+        self, spec: FieldSpec, events: list[tuple[str, dict[str, Any]]], reason: str = "audio"
+    ) -> Move | None:
+        st = self.state
+        slot = st.slot(spec.id)
         if slot.attempts >= self.bp.limits.max_field_attempts:
-            slot.status = "unknown"
+            if spec.id in st.verify_prev:
+                # The verification answer never came. Keep what they said first, flagged as unverified.
+                slot.value, slot.status = st.verify_prev.pop(spec.id), "captured"
+                st.verifications[spec.id] = 2
+                events.append(("verify.unresolved", {"field": spec.id}))
+            else:
+                slot.status = "unknown"
             return None
         slot.attempts += 1
         self._set_focus("slots", ids=[spec.id])
         ask = self._field_ask(spec)
         move = self._move(
             "ask_repeat",
-            f"You could not hear their {spec.label} properly. Your FIRST sentence must say, in their language, "
-            "that you could not hear it properly. Then ask this once, and only this: "
-            f"{ask} Do not guess a value and do not ask it as if they had not spoken.",
-            events=events + [("audio.unheard", {"field": spec.id})],
+            f"{REASON_CLAUSES[reason]} Then ask this once, clearly, naming what you need ({spec.label}), "
+            f"and only this: {ask} Do not guess a value.",
+            events=events + [("audio.unheard", {"field": spec.id, "reason": reason})],
         )
+        move.reason = reason
         if spec.kind == "phone":
             move.verbatim = phone_again_line(self.state.language)
         return move
@@ -1883,12 +2199,22 @@ class InterviewFlow:
                 ids=["height_cm", "weight_kg"],
                 body=True,
             )
-            line = body_confirm_line(st.language, height_phrase, weight.value)
+            if self._body_swapped:
+                line = body_swap_confirm_line(st.language, height_phrase, weight.value)
+                heard = (
+                    "They put the weight on the height and the height on the weight. "
+                    "Say exactly this one sentence and nothing else: "
+                )
+            else:
+                line = body_confirm_line(st.language, height_phrase, weight.value)
+                heard = (
+                    "Say exactly this one sentence and nothing else. Forbidden: converting the height unit, "
+                    "changing the numbers, or asking a second question. Sentence: "
+                )
+            self._body_swapped = False
             move = self._move(
                 "confirm",
-                "Say exactly this one sentence and nothing else. Forbidden: converting the height unit, "
-                "changing the numbers, or asking a second question. Sentence: "
-                f"{line}",
+                f"{heard}{line}",
                 events=events,
             )
             move.verbatim = line
@@ -1961,25 +2287,44 @@ class InterviewFlow:
                 slot.attempts += 1
                 if slot.attempts < lim.max_field_attempts:
                     self._set_focus("slots", ids=[fid])
-                    return self._move(
-                        "reask_invalid",
-                        f"What you heard for their {spec2.label} did not sound right ({reason}). Politely say you may "
-                        "have misheard and ask them to say it again, slowly.",
-                        events=events,
+                    return self._reasoned(
+                        self._move(
+                            "reask_invalid",
+                            f"{REASON_CLAUSES['invalid']} What you heard for their {spec2.label} was: {reason}. "
+                            f"Then ask for their {spec2.label} again, clearly, once, with the unit. "
+                            "Do not move on to another question.",
+                            events=events,
+                        ),
+                        "invalid",
                     )
                 slot.status = "unknown"
 
         # 4. Next group of missing details.
         group = self._missing_group()
         if group:
+            # The same question again, not the next detail in a group already started.
+            # Asking the year after they confirmed the qualification is a new question.
+            previous_ids = (
+                {str(i) for i in (st.focus.get("ids") or [])} if st.focus.get("type") == "slots" else set()
+            )
             for s in group:
                 st.slot(s.id).attempts += 1
-            asked_before = any(st.slot(s.id).attempts > 1 for s in group)
             ids = [s.id for s in group]
+            asked_before = set(ids) == previous_ids and bool(ids)
             self._set_focus("slots", ids=ids)
-            ask = self._field_ask(group[0])
-            prefix = "They did not answer that yet. " if asked_before else ""
+            if ids == ["qualification_year"] and st.slot("qualification").value:
+                qual = st.slot("qualification").value
+                ask = (
+                    f"They confirmed their qualification is {qual}. Ask only the year they passed it, "
+                    "in one short friendly question. Do not say the information was missing, do not say "
+                    "you could not hear them, and do not ask the qualification again."
+                )
+            else:
+                ask = self._field_ask(group[0])
+            prefix = f"{REASON_CLAUSES['not_given']} Then ask it once. " if asked_before else ""
             move = self._move("ask_field", f"{prefix}{ask}", events=events)
+            if asked_before:
+                move.reason = "not_given"
             if group[0].kind == "phone":
                 move.verbatim = phone_ask_line(st.language)
             elif not asked_before and not (
@@ -2020,8 +2365,11 @@ class InterviewFlow:
                 self.bp.care_intro or "Ask how comfortable they are with hands-on patient care.",
                 events=events,
             )
-        unasked.sort(key=lambda c: not c.gate)  # essential duties first
-        target = unasked[0]
+        # The gate (diaper) still needs its own yes or no. Everything else is one question.
+        gates = [c for c in unasked if c.gate]
+        if not gates and len(unasked) > 1:
+            return self._ask_care_together(unasked, events)
+        target = gates[0] if gates else unasked[0]
         care = st.care_state(target.id)
         care.asked += 1
         if care.asked > MAX_CARE_ASKS:
@@ -2029,6 +2377,27 @@ class InterviewFlow:
             return self._screening_next(events)
         self._set_focus("care", items=[target.id])
         return self._move("ask_care_item", target.ask, events=events)
+
+    def _ask_care_together(self, items: list, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        """Bathing, bedpan, and lifting are one question. A no on that question covers all of them."""
+        st = self.state
+        for item in items:
+            st.care_state(item.id).asked += 1
+        if all(st.care_state(item.id).asked > MAX_CARE_ASKS for item in items):
+            for item in items:
+                care = st.care_state(item.id)
+                if care.stance == "unknown":
+                    care.stance, care.reason = "hesitant", "did not give a clear answer"
+            return self._screening_next(events)
+        labels = ", ".join(item.label for item in items)
+        self._set_focus("care", items=[item.id for item in items])
+        return self._move(
+            "ask_care",
+            "Ask once, in one question, whether they are comfortable with all of these: "
+            f"{labels}. Do not split them into separate questions, and do not ask about diaper care again. "
+            "Ask it as comfort, not as 'do you have any difficulty', so a no means they are not comfortable.",
+            events=events,
+        )
 
     # ------------------------------------------------------------------------------------------------ clinical
 
