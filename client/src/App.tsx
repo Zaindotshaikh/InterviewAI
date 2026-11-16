@@ -39,7 +39,8 @@ export default function App() {
             {/* Parallel Indic voice pipeline — does not replace /i/* */}
             <Route path="/v2/test" element={<V2TestPage />} />
             <Route path="/avatar-interviewer" element={<V2TestPage avatar />} />
-            <Route path="/elevenlabs-interviewer" element={<V2TestPage ttsProvider="elevenlabs" />} />
+            <Route path="/kreedalabs-interviewer" element={<V2TestPage ttsProvider="elevenlabs" />} />
+            <Route path="/elevenlabs-interviewer" element={<Navigate to="/kreedalabs-interviewer" replace />} />
             <Route path="/gpt-live-interviewer" element={<V2TestPage voiceProvider="gpt_live" />} />
             <Route path="/v2/i/:token" element={<V2InviteFlow />} />
             <Route path="/v2/i/:token/thanks" element={<V2ThankYou />} />
