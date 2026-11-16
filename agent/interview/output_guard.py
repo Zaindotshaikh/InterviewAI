@@ -17,6 +17,23 @@ logger = logging.getLogger("interview-v2.output_guard")
 # Same sentence boundary the expressiveness engine and disfluency layer use.
 _SENTENCE_END = re.compile(r"(?<!\.)[.?!।॥](?!\.)[\"')\]]*\s+")
 
+# First spoken clause. A live token stream can start the voice here; a finished line cannot.
+_EARLY_MIN_CHUNKS = 2
+_EARLY_MAX_CHUNK = 48
+_EARLY_HEAD_WORDS = 8
+_EARLY_LOOKAHEAD_WORDS = 4
+_EARLY_COMMA_MAX_WORDS = 6
+_HANGING_WORDS = frozenset({
+    "a", "an", "the", "of", "to", "for", "and", "or", "in", "on", "with", "about", "when", "that", "your",
+    "का", "की", "के", "में", "से", "को", "और", "एक", "पर", "ने", "तो", "भी", "ही", "जो", "कि",
+})
+# A clause the guard would have to replace once the next words arrive. Do not speak the lead-in.
+_EARLY_DENY = re.compile(
+    r"salary|package|\bctc\b|stipend|rupees?|\bpay\b|offer|selected|hired|centimet|\bcm\b|"
+    r"पगार|वेतन|सैलरी|सिलेक्शन|नौकरी|सेंटी",
+    re.I,
+)
+
 # 1. Salary / compensation figures: currency symbol, lakh, CTC, salary words near numbers
 _SALARY_PATTERNS = [
     re.compile(r"(?:₹|rs\.?|inr|rupees?|रुपये|पगार|वेतन|सैलरी)\s*\d+", re.I),
@@ -118,6 +135,51 @@ _SAFE_TRANSITION_REPLACEMENTS = {
 }
 
 
+def early_clause(buf: str) -> tuple[str, str] | None:
+    """Split a still-arriving reply into a first clause the voice can speak, and the rest.
+
+    Prefers a short comma lead-in. Otherwise uses the first eight words, once four more
+    words are already buffered so a salary, offer, or height line is seen before it is spoken.
+    The clause is closed with a full stop: the shaper and the voice both wait for a sentence.
+    Returns None when the cut would land on a number, a dangling word, or an unsafe lead-in.
+    """
+    spans = list(re.finditer(r"\S+", buf))
+
+    def token(index: int) -> str:
+        raw = buf[spans[index].start() : spans[index].end()]
+        return raw.strip(".,!?;:\"'।॥").lower()
+
+    for index, span in enumerate(spans[:_EARLY_COMMA_MAX_WORDS]):
+        word = buf[span.start() : span.end()]
+        if not word.endswith(","):
+            continue
+        if index + 1 + _EARLY_LOOKAHEAD_WORDS > len(spans):
+            break
+        window = buf[: spans[index + _EARLY_LOOKAHEAD_WORDS].end()]
+        if re.search(r"\d", window) or _EARLY_DENY.search(window):
+            continue
+        head = (buf[: span.start()] + word[:-1]).strip(" ,;:")
+        if not head:
+            continue
+        return head + ". ", buf[span.end() :]
+
+    need = _EARLY_HEAD_WORDS + _EARLY_LOOKAHEAD_WORDS
+    if len(spans) < need:
+        return None
+    cut = _EARLY_HEAD_WORDS
+    while cut > 6 and token(cut - 1) in _HANGING_WORDS:
+        cut -= 1
+    if token(cut - 1) in _HANGING_WORDS:
+        return None
+    window = buf[: spans[need - 1].end()]
+    if re.search(r"\d", window) or _EARLY_DENY.search(window):
+        return None
+    head = buf[: spans[cut - 1].end()].strip(" ,;:.?!।॥")
+    if not head:
+        return None
+    return head + ". ", buf[spans[cut - 1].end() :]
+
+
 class OutputGuard:
     """Non-model deterministic filter scanning outbound assistant text before TTS."""
 
@@ -200,11 +262,15 @@ class OutputGuard:
 
         Each finished sentence is checked together with everything already released. A hit releases the
         safe replacement once and ends the reply. With `single_question`, the reply ends after the first
-        sentence that asks a question. `inspect_text` is unchanged and still used for each check.
+        sentence that asks a question. On a live token stream, the first safe clause is released before
+        the question mark so the voice can start while the rest is still being written. A line that
+        arrives whole is not cut. `inspect_text` is unchanged and still used for each check.
         """
         released: list[str] = []
         buf = ""
         stop = False
+        chunks_seen = 0
+        allow_early = True
 
         def _check(sentence: str) -> tuple[bool, str]:
             candidate = "".join(released) + sentence
@@ -220,22 +286,48 @@ class OutputGuard:
                 logger.warning("guard.stream blocked reason=%s released=%d", reason, len(released))
             return blocked, safe
 
-        async for chunk in chunks:
-            if stop:
-                continue  # drain the LLM stream so the turn closes cleanly
-            buf += chunk
-            while (m := _SENTENCE_END.search(buf)) is not None:
-                sentence, buf = buf[: m.end()], buf[m.end() :]
+        def _take_sentences() -> list[str]:
+            nonlocal buf, stop
+            out: list[str] = []
+            while not stop and (match := _SENTENCE_END.search(buf)) is not None:
+                sentence, buf = buf[: match.end()], buf[match.end() :]
                 blocked, safe = _check(sentence)
                 if blocked:
-                    yield safe
+                    out.append(safe)
                     stop = True
                     break
                 released.append(sentence)
-                yield sentence
+                out.append(sentence)
                 if single_question and "?" in sentence:
                     stop = True
                     break
+            return out
+
+        async for chunk in chunks:
+            if stop:
+                continue  # drain the LLM stream so the turn closes cleanly
+            chunks_seen += 1
+            if len(chunk) > _EARLY_MAX_CHUNK:
+                allow_early = False
+            buf += chunk
+            for piece in _take_sentences():
+                yield piece
+            if stop or released or not allow_early or chunks_seen < _EARLY_MIN_CHUNKS:
+                continue
+            split = early_clause(buf)
+            if split is None:
+                continue
+            clause, rest = split
+            blocked, safe = _check(clause)
+            if blocked:
+                yield safe
+                stop = True
+                continue
+            buf = rest
+            released.append(clause)
+            yield clause
+            for piece in _take_sentences():
+                yield piece
         if stop or not buf.strip():
             return
         blocked, safe = _check(buf)
