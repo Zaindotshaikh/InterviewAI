@@ -125,9 +125,9 @@ class Settings(BaseSettings):
     v2_max_minutes: int = 25
     # --- Interview director (per-turn analyst that reads the candidate and steers the flow) ---
     # Reads each answer (intent, extracted facts, clinical grade, contradictions) as structured JSON.
-    director_model: str = "gpt-4o"
-    # Model used while grading clinical answers; same default.
-    clinical_director_model: str = "gpt-4o"
+    director_model: str = "gpt-5.4-mini"
+    # Same analyst while grading clinical answers.
+    clinical_director_model: str = "gpt-5.4-mini"
     # Give up on the analyst after this long and use the rule-based fallback so the call never stalls.
     # 8s for the demo: slow screening calls were cancelled at 4.5s and then treated as not heard.
     director_timeout_seconds: float = 8
