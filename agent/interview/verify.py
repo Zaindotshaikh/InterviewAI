@@ -226,6 +226,55 @@ def workplace_conflict(spoken: str, resume_text: str) -> str:
     return ", ".join(resume_workplaces(resume_text))
 
 
+# Words that describe a workplace or pad a sentence without naming one. "ICU in a private hospital" has no name.
+_WORKPLACE_FILLER = frozenset(
+    {
+        # English / Hinglish
+        "i", "me", "my", "mein", "main", "maine", "at", "in", "on", "a", "an", "the", "of", "and", "or", "for", "to",
+        "was", "am", "is", "are", "have", "has", "had", "been", "worked", "work", "working", "works", "job", "done",
+        "did", "kiya", "kaam", "tha", "thi", "hoon", "hu", "hai", "se", "ka", "ki", "ke", "ko", "wo", "woh", "that",
+        "this", "one", "some", "small", "big", "private", "pvt", "government", "govt", "public", "local", "city",
+        "multispeciality", "multispecialty", "super", "speciality", "specialty", "general", "medical", "college",
+        "hospital", "hospitals", "clinic", "clinics", "nursing", "home", "homes", "ward", "wards", "icu", "nicu",
+        "picu", "ccu", "iccu", "ot", "opd", "er", "emergency", "dialysis", "care", "centre", "center", "health",
+        "healthcare", "previous", "previously", "last", "current", "currently", "present", "before", "earlier",
+        "there", "here", "okay", "ok", "yes", "yeah", "haan", "han", "ji", "hmm", "um", "uh", "so", "then", "like",
+        "years", "year", "yrs", "yr", "months", "month", "saal", "sal", "experience", "exp", "total", "about",
+        "around", "nearly", "only", "just", "also", "not", "no", "dont", "don't", "remember", "sure", "know",
+        "name", "called", "named", "tell", "say", "sorry", "sir", "madam", "mam", "ma'am",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        # Devanagari
+        "मैं", "मैंने", "में", "मे", "का", "की", "के", "को", "से", "पर", "और", "या", "एक", "था", "थी", "थे", "हूँ",
+        "हूं", "है", "हैं", "किया", "करता", "करती", "काम", "जॉब", "नौकरी", "हाँ", "हां", "जी", "अच्छा", "ठीक",
+        "अस्पताल", "हॉस्पिटल", "हास्पिटल", "होस्पिटल", "क्लिनिक", "क्लीनिक", "नर्सिंग", "होम", "वार्ड", "आईसीयू",
+        "आई.सी.यू", "प्राइवेट", "सरकारी", "छोटे", "छोटा", "बड़े", "बड़ा", "पहले", "अभी", "वहाँ", "वहां", "यहाँ",
+        "साल", "वर्ष", "महीने", "महीना", "अनुभव", "एक्सपीरियंस", "पिछले", "आखिरी", "नाम", "याद", "नहीं", "पता",
+        "ऑपरेशन", "थिएटर", "इमरजेंसी", "जनरल", "मल्टीस्पेशलिटी", "मल्टी", "स्पेशलिटी", "सुपर",
+    }
+)
+_WORKPLACE_SPLIT = re.compile(r"[\s,.;:!?|/()\-–—।॥\"'`]+")
+
+
+def names_a_workplace(text: Any, exclude: str = "") -> bool:
+    """True when the text carries a word that could be a hospital's name, not only 'ICU' or 'private hospital'.
+
+    `exclude` is text whose words never count (the city), so "ICU in Pune" is not taken as a hospital name.
+    Deliberately lenient about script: a direct "which hospital?" answer in any language passes on one
+    real word. Only generic workplace words, numbers and filler fail.
+    """
+    skip = {w.lower() for w in _WORKPLACE_SPLIT.split(str(exclude or "")) if w}
+    for raw in _WORKPLACE_SPLIT.split(str(text or "")):
+        word = raw.strip().lower()
+        if len(word) < 3 or word.isdigit():
+            continue
+        if word in _WORKPLACE_FILLER or word in skip:
+            continue
+        if re.fullmatch(r"\d+[a-z]*", word):
+            continue
+        return True
+    return False
+
+
 def format_years(years: float) -> str:
     whole = int(years)
     months = round((years - whole) * 12)

@@ -9,6 +9,7 @@ from interview.verify import (
     body_issue,
     check_experience,
     check_qualification,
+    names_a_workplace,
     nursing_qualification,
     resume_facts,
 )
@@ -82,7 +83,7 @@ def _screening_to_education(flow):
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
 
 
-def test_wrong_qualification_is_verified_once_then_accepted(blueprint):
+def test_wrong_qualification_is_probed_again_and_never_accepted(blueprint):
     flow, _ = make_flow(blueprint, resume=RESUME)
     _screening_to_education(flow)
     move = flow.apply(say(("qualification", "B.Tech"), ("qualification_year", "2019")))
@@ -91,10 +92,30 @@ def test_wrong_qualification_is_verified_once_then_accepted(blueprint):
     assert flow.state.slots["qualification"].status == "empty"
     assert str(flow.state.slots["qualification_year"].value) == "2019"
 
+    # Second irrelevant answer: probed again, not accepted.
     again = flow.apply(say(("qualification", "B.Tech")))
-    assert again.kind != "verify"  # asked once: never loops
-    assert flow.state.slots["qualification"].status in ("captured", "confirmed")
-    assert "unverified" in flow.state.slots["qualification"].evidence
+    assert again.kind == "verify"
+    assert "already asked" in again.directive
+    assert flow.state.slots["qualification"].status == "empty"
+    third = flow.apply(say(("qualification", "BCA")))
+    assert third.kind == "verify"
+
+    # Still irrelevant after the last probe: bounded, and never recorded as the qualification.
+    last = flow.apply(say(("qualification", "12th pass")))
+    assert last.kind != "verify"
+    slot = flow.state.slots["qualification"]
+    assert slot.status == "unknown" and slot.value is None
+    assert "not a nursing qualification" in slot.evidence
+
+
+def test_unanswered_qualification_check_never_keeps_a_non_nursing_value(blueprint):
+    flow, _ = make_flow(blueprint, resume=RESUME)
+    _screening_to_education(flow)
+    assert flow.apply(say(("qualification", "B.Tech"))).kind == "verify"
+    for word in ("hmm okay", "let me think", "well then", "so basically", "right so", "umm sure"):
+        flow.apply(TurnAnalysis(intent="answer", intelligibility="clear", raw_utterance=word))
+    slot = flow.state.slots["qualification"]
+    assert slot.status != "captured" or nursing_qualification(slot.value) is not None
 
 
 def test_confirmed_qualification_asks_only_the_year(blueprint):
@@ -143,9 +164,74 @@ def test_experience_far_from_resume_is_verified(blueprint):
     assert flow.state.slots["experience_years"].status == "empty"
     assert flow.state.experience_level == "unknown"
 
-    settled = flow.apply(say(("experience_years", "2")))
+    # Still far from the resume: probed again instead of accepted.
+    again = flow.apply(say(("experience_years", "2")))
+    assert again.kind == "verify"
+    assert "already asked" in again.directive
+    assert flow.state.slots["experience_years"].status == "empty"
+
+    settled = flow.apply(say(("experience_years", "3")))
     assert settled.kind != "verify"
-    assert flow.state.slots["experience_years"].value == "2.0" or flow.state.slots["experience_years"].value == 2.0
+    assert float(flow.state.slots["experience_years"].value) == 3.0
+
+
+def test_experience_that_never_matches_is_bounded_and_flagged(blueprint):
+    flow, _ = make_flow(blueprint, resume=RESUME)
+    _to_experience(flow)
+    assert flow.apply(say(("experience_years", "1"), ("experience_settings", "Apex Hospital"))).kind == "verify"
+    assert flow.apply(say(("experience_years", "1"))).kind == "verify"
+    assert flow.apply(say(("experience_years", "1"))).kind == "verify"
+    last = flow.apply(say(("experience_years", "1")))
+    assert last.kind != "verify"
+    slot = flow.state.slots["experience_years"]
+    assert slot.status in ("captured", "confirmed") and "unverified" in slot.evidence
+
+
+def test_experience_without_a_hospital_name_asks_for_it(blueprint):
+    flow, _ = make_flow(blueprint)
+    _to_experience(flow)
+    move = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU in a private hospital")))
+    assert move.kind == "ask_field" and flow.state.focus.get("workplace")
+    assert "hospital" in move.directive and "name" in move.directive
+
+    # Another generic reply asks again, with a reason.
+    again = flow.apply(TurnAnalysis(intent="answer", raw_utterance="private hospital only"))
+    assert again.kind == "ask_field" and again.reason == "not_given"
+
+    named = flow.apply(TurnAnalysis(intent="answer", raw_utterance="Fortis Hospital"))
+    assert named.kind in ("ask_care", "ask_care_item")
+    assert "Fortis" in str(flow.state.slots["experience_settings"].value)
+
+
+def test_hospital_name_ask_is_bounded_and_skipped_for_named_or_fresher(blueprint):
+    flow, _ = make_flow(blueprint)
+    _to_experience(flow)
+    assert flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU"))).kind == "ask_field"
+    assert flow.apply(TurnAnalysis(intent="answer", raw_utterance="ICU")).kind == "ask_field"
+    assert flow.apply(TurnAnalysis(intent="answer", raw_utterance="ward")).kind == "ask_field"
+    last = flow.apply(TurnAnalysis(intent="answer", raw_utterance="private hospital"))
+    assert last.kind in ("ask_care", "ask_care_item")  # three asks, then it moves on
+
+    named, _ = make_flow(blueprint)
+    _to_experience(named)
+    assert named.apply(say(("experience_years", "3"), ("experience_settings", "ICU at Apollo Hospital"))).kind in (
+        "ask_care",
+        "ask_care_item",
+    )
+
+    fresher, _ = make_flow(blueprint)
+    _to_experience(fresher)
+    assert fresher.apply(say(("experience_years", "0"), ("experience_settings", "internship"))).kind != "ask_field"
+
+
+def test_names_a_workplace():
+    assert names_a_workplace("Apollo Hospital")
+    assert names_a_workplace("अपोलो हॉस्पिटल में")
+    assert names_a_workplace("ICU at Fortis")
+    assert not names_a_workplace("ICU in a private hospital")
+    assert not names_a_workplace("प्राइवेट अस्पताल में आईसीयू")
+    assert not names_a_workplace("ward, 3 years")
+    assert not names_a_workplace("ICU in Pune", exclude="Pune")
 
 
 def test_workplace_after_the_years_check_does_not_close_it(blueprint):

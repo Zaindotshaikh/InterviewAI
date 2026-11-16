@@ -61,6 +61,8 @@ from interview.verify import (
     body_issue,
     check_experience,
     check_qualification,
+    names_a_workplace,
+    nursing_qualification,
     resume_facts,
     workplace_conflict,
 )
@@ -193,6 +195,11 @@ _FAQ_OTHER = {
 }
 _CLOSING_ANSWER_CAP = 3
 VERIFY_FIELDS = ("qualification", "experience_years")
+# A wrong or irrelevant answer to a checked fact is probed this many times in total before the flow stops asking.
+# A non-nursing qualification is never accepted. A years figure that still disagrees with the resume is kept, flagged.
+MAX_VERIFY_ASKS = 3
+# Asks for the name of the previous hospital when the experience answer only said ICU / ward / "private hospital".
+MAX_WORKPLACE_ASKS = 3
 # Moves that do not mean "the answer was taken and we moved on".
 NON_PROGRESS_KINDS = frozenset(
     {"ask_repeat", "reask_invalid", "repeat", "rephrase", "hold", "verify", "aside", "redirect", "crowd_help", "crowd_hold"}
@@ -1892,6 +1899,7 @@ class InterviewFlow:
         self._absorb_confirmation(a)
         self._absorb_slot_updates(a, events)
         self._absorb_care(a, events)
+        self._absorb_workplace_answer(a, events)
 
         if focus_type == "experience_probe":
             # Answered below after resume cross-check / meta intents; mark nothing here yet.
@@ -1941,6 +1949,76 @@ class InterviewFlow:
             if heard is not None:
                 return heard
         return self._screening_next(events)
+
+    # ------------------------------------------------------------------------------- previous hospital name
+
+    def _city_text(self) -> str:
+        return str(self.state.slot("city").value or "")
+
+    def _workplace_due(self) -> bool:
+        """An experienced candidate whose answer never named a hospital still owes the name."""
+        st = self.state
+        if st.verifications.get("workplace_named") or st.verifications.get("workplace_asks", 0) >= MAX_WORKPLACE_ASKS:
+            return False
+        years, settings = st.slot("experience_years"), st.slot("experience_settings")
+        if years.status not in ("captured", "confirmed") or years.value is None:
+            return False
+        try:
+            if float(years.value) < 0.5:
+                return False  # fresher: exposure, not an employer
+        except (TypeError, ValueError):
+            return False
+        if settings.status not in ("captured", "confirmed"):
+            return False
+        if names_a_workplace(settings.value, self._city_text()):
+            st.verifications["workplace_named"] = 1
+            return False
+        return True
+
+    def _absorb_workplace_answer(self, a: TurnAnalysis, events: list[tuple[str, dict[str, Any]]]) -> None:
+        """The reply to 'which hospital?'. A name is stored; a refusal or idk ends the asking; anything else asks again."""
+        st = self.state
+        if st.focus.get("type") != "slots" or not st.focus.get("workplace"):
+            return
+        if a.intent in ("dont_know", "refusal"):
+            st.verifications["workplace_asks"] = MAX_WORKPLACE_ASKS
+            events.append(("workplace.declined", {"intent": a.intent}))
+            return
+        if a.intent != "answer":
+            return
+        raw = (a.raw_utterance or "").strip()
+        slot = st.slot("experience_settings")
+        if raw and names_a_workplace(raw, self._city_text()):
+            if not names_a_workplace(slot.value, self._city_text()):
+                prev = str(slot.value or "").strip()
+                slot.value = f"{prev}; {raw}"[:160] if prev else raw[:160]
+            slot.status = "captured"
+            slot.turn = st.turns
+            st.verifications["workplace_named"] = 1
+            events.append(("workplace.named", {"asks": int(st.verifications.get("workplace_asks", 0))}))
+
+    def _ask_workplace(self, events: list[tuple[str, dict[str, Any]]]) -> Move:
+        st = self.state
+        asks = int(st.verifications.get("workplace_asks", 0))
+        st.verifications["workplace_asks"] = asks + 1
+        said = str(st.slot("experience_settings").value or "").strip()[:80]
+        self._set_focus("slots", ids=["experience_settings"], workplace=True)
+        again = (
+            " You already asked and still have no hospital name. Say kindly that you need the name of the hospital "
+            "for the form, and ask once more plainly."
+            if asks >= 1
+            else ""
+        )
+        move = self._move(
+            "ask_field",
+            f"They said where they worked as \"{said}\", but gave no hospital name. In one short sentence, ask the "
+            f"name of the hospital or clinic where they worked most recently, for their previous workplace.{again} "
+            "Ask only for the name. Do not ask about years or duties. Do not say you could not hear them.",
+            events=events + [("workplace.asked", {"attempt": asks + 1})],
+        )
+        if asks >= 1:
+            move.reason = "not_given"
+        return move
 
     def _facts_from_resume(self) -> ResumeFacts:
         if self._resume_facts is None:
@@ -1996,12 +2074,21 @@ class InterviewFlow:
             )
             if issue is None:
                 continue
-            if st.verifications.get(fid, 0) >= 1:
+            asked = int(st.verifications.get(f"{fid}_asks", 1 if st.verifications.get(fid, 0) >= 1 else 0))
+            if asked >= MAX_VERIFY_ASKS:
                 st.verifications[fid] = 2
-                slot.evidence = f"{slot.evidence} | unverified: resume shows {issue.expected}"[:200]
-                events.append(("verify.accepted", {"field": fid, "kind": issue.kind}))
+                if issue.kind == "not_nursing":
+                    # Irrelevant after every probe: never record it as the answer.
+                    said = str(slot.value)[:60]
+                    slot.value, slot.status = None, "unknown"
+                    slot.evidence = f"not a nursing qualification after {asked} asks (said: {said})"[:200]
+                    events.append(("verify.rejected", {"field": fid, "kind": issue.kind, "asks": asked}))
+                else:
+                    slot.evidence = f"{slot.evidence} | unverified: resume shows {issue.expected}"[:200]
+                    events.append(("verify.accepted", {"field": fid, "kind": issue.kind, "asks": asked}))
                 continue
             st.verifications[fid] = 1
+            st.verifications[f"{fid}_asks"] = asked + 1
             st.verify_prev[fid] = slot.value
             slot.value, slot.status = None, "empty"
             if fid == "experience_years":
@@ -2011,31 +2098,38 @@ class InterviewFlow:
             return self._reasoned(
                 self._move(
                     "verify",
-                    self._verify_directive(issue),
-                    events=events + [("verify.asked", {"field": fid, "kind": issue.kind})],
+                    self._verify_directive(issue, repeat=asked >= 1),
+                    events=events + [("verify.asked", {"field": fid, "kind": issue.kind, "attempt": asked + 1})],
                 ),
                 "verify",
             )
         return None
 
-    def _verify_directive(self, issue: Issue) -> str:
+    def _verify_directive(self, issue: Issue, repeat: bool = False) -> str:
         resume = f" Their resume shows {issue.expected}." if issue.expected else ""
+        again = (
+            " You already asked this once and the answer still does not fit. Say kindly that you want to be sure "
+            "you note it correctly, and ask again more plainly."
+            if repeat
+            else ""
+        )
         if issue.field == "qualification" and issue.kind == "not_nursing":
             return (
-                f"They said their qualification is \"{issue.spoken}\", which is not a nursing qualification.{resume} "
+                f"They said their qualification is \"{issue.spoken}\", which is not a nursing qualification.{resume}"
+                f"{again} "
                 "In one friendly sentence say that, then ask once which nursing qualification they hold: GNM, ANM, "
                 "B.Sc Nursing, Post Basic or Diploma in Nursing. Do not accept it yet. Do not say you could not "
                 "hear them."
             )
         if issue.field == "qualification":
             return (
-                f"They said {issue.spoken}, but their resume shows {issue.expected}. In one friendly sentence "
+                f"They said {issue.spoken}, but their resume shows {issue.expected}.{again} In one friendly sentence "
                 "mention both and ask once which one is correct. Do not accept it yet. Do not say you could not "
                 "hear them."
             )
-        return self._experience_directive(issue)
+        return self._experience_directive(issue, repeat=repeat)
 
-    def _experience_directive(self, issue: Issue) -> str:
+    def _experience_directive(self, issue: Issue, repeat: bool = False) -> str:
         spoken_place = str(self.state.slot("experience_settings").value or "").strip()
         places = workplace_conflict(spoken_place, getattr(self.plan, "resume_text", "") or "")
         if spoken_place and places:
@@ -2046,8 +2140,14 @@ class InterviewFlow:
             ask = " and where they worked."
         else:
             extra, ask = "", "."
+        again = (
+            " You already asked this once and the answer still does not fit. Say kindly that you want to be sure "
+            "you note it correctly."
+            if repeat
+            else ""
+        )
         return (
-            f"They said they have {issue.spoken} of experience, but their resume shows about {issue.expected}.{extra} "
+            f"They said they have {issue.spoken} of experience, but their resume shows about {issue.expected}.{extra}{again} "
             "In one friendly sentence mention the difference and ask once what their total nursing experience is"
             f"{ask} Do not accept it yet. Do not say you could not hear them. Do not move on."
         )
@@ -2069,7 +2169,8 @@ class InterviewFlow:
         if prev is None:
             return None
         issue = check_experience(prev, facts)
-        if issue is None or st.verifications.get("experience_years_hold", 0) >= 1:
+        holds = int(st.verifications.get("experience_years_hold", 0))
+        if issue is None or holds >= MAX_VERIFY_ASKS - 1:
             slot.value, slot.status = prev, "captured"
             if issue is not None:
                 slot.evidence = f"{slot.evidence} | unverified: resume shows {issue.expected}"[:200]
@@ -2085,12 +2186,12 @@ class InterviewFlow:
             st.verifications["experience_years"] = 2
             st.verify_prev.pop("experience_years", None)
             return None
-        st.verifications["experience_years_hold"] = 1
+        st.verifications["experience_years_hold"] = holds + 1
         self._set_focus("slots", ids=["experience_years"], verify=True)
         return self._reasoned(
             self._move(
                 "verify",
-                self._experience_directive(issue),
+                self._experience_directive(issue, repeat=True),
                 events=events + [("verify.asked", {"field": "experience_years", "kind": "resume_mismatch"})],
             ),
             "verify",
@@ -2122,10 +2223,17 @@ class InterviewFlow:
         slot = st.slot(spec.id)
         if slot.attempts >= self.bp.limits.max_field_attempts:
             if spec.id in st.verify_prev:
-                # The verification answer never came. Keep what they said first, flagged as unverified.
-                slot.value, slot.status = st.verify_prev.pop(spec.id), "captured"
+                # The verification answer never came. Keep what they said first, flagged as unverified,
+                # unless it was not a nursing qualification at all: that is never recorded as the answer.
+                prev = st.verify_prev.pop(spec.id)
                 st.verifications[spec.id] = 2
-                events.append(("verify.unresolved", {"field": spec.id}))
+                if spec.id == "qualification" and nursing_qualification(prev) is None:
+                    slot.status = "unknown"
+                    slot.evidence = f"not a nursing qualification (said: {str(prev)[:60]})"[:200]
+                    events.append(("verify.rejected", {"field": spec.id, "kind": "not_nursing"}))
+                else:
+                    slot.value, slot.status = prev, "captured"
+                    events.append(("verify.unresolved", {"field": spec.id}))
             else:
                 slot.status = "unknown"
             return None
@@ -2442,6 +2550,10 @@ class InterviewFlow:
                     move.verbatim = line
                     move.scripted = True
             return move
+
+        # 4b. They said where they worked in general terms (ICU, ward) but never named the hospital.
+        if self._workplace_due():
+            return self._ask_workplace(events)
 
         # 5. Comfort with hands-on care (diaper gate). Experience probes wait until this clears.
         care_move = self._care_questions(events)

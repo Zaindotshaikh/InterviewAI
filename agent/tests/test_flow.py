@@ -1,4 +1,4 @@
-"""Flow policy tests: the client's scenarios, driven with hand-built analyses (no LLM, no LiveKit)."""
+﻿"""Flow policy tests: the client's scenarios, driven with hand-built analyses (no LLM, no LiveKit)."""
 
 import json
 from pathlib import Path
@@ -85,7 +85,7 @@ def fill_screening(flow: InterviewFlow) -> None:
     body = flow.apply(say(("height_cm", "5 feet 4 inches"), ("weight_kg", "58 kg")))
     assert body.kind == "confirm"
     flow.apply(TurnAnalysis(confirmation_field="body", confirmation="confirmed", raw_utterance="haan"))
-    care = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at a private hospital")))
+    care = flow.apply(say(("experience_years", "3"), ("experience_settings", "ICU at Apollo Hospital")))
     assert care.kind == "ask_care"
 
 
@@ -1072,7 +1072,7 @@ def test_diaper_idk_on_care_intro_persuades_before_skipping(blueprint):
 # ----------------------------------------------------------------------------------------------- clinical
 
 
-def reach_clinical(flow, experience=("3", "ICU at a private hospital")):
+def reach_clinical(flow, experience=("3", "ICU at Apollo Hospital")):
     flow.opening()
     flow.apply(say(("city", "Pune"), ("phone", "9876543210")))
     flow.apply(TurnAnalysis(confirmation_field="phone", confirmation="confirmed"))
@@ -1095,14 +1095,14 @@ def test_icu_candidate_gets_icu_content_and_non_icu_does_not(blueprint):
     assert "critical_care" in icu.state.area_order
 
     ward, _ = make_flow(blueprint)
-    reach_clinical(ward, experience=("2", "general ward in a clinic"))
+    reach_clinical(ward, experience=("2", "general ward at Sunrise clinic"))
     assert "critical_care" not in ward.state.area_order
     assert {"medication_safety", "emergency_response"} <= set(ward.state.area_order)
 
 
 def test_experienced_candidates_start_harder_than_freshers(blueprint):
     exp, _ = make_flow(blueprint)
-    reach_clinical(exp, experience=("6", "ward"))
+    reach_clinical(exp, experience=("6", "ward at Sunrise Hospital"))
     fresher, _ = make_flow(blueprint)
     reach_clinical(fresher, experience=("0", "internship"))
     assert exp.state.areas[exp.state.current_area].level == 2
@@ -1111,7 +1111,7 @@ def test_experienced_candidates_start_harder_than_freshers(blueprint):
 
 def test_partial_answer_is_probed_then_the_flow_moves_on(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     first = flow.state.current_area
     m1 = flow.apply(grade("partial", covered=["x"], missing=["y"]))
     m2 = flow.apply(grade("partial", covered=["x"], missing=["y"]))
@@ -1124,7 +1124,7 @@ def test_partial_answer_is_probed_then_the_flow_moves_on(blueprint):
 
 def test_probe_directive_never_leaks_the_answer_as_a_statement(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     move = flow.apply(grade("partial", covered=[], missing=[]))
     assert "never say them" in move.directive and "without telling them the answer" in move.directive
 
@@ -1143,7 +1143,7 @@ def test_strong_first_answer_deepens_once_then_moves_on(blueprint):
 def test_thin_clinical_answer_probes_for_specifics(blueprint):
     """P2-09: A thin answer like 'I check vitals' without numbers or actions triggers probe instead of finishing."""
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("2", "ward"))
+    reach_clinical(flow, experience=("2", "ward at Sunrise Hospital"))
     first = flow.state.current_area
     # Candidate gives thin complete-sounding answer with 3 words and no numbers
     thin = TurnAnalysis(
@@ -1158,7 +1158,7 @@ def test_thin_clinical_answer_probes_for_specifics(blueprint):
 
 def test_wrong_answer_is_challenged_not_corrected(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     move = flow.apply(grade("incorrect", red_flags=["would not start CPR"]))
     assert move.kind == "challenge"
     assert "Do not give the correct answer" in move.directive
@@ -1172,7 +1172,7 @@ def test_wrong_answer_is_challenged_not_corrected(blueprint):
 
 def test_dont_know_moves_on_immediately(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("6", "ward"))
+    reach_clinical(flow, experience=("6", "ward at Sunrise Hospital"))
     first = flow.state.current_area
     m1 = flow.apply(TurnAnalysis(intent="dont_know"))
     assert flow.state.areas[first].outcome == "unknown"
@@ -1182,7 +1182,7 @@ def test_dont_know_moves_on_immediately(blueprint):
 
 def test_too_many_dont_knows_ends_the_clinical_round_gracefully(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     moves = [flow.apply(TurnAnalysis(intent="dont_know")) for _ in range(6)]
     assert any(m.kind == "wrap_up" for m in moves)
     assert flow.state.dont_know_total >= blueprint.limits.max_dont_know_total
@@ -1190,14 +1190,14 @@ def test_too_many_dont_knows_ends_the_clinical_round_gracefully(blueprint):
 
 def test_vague_answer_is_clarified_once(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     move = flow.apply(grade("partial", needs_clarification=True) if False else TurnAnalysis(clinical=ClinicalGrade(quality="partial", needs_clarification=True)))
     assert move.kind == "clarify"
 
 
 def test_contradiction_is_probed_and_the_clinical_decision_resumes_after(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     area = flow.state.current_area
     flow.state.claims.append("3 years in ICU")
     a = grade("partial", covered=["x"], missing=["y"])
@@ -1212,7 +1212,7 @@ def test_contradiction_is_probed_and_the_clinical_decision_resumes_after(bluepri
 
 def test_contradiction_together_with_dont_know_is_not_lost(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("6", "ward"))
+    reach_clinical(flow, experience=("6", "ward at Sunrise Hospital"))
     area = flow.state.current_area
     flow.state.claims.append("3 years ICU")
     a = TurnAnalysis(
@@ -1229,7 +1229,7 @@ def test_contradiction_together_with_dont_know_is_not_lost(blueprint):
 
 def test_contradiction_probes_are_capped(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     kinds = []
     for i in range(6):
         a = grade("partial", missing=["y"])
@@ -1334,7 +1334,7 @@ def test_partial_intelligibility_forces_phone_confirm(blueprint):
 
 def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     area = flow.state.current_area
     flow.apply(TurnAnalysis(intelligibility="unclear"))
     assert flow.state.areas[area].probes == 0 and not flow.state.areas[area].evidence
@@ -1352,7 +1352,7 @@ def test_unclear_turns_do_not_advance_or_penalise_clinical_progress(blueprint):
 )
 def test_requests_and_questions_do_not_advance_the_interview(blueprint, intent, kind):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     area, level = flow.state.current_area, flow.state.areas[flow.state.current_area].level
     move = flow.apply(TurnAnalysis(intent=intent))
     assert move.kind == kind
@@ -1421,7 +1421,9 @@ def test_experience_question_starts_from_the_resume_then_moves_to_nursing(bluepr
     assert check.kind == "resume_check"
     assert "Apollo" in check.directive
     assert flow.state.resume_crosscheck_done
-    clarified = flow.apply(TurnAnalysis(intent="answer", gist_en="The resume is old. I work on a ward now."))
+    named = flow.apply(TurnAnalysis(intent="answer", gist_en="The resume is old. I work on a ward now."))
+    assert named.kind == "ask_field" and flow.state.focus.get("workplace")  # "ward" never named a hospital
+    clarified = flow.apply(TurnAnalysis(intent="answer", raw_utterance="Sunrise Hospital"))
     assert clarified.kind in ("ask_care", "ask_care_item")
     clear_care(flow)
     assert flow.state.focus.get("type") == "experience_probe"
@@ -1468,7 +1470,7 @@ def test_wanting_to_stop_is_confirmed_before_ending(blueprint):
 
 def test_long_silence_escalates_then_ends_as_incomplete(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     kinds: list[str] = []
     nudge_directive = ""
     for level in (1, 2, 3, 4):
@@ -1627,7 +1629,7 @@ def test_endpointing_hold_short_answer_cap(blueprint):
 
 def test_closing_offers_questions_then_says_goodbye(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     entered = None
     for _ in range(40):
         if flow.stage != "clinical":
@@ -1669,7 +1671,7 @@ def test_thanks_after_a_closing_answer_ends_once(blueprint):
 
 def test_clinical_round_stops_after_the_target_number_of_areas(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     for _ in range(60):
         if flow.stage != "clinical":
             break
@@ -1680,7 +1682,7 @@ def test_clinical_round_stops_after_the_target_number_of_areas(blueprint):
 
 def test_hard_time_cap_ends_the_interview(blueprint):
     flow, clock = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     clock.t = blueprint.limits.hard_cap_minutes * 60 + 1
     move = flow.apply(grade("partial", missing=["y"]))
     assert move.completed and flow.state.outcome == "time"
@@ -1699,7 +1701,7 @@ def test_running_over_the_clinical_budget_stops_deepening_and_probing(blueprint)
 
 def test_state_round_trips_through_json_and_a_new_flow_continues_the_same_interview(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     flow.apply(grade("partial", covered=["a"], missing=["b"]))
     saved = json.loads(json.dumps(flow.state.to_dict()))
 
@@ -1789,7 +1791,7 @@ def test_heuristic_short_haan_is_filler_unless_confirming():
 
 def test_analysis_payload_carries_the_rubric_only_for_the_current_question(blueprint):
     flow, _ = make_flow(blueprint)
-    reach_clinical(flow, experience=("1", "ward"))
+    reach_clinical(flow, experience=("1", "ward at Sunrise Hospital"))
     payload = json.loads(flow.analysis_payload("answer text", "question text", []))
     assert payload["stage"] == "clinical"
     ctx = payload["clinical_context"]
